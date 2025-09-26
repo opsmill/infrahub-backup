@@ -351,16 +351,8 @@ func (iops *InfrahubOps) backupDatabase(backupDir string) error {
 		return fmt.Errorf("failed to backup neo4j: %w", err)
 	}
 
-	// Get container ID and copy backup
-	containerID, err := iops.composeExec("ps", "-q", "database")
-	if err != nil {
-		return fmt.Errorf("failed to get database container ID: %w", err)
-	}
-
-	executor := NewCommandExecutor(iops.logger)
-	if err := executor.runCommandQuiet("docker", "cp",
-		fmt.Sprintf("%s:/tmp/infrahubops", strings.TrimSpace(containerID)),
-		filepath.Join(backupDir, "database")); err != nil {
+	// Copy backup
+	if _, err := iops.composeExec("cp", "database:/tmp/infrahubops", filepath.Join(backupDir, "database")); err != nil {
 		return fmt.Errorf("failed to copy database backup: %w", err)
 	}
 
@@ -381,16 +373,8 @@ func (iops *InfrahubOps) backupTaskManagerDB(backupDir string) error {
 		return fmt.Errorf("failed to create postgresql dump: %w", err)
 	}
 
-	// Get container ID and copy dump
-	containerID, err := iops.composeExec("ps", "-q", "task-manager-db")
-	if err != nil {
-		return fmt.Errorf("failed to get task-manager-db container ID: %w", err)
-	}
-
-	executor := NewCommandExecutor(iops.logger)
-	if err := executor.runCommandQuiet("docker", "cp",
-		fmt.Sprintf("%s:/tmp/infrahubops_prefect.dump", strings.TrimSpace(containerID)),
-		filepath.Join(backupDir, "prefect.dump")); err != nil {
+	// Copy dump
+	if _, err := iops.composeExec("cp", "task-manager-db:/tmp/infrahubops_prefect.dump", filepath.Join(backupDir, "prefect.dump")); err != nil {
 		return fmt.Errorf("failed to copy postgresql dump: %w", err)
 	}
 
@@ -674,18 +658,9 @@ func (iops *InfrahubOps) restorePostgreSQL(workDir string) error {
 		return fmt.Errorf("failed to start task-manager-db: %w", err)
 	}
 
-	// Get container ID
-	containerID, err := iops.composeExec("ps", "-q", "task-manager-db")
-	if err != nil {
-		return fmt.Errorf("failed to get task-manager-db container ID: %w", err)
-	}
-
-	executor := NewCommandExecutor(iops.logger)
-	containerID = strings.TrimSpace(containerID)
-
 	// Copy dump to container
 	dumpPath := filepath.Join(workDir, "backup", "prefect.dump")
-	if err := executor.runCommandQuiet("docker", "cp", dumpPath, fmt.Sprintf("%s:/tmp/infrahubops_prefect.dump", containerID)); err != nil {
+	if _, err := iops.composeExec("cp", dumpPath, "task-manager-db:/tmp/infrahubops_prefect.dump"); err != nil {
 		return fmt.Errorf("failed to copy dump to container: %w", err)
 	}
 
@@ -724,18 +699,9 @@ func (iops *InfrahubOps) restoreNeo4j(workDir string) error {
 		return fmt.Errorf("failed to start database: %w", err)
 	}
 
-	// Get container ID
-	containerID, err := iops.composeExec("ps", "-q", "database")
-	if err != nil {
-		return fmt.Errorf("failed to get database container ID: %w", err)
-	}
-
-	executor := NewCommandExecutor(iops.logger)
-	containerID = strings.TrimSpace(containerID)
-
 	// Copy backup to container
 	backupPath := filepath.Join(workDir, "backup", "database")
-	if err := executor.runCommandQuiet("docker", "cp", backupPath, fmt.Sprintf("%s:/tmp/infrahubops", containerID)); err != nil {
+	if _, err := iops.composeExec("cp", backupPath, "database:/tmp/infrahubops"); err != nil {
 		return fmt.Errorf("failed to copy backup to container: %w", err)
 	}
 
