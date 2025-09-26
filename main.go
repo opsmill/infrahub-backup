@@ -3,6 +3,7 @@ package main
 import (
 	"archive/tar"
 	"compress/gzip"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,6 +44,11 @@ type InfrahubOps struct {
 
 // Logger provides colored logging functionality
 type Logger struct{}
+
+// Embedded scripts
+//
+//go:embed scripts/clean_old_tasks.py
+var cleanOldTasksScript string
 
 const (
 	ColorReset  = "\033[0m"
@@ -792,8 +799,9 @@ func formatBytes(bytes int64) string {
 // CLI Commands
 func createRootCommand(app *InfrahubOps) *cobra.Command {
 	rootCmd := &cobra.Command{
-		Use:   "infrahub-ops",
-		Short: "Infrahub Operations Tool - Phase 1 MVP",
+		Use:     "infrahub-ops",
+		Aliases: []string{"infrahubops"},
+		Short:   "Infrahub Operations Tool - Phase 1 MVP",
 		Long: `Infrahub Operations Tool - Phase 1 MVP
 
 This tool provides backup and restore operations for Infrahub infrastructure.
@@ -898,6 +906,108 @@ func createEnvironmentCommand(app *InfrahubOps) *cobra.Command {
 	return envCmd
 }
 
+// Task Manager (Prefect) maintenance
+func (iops *InfrahubOps) flushFlowRuns(daysToKeep, batchSize int) error {
+	if err := iops.checkPrerequisites(); err != nil {
+		return err
+	}
+	if err := iops.detectEnvironment(); err != nil {
+		return err
+	}
+
+	if daysToKeep <= 0 {
+		daysToKeep = 30
+	}
+	if batchSize <= 0 {
+		batchSize = 200
+	}
+
+	iops.logger.Info("Flushing Prefect flow runs older than %d days (batch size %d)...", daysToKeep, batchSize)
+
+	// Write embedded script to a temporary file
+	tmpFile, err := os.CreateTemp("", "infrahubops_clean_old_tasks_*.py")
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	if _, err := tmpFile.WriteString(cleanOldTasksScript); err != nil {
+		tmpFile.Close()
+		return fmt.Errorf("failed to write script: %w", err)
+	}
+	tmpFile.Close()
+
+	targetPath := "/tmp/infrahubops_clean_old_tasks.py"
+	if _, err := iops.composeExec("cp", tmpFile.Name(), fmt.Sprintf("task-worker:%s", targetPath)); err != nil {
+		return fmt.Errorf("failed to copy script to container: %w", err)
+	}
+
+	// Execute script inside container
+	iops.logger.Info("Executing cleanup script inside task-worker container...")
+
+	var output string
+	if output, err = iops.composeExec("exec", "-T", "task-worker", "python", targetPath, strconv.Itoa(daysToKeep), strconv.Itoa(batchSize)); err != nil {
+		return fmt.Errorf("failed to execute cleanup script: %w", err)
+	}
+
+	// (Best effort) cleanup script inside container
+	_, _ = iops.composeExec("exec", "-T", "task-worker", "rm", "-f", targetPath)
+
+	iops.logger.Info(output)
+	iops.logger.Success("Flow runs cleanup completed:")
+
+	return nil
+}
+
+func createTaskManagerCommand(app *InfrahubOps) *cobra.Command {
+	taskManagerCmd := &cobra.Command{
+		Use:   "taskmanager",
+		Short: "Task manager (Prefect) maintenance operations",
+		Long:  "Maintenance operations for the task manager (Prefect) such as flushing old flow runs.",
+	}
+
+	flushCmd := &cobra.Command{
+		Use:   "flush",
+		Short: "Flush / cleanup operations",
+		Long:  "Cleanup operations for Prefect resources.",
+	}
+
+	flowRunsCmd := &cobra.Command{
+		Use:   "flow-runs [days_to_keep] [batch_size]",
+		Short: "Delete completed/failed/cancelled flow runs older than the retention period",
+		Args:  cobra.RangeArgs(0, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			days := 30
+			batch := 200
+			var err error
+			if len(args) >= 1 {
+				days, err = strconv.Atoi(args[0])
+				if err != nil {
+					return fmt.Errorf("invalid days_to_keep value: %v", err)
+				}
+			}
+			if len(args) == 2 {
+				batch, err = strconv.Atoi(args[1])
+				if err != nil {
+					return fmt.Errorf("invalid batch_size value: %v", err)
+				}
+			}
+			return app.flushFlowRuns(days, batch)
+		},
+		Example: `# Use defaults (30 days retention, batch size 200)
+infrahubops taskmanager flush flow-runs
+
+# Keep last 45 days
+infrahubops taskmanager flush flow-runs 45
+
+# Keep last 60 days with batch size 500
+infrahubops taskmanager flush flow-runs 60 500`,
+	}
+
+	flushCmd.AddCommand(flowRunsCmd)
+	taskManagerCmd.AddCommand(flushCmd)
+	return taskManagerCmd
+}
+
 func main() {
 	app := NewInfrahubOps()
 	rootCmd := createRootCommand(app)
@@ -905,6 +1015,7 @@ func main() {
 	// Add subcommands
 	rootCmd.AddCommand(createBackupCommand(app))
 	rootCmd.AddCommand(createEnvironmentCommand(app))
+	rootCmd.AddCommand(createTaskManagerCommand(app))
 
 	// Set up configuration
 	cobra.OnInitialize(func() {
