@@ -1,13 +1,10 @@
 package main
 
 import (
-	"archive/tar"
-	"compress/gzip"
 	_ "embed"
 	"encoding/json"
 
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -46,8 +43,7 @@ var cleanStaleTasksScript string
 // NewInfrahubOps creates a new InfrahubOps instance
 func NewInfrahubOps() *InfrahubOps {
 	config := &Configuration{
-		InfrahubImage: getEnvOrDefault("INFRAHUB_IMAGE", "infrahub:latest"),
-		BackupDir:     getEnvOrDefault("BACKUP_DIR", filepath.Join(getCurrentDir(), "infrahub_backups")),
+		BackupDir: getEnvOrDefault("BACKUP_DIR", filepath.Join(getCurrentDir(), "infrahub_backups")),
 	}
 	return &InfrahubOps{
 		config: config,
@@ -398,7 +394,7 @@ func (iops *InfrahubOps) createBackup() error {
 
 	// Create tarball
 	logrus.Info("Creating backup archive...")
-	if err := iops.createTarball(backupPath, workDir, "backup/"); err != nil {
+	if err := createTarball(backupPath, workDir, "backup/"); err != nil {
 		return fmt.Errorf("failed to create archive: %w", err)
 	}
 
@@ -412,107 +408,7 @@ func (iops *InfrahubOps) createBackup() error {
 	return nil
 }
 
-func (iops *InfrahubOps) createTarball(filename, sourceDir, pathInTar string) error {
-	file, err := os.Create(filename)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	gw := gzip.NewWriter(file)
-	defer gw.Close()
-
-	tw := tar.NewWriter(gw)
-	defer tw.Close()
-
-	return filepath.Walk(filepath.Join(sourceDir, pathInTar), func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		header, err := tar.FileInfoHeader(info, "")
-		if err != nil {
-			return err
-		}
-
-		relPath, err := filepath.Rel(sourceDir, path)
-		if err != nil {
-			return err
-		}
-		header.Name = filepath.ToSlash(relPath)
-
-		if err := tw.WriteHeader(header); err != nil {
-			return err
-		}
-
-		if info.IsDir() {
-			return nil
-		}
-
-		file, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		defer file.Close()
-
-		_, err = io.Copy(tw, file)
-		return err
-	})
-}
-
 // Restore operations
-
-func (iops *InfrahubOps) extractTarball(filename, destDir string) error {
-	file, err := os.Open(filename)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	gr, err := gzip.NewReader(file)
-	if err != nil {
-		return err
-	}
-	defer gr.Close()
-
-	tr := tar.NewReader(gr)
-
-	for {
-		header, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return err
-		}
-
-		target := filepath.Join(destDir, header.Name)
-
-		switch header.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0755); err != nil {
-				return err
-			}
-		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-				return err
-			}
-
-			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY, os.FileMode(header.Mode))
-			if err != nil {
-				return err
-			}
-
-			if _, err := io.Copy(f, tr); err != nil {
-				f.Close()
-				return err
-			}
-			f.Close()
-		}
-	}
-
-	return nil
-}
 
 func (iops *InfrahubOps) wipeTransientData() error {
 	logrus.Info("Wiping cache and message queue data...")
@@ -550,7 +446,7 @@ func (iops *InfrahubOps) restoreBackup(backupFile string) error {
 
 	// Extract backup
 	logrus.Info("Extracting backup archive...")
-	if err := iops.extractTarball(backupFile, workDir); err != nil {
+	if err := extractTarball(backupFile, workDir); err != nil {
 		return fmt.Errorf("failed to extract backup: %w", err)
 	}
 
