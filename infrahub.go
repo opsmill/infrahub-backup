@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"embed"
+	"regexp"
 
 	"fmt"
 	"os"
@@ -11,8 +12,21 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/sirupsen/logrus"
 )
+
+// Configuration holds the application configuration
+type Configuration struct {
+	BackupDir            string
+	DockerComposeProject string
+	Neo4jUsername        string
+	Neo4jPassword        string
+	Neo4jDatabase        string
+	PostgresUsername     string
+	PostgresPassword     string
+	PostgresDatabase     string
+}
 
 // InfrahubOps is the main application struct
 type InfrahubOps struct {
@@ -172,6 +186,83 @@ func (iops *InfrahubOps) detectK8sNamespaces() ([]string, error) {
 	return namespaces, nil
 }
 
+func (iops *InfrahubOps) fetchDatabaseCredentials() error {
+	iops.config.Neo4jDatabase = os.Getenv("INFRAHUB_DB_DATABASE")
+	iops.config.Neo4jUsername = os.Getenv("INFRAHUB_DB_USERNAME")
+	iops.config.Neo4jPassword = os.Getenv("INFRAHUB_DB_PASSWORD")
+
+	var connConfig *pgx.ConnConfig
+	var err error
+	if connConfig, err = pgx.ParseConfig(os.Getenv("PREFECT_API_DATABASE_CONNECTION_URL")); err != nil {
+		return fmt.Errorf("could not parse PREFECT_API_DATABASE_CONNECTION_URL")
+	} else {
+		iops.config.PostgresDatabase = connConfig.Database
+		iops.config.PostgresUsername = connConfig.User
+		iops.config.PostgresPassword = connConfig.Password
+	}
+
+	if iops.config.Neo4jDatabase == "" {
+		// Get Neo4j credentials from infrahub-server env
+		envOut, err := iops.composeExec("exec", "-T", "infrahub-server", "env")
+		if err != nil {
+			logrus.Warnf("Could not get infrahub-server env, using default Neo4j credentials: %v", err)
+		}
+
+		iops.config.Neo4jDatabase = "neo4j"
+		iops.config.Neo4jUsername = "neo4j"
+		iops.config.Neo4jPassword = "admin"
+
+		if envOut != "" {
+			for _, line := range strings.Split(envOut, "\n") {
+				if after, ok := strings.CutPrefix(line, "INFRAHUB_DB_USERNAME="); ok {
+					iops.config.Neo4jUsername = after
+				} else if after, ok := strings.CutPrefix(line, "INFRAHUB_DB_PASSWORD="); ok {
+					iops.config.Neo4jPassword = after
+				} else if after, ok := strings.CutPrefix(line, "INFRAHUB_DB_DATABASE="); ok {
+					iops.config.Neo4jDatabase = after
+				}
+			}
+		}
+	}
+
+	if iops.config.PostgresDatabase == "" {
+		// Get Neo4j credentials from infrahub-server env
+		envOut, err := iops.composeExec("exec", "-T", "task-manager", "env")
+		if err != nil {
+			logrus.Warnf("Could not get task-manager env, using default Postgres credentials: %v", err)
+		}
+
+		iops.config.PostgresDatabase = "prefect"
+		iops.config.PostgresUsername = "postgres"
+		iops.config.PostgresPassword = "prefect"
+
+		if envOut != "" {
+			for _, line := range strings.Split(envOut, "\n") {
+				if after, ok := strings.CutPrefix(line, "PREFECT_API_DATABASE_CONNECTION_URL="); ok {
+					postgresDsn := after
+
+					// contains postgres+asyncpg, which is not go compatible...
+					re := regexp.MustCompile("postgres(.*)://(.*)")
+					postgresDsn = re.ReplaceAllString(postgresDsn, "postgres://$2")
+
+					if connConfig, err = pgx.ParseConfig(postgresDsn); err != nil {
+						return fmt.Errorf("could not parse PREFECT_API_DATABASE_CONNECTION_URL within task-manager")
+					} else {
+						logrus.Info(connConfig.Database)
+						iops.config.PostgresDatabase = connConfig.Database
+						iops.config.PostgresUsername = connConfig.User
+						iops.config.PostgresPassword = connConfig.Password
+					}
+
+					break
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
 // Environment detection
 func (iops *InfrahubOps) detectEnvironment() error {
 	logrus.Info("Detecting Infrahub deployment environment...")
@@ -193,6 +284,10 @@ func (iops *InfrahubOps) detectEnvironment() error {
 		} else {
 			iops.config.DockerComposeProject = dockerProjects[0]
 			logrus.Infof("Using project: %s", iops.config.DockerComposeProject)
+		}
+
+		if err := iops.fetchDatabaseCredentials(); err != nil {
+			return fmt.Errorf("could not fetch database credentials: %w", err)
 		}
 
 		return nil

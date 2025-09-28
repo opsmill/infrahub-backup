@@ -71,13 +71,16 @@ func (iops *InfrahubOps) backupDatabase(backupDir string, backupMetadata string)
 	logrus.Info("Backing up Neo4j database...")
 
 	// Create backup directory in container
-	if _, err := iops.composeExec("exec", "-T", "database", "mkdir", "/tmp/infrahubops"); err != nil {
+	if _, err := iops.composeExec("exec", "-T", "database", "mkdir", "-p", "/tmp/infrahubops"); err != nil {
 		return fmt.Errorf("failed to create backup directory: %w", err)
 	}
 	defer iops.composeExec("exec", "-T", "database", "rm", "-rf", "/tmp/infrahubops")
 
 	// Create backup using neo4j-admin
-	if output, err := iops.composeExec("exec", "-T", "database", "neo4j-admin", "database", "backup", "--include-metadata="+backupMetadata, "--to-path=/tmp/infrahubops", "neo4j"); err != nil {
+	if output, err := iops.composeExec(
+		"exec", "-T", "database", "neo4j-admin", "database", "backup",
+		"--include-metadata="+backupMetadata, "--to-path=/tmp/infrahubops", iops.config.Neo4jDatabase,
+	); err != nil {
 		return fmt.Errorf("failed to backup neo4j: %w\nOutput: %v", err, output)
 	}
 
@@ -94,7 +97,11 @@ func (iops *InfrahubOps) backupTaskManagerDB(backupDir string) error {
 	logrus.Info("Backing up PostgreSQL database...")
 
 	// Create dump
-	if output, err := iops.composeExec("exec", "-T", "task-manager-db", "pg_dump", "-Fc", "-U", "postgres", "-d", "prefect", "-f", "/tmp/infrahubops_prefect.dump"); err != nil {
+	if output, err := iops.composeExec(
+		"exec", "-T", "-e", "PGPASSWORD="+iops.config.PostgresPassword, "task-manager-db", "pg_dump", "-Fc",
+		"-U", iops.config.PostgresUsername, "-d", iops.config.PostgresDatabase,
+		"-f", "/tmp/infrahubops_prefect.dump",
+	); err != nil {
 		return fmt.Errorf("failed to create postgresql dump: %w\nOutput: %v", err, output)
 	}
 	defer iops.composeExec("exec", "-T", "task-manager-db", "rm", "/tmp/infrahubops_prefect.dump")
@@ -389,7 +396,11 @@ func (iops *InfrahubOps) restorePostgreSQL(workDir string) error {
 	defer iops.composeExec("exec", "-T", "task-manager-db", "rm", "/tmp/infrahubops_prefect.dump")
 
 	// Restore database
-	if output, err := iops.composeExec("exec", "-T", "task-manager-db", "pg_restore", "-d", "postgres", "-U", "postgres", "--clean", "--create", "/tmp/infrahubops_prefect.dump"); err != nil {
+	if output, err := iops.composeExec(
+		"exec", "-T", "-e", "PGPASSWORD="+iops.config.PostgresPassword, "task-manager-db", "pg_restore",
+		"-d", "postgres", "-U", iops.config.PostgresUsername,
+		"--clean", "--create", "/tmp/infrahubops_prefect.dump",
+	); err != nil {
 		return fmt.Errorf("failed to restore postgresql: %w\nOutput: %v", err, output)
 	}
 
@@ -412,22 +423,36 @@ func (iops *InfrahubOps) restoreNeo4j(workDir string) error {
 	}
 
 	// Stop neo4j database
-	if _, err := iops.composeExec("exec", "-T", "database", "cypher-shell", "-u", "neo4j", "-padmin", "-d", "system", "stop database neo4j"); err != nil {
+	if _, err := iops.composeExec(
+		"exec", "-T", "database", "cypher-shell",
+		"-u", iops.config.Neo4jUsername, "-p"+iops.config.Neo4jPassword, "-d", "system",
+		"stop database "+iops.config.Neo4jDatabase,
+	); err != nil {
 		return fmt.Errorf("failed to stop neo4j database: %w", err)
 	}
 
 	// Restore database
-	if output, err := iops.composeExec("exec", "-T", "-u", "neo4j", "database", "neo4j-admin", "database", "restore", "--overwrite-destination=true", "--from-path=/tmp/infrahubops", "neo4j"); err != nil {
+	if output, err := iops.composeExec(
+		"exec", "-T", "-u", "neo4j", "database",
+		"neo4j-admin", "database", "restore", "--overwrite-destination=true",
+		"--from-path=/tmp/infrahubops", iops.config.Neo4jDatabase,
+	); err != nil {
 		return fmt.Errorf("failed to restore neo4j: %w\nOutput: %v", err, output)
 	}
 
 	// Restore metadata
-	if output, err := iops.composeExec("exec", "-T", "-u", "neo4j", "database", "sh", "-c", "cat /data/scripts/neo4j/restore_metadata.cypher | cypher-shell -u neo4j -padmin -d system --param \"database => 'databasename'\""); err != nil {
+	if output, err := iops.composeExec(
+		"exec", "-T", "-u", "neo4j", "database", "sh", "-c",
+		"cat /data/scripts/neo4j/restore_metadata.cypher | cypher-shell -u "+iops.config.Neo4jUsername+" -p"+iops.config.Neo4jPassword+" -d system --param \"database => '"+iops.config.Neo4jDatabase+"'\"",
+	); err != nil {
 		return fmt.Errorf("failed to restore neo4j metadata: %w\nOutput: %v", err, output)
 	}
 
 	// Start neo4j database
-	if _, err := iops.composeExec("exec", "-T", "database", "cypher-shell", "-u", "neo4j", "-padmin", "-d", "system", "start database neo4j"); err != nil {
+	if _, err := iops.composeExec(
+		"exec", "-T", "database", "cypher-shell",
+		"-u", iops.config.Neo4jUsername, "-p"+iops.config.Neo4jPassword, "-d", "system", "start database "+iops.config.Neo4jDatabase,
+	); err != nil {
 		return fmt.Errorf("failed to start neo4j database: %w", err)
 	}
 

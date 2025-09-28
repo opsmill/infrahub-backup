@@ -10,12 +10,6 @@ import (
 	"github.com/spf13/viper"
 )
 
-// Configuration holds the application configuration
-type Configuration struct {
-	BackupDir            string
-	DockerComposeProject string
-}
-
 // CLI Commands
 func createRootCommand(app *InfrahubOps) *cobra.Command {
 	rootCmd := &cobra.Command{
