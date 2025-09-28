@@ -16,6 +16,8 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+const metadataVersion = 2025092500
+
 // BackupMetadata represents the backup metadata structure
 type BackupMetadata struct {
 	MetadataVersion int               `json:"metadata_version"`
@@ -197,10 +199,10 @@ func (iops *InfrahubOps) generateBackupFilename() string {
 
 func (iops *InfrahubOps) createBackupMetadata(backupID string) *BackupMetadata {
 	return &BackupMetadata{
-		MetadataVersion: 1,
+		MetadataVersion: metadataVersion,
 		BackupID:        backupID,
 		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
-		ToolVersion:     "1.0.0",
+		ToolVersion:     BuildRevision(),
 		InfrahubVersion: iops.getInfrahubVersion(),
 		Components:      []string{"database", "task-manager-db", "artifacts"},
 	}
