@@ -3,6 +3,7 @@ package main
 import (
 	"archive/tar"
 	"compress/gzip"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -30,12 +31,13 @@ type Configuration struct {
 
 // BackupMetadata represents the backup metadata structure
 type BackupMetadata struct {
-	MetadataVersion int      `json:"metadata_version"`
-	BackupID        string   `json:"backup_id"`
-	CreatedAt       string   `json:"created_at"`
-	ToolVersion     string   `json:"tool_version"`
-	InfrahubVersion string   `json:"infrahub_version"`
-	Components      []string `json:"components"`
+	MetadataVersion int               `json:"metadata_version"`
+	BackupID        string            `json:"backup_id"`
+	CreatedAt       string            `json:"created_at"`
+	ToolVersion     string            `json:"tool_version"`
+	InfrahubVersion string            `json:"infrahub_version"`
+	Components      []string          `json:"components"`
+	Checksums       map[string]string `json:"checksums,omitempty"`
 }
 
 // InfrahubOps is the main application struct
@@ -354,15 +356,6 @@ func (iops *InfrahubOps) createBackup() error {
 	backupID := strings.TrimSuffix(backupFilename, ".tar.gz")
 	metadata := iops.createBackupMetadata(backupID)
 
-	metadataBytes, err := json.MarshalIndent(metadata, "", "    ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal metadata: %w", err)
-	}
-
-	if err := os.WriteFile(filepath.Join(backupDir, "backup_information.json"), metadataBytes, 0644); err != nil {
-		return fmt.Errorf("failed to write metadata: %w", err)
-	}
-
 	// Backup databases
 	if err := iops.backupDatabase(backupDir); err != nil {
 		return err
@@ -370,6 +363,44 @@ func (iops *InfrahubOps) createBackup() error {
 
 	if err := iops.backupTaskManagerDB(backupDir); err != nil {
 		return err
+	}
+
+	// Calculate checksums for backup files
+	checksums := make(map[string]string)
+	neo4jDir := filepath.Join(backupDir, "database")
+	prefectPath := filepath.Join(backupDir, "prefect.dump")
+
+	// Calculate checksum for each file in Neo4j backup directory
+	err = filepath.Walk(neo4jDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			rel, _ := filepath.Rel(backupDir, path)
+			if sum, err := calculateSHA256(path); err == nil {
+				checksums[rel] = sum
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to calculate Neo4j backup checksums: %w", err)
+	}
+
+	// Calculate checksum for Prefect DB dump
+	if sum, err := calculateSHA256(prefectPath); err == nil {
+		checksums["prefect.dump"] = sum
+	}
+
+	metadata.Checksums = checksums
+
+	metadataBytes, err := json.MarshalIndent(metadata, "", "    ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal metadata: %w", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(backupDir, "backup_information.json"), metadataBytes, 0644); err != nil {
+		return fmt.Errorf("failed to write metadata: %w", err)
 	}
 
 	// TODO: Backup artifact store
@@ -440,6 +471,21 @@ func (iops *InfrahubOps) createTarball(filename, sourceDir, pathInTar string) er
 }
 
 // Restore operations
+// calculateSHA256 calculates the SHA256 checksum of a file
+func calculateSHA256(filePath string) (string, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, file); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", hasher.Sum(nil)), nil
+}
+
 func (iops *InfrahubOps) extractTarball(filename, destDir string) error {
 	file, err := os.Open(filename)
 	if err != nil {
@@ -538,14 +584,51 @@ func (iops *InfrahubOps) restoreBackup(backupFile string) error {
 		return fmt.Errorf("invalid backup file: missing metadata")
 	}
 
-	// Show backup info
+	// Read and parse backup info
 	metadataBytes, err := os.ReadFile(metadataPath)
 	if err != nil {
 		return fmt.Errorf("failed to read metadata: %w", err)
 	}
+	var metadata BackupMetadata
+	if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
+		return fmt.Errorf("failed to parse metadata: %w", err)
+	}
 
 	logrus.Info("Backup metadata:")
 	fmt.Println(string(metadataBytes))
+
+	// Validate checksums for Neo4j backup files
+	for relPath, expectedSum := range metadata.Checksums {
+		if relPath == "prefect.dump" {
+			continue
+		}
+		filePath := filepath.Join(workDir, "backup", relPath)
+		if _, err := os.Stat(filePath); err != nil {
+			return fmt.Errorf("missing backup file: %s", relPath)
+		}
+		sum, err := calculateSHA256(filePath)
+		if err != nil {
+			return fmt.Errorf("failed to calculate checksum for %s: %w", relPath, err)
+		}
+		if sum != expectedSum {
+			return fmt.Errorf("checksum mismatch for %s: expected %s, got %s", relPath, expectedSum, sum)
+		}
+	}
+
+	// Validate checksum for Prefect DB dump
+	prefectPath := filepath.Join(workDir, "backup", "prefect.dump")
+	if expectedSum, ok := metadata.Checksums["prefect.dump"]; ok {
+		if _, err := os.Stat(prefectPath); err != nil {
+			return fmt.Errorf("missing backup file: prefect.dump")
+		}
+		sum, err := calculateSHA256(prefectPath)
+		if err != nil {
+			return fmt.Errorf("failed to calculate checksum for prefect.dump: %w", err)
+		}
+		if sum != expectedSum {
+			return fmt.Errorf("checksum mismatch for prefect.dump: expected %s, got %s", expectedSum, sum)
+		}
+	}
 
 	// Wipe transient data
 	iops.wipeTransientData()
