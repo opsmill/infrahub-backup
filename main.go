@@ -903,7 +903,7 @@ func (iops *InfrahubOps) flushFlowRuns(daysToKeep, batchSize int) error {
 	tmpFile.Close()
 
 	targetPath := "/tmp/infrahubops_clean_old_tasks.py"
-	if _, err := iops.composeExec("cp", tmpFile.Name(), fmt.Sprintf("task-worker:%s", targetPath)); err != nil {
+	if _, err := iops.composeExec("cp", "-a", tmpFile.Name(), fmt.Sprintf("task-worker:%s", targetPath)); err != nil {
 		return fmt.Errorf("failed to copy script to container: %w", err)
 	}
 
@@ -912,7 +912,7 @@ func (iops *InfrahubOps) flushFlowRuns(daysToKeep, batchSize int) error {
 
 	var output string
 	if output, err = iops.composeExec("exec", "-T", "task-worker", "python", targetPath, strconv.Itoa(daysToKeep), strconv.Itoa(batchSize)); err != nil {
-		return fmt.Errorf("failed to execute cleanup script: %w", err)
+		return fmt.Errorf("failed to execute cleanup script: %w %v", err, output)
 	}
 
 	// (Best effort) cleanup script inside container
