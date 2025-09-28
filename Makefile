@@ -4,7 +4,7 @@
 BINARY_NAME=infrahub-ops
 BUILD_DIR=bin
 VERSION?=1.0.0
-LDFLAGS=-ldflags "-X main.version=$(VERSION)"
+LDFLAGS=-ldflags "-X main.version=$(VERSION) -s -w"
 
 # Default target
 help: ## Display this help message
