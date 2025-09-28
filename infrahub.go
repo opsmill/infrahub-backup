@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"embed"
 	"encoding/json"
 
@@ -65,6 +66,47 @@ func (ce *CommandExecutor) runCommand(name string, args ...string) (string, erro
 func (ce *CommandExecutor) runCommandQuiet(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	return cmd.Run()
+}
+
+func (ce *CommandExecutor) runCommandWithStream(name string, args ...string) (string, error) {
+	cmd := exec.Command(name, args...)
+	stdout, _ := cmd.StdoutPipe()
+	stderr, _ := cmd.StderrPipe()
+
+	if err := cmd.Start(); err != nil {
+		return "", err
+	}
+
+	var output string
+	outScanner := bufio.NewScanner(stdout)
+	errScanner := bufio.NewScanner(stderr)
+
+	done := make(chan struct{}, 2)
+
+	go func() {
+		for outScanner.Scan() {
+			line := outScanner.Text()
+			logrus.Info(line)
+			output += line + "\n"
+		}
+		done <- struct{}{}
+	}()
+
+	go func() {
+		for errScanner.Scan() {
+			line := errScanner.Text()
+			logrus.Info(line)
+			output += line + "\n"
+		}
+		done <- struct{}{}
+	}()
+
+	// Wait for both stdout and stderr to finish
+	<-done
+	<-done
+
+	err := cmd.Wait()
+	return output, err
 }
 
 // Prerequisites checker
@@ -233,6 +275,18 @@ func (iops *InfrahubOps) composeExec(args ...string) (string, error) {
 
 	cmd = append(cmd, args...)
 	return executor.runCommand("docker", cmd...)
+}
+
+func (iops *InfrahubOps) composeExecWithStream(args ...string) (string, error) {
+	executor := NewCommandExecutor()
+	cmd := []string{"compose"}
+
+	if iops.config.DockerComposeProject != "" {
+		cmd = append(cmd, "-p", iops.config.DockerComposeProject)
+	}
+
+	cmd = append(cmd, args...)
+	return executor.runCommandWithStream("docker", cmd...)
 }
 
 func (iops *InfrahubOps) stopAppContainers() error {
@@ -619,35 +673,34 @@ func (iops *InfrahubOps) restoreNeo4j(workDir string) error {
 	return nil
 }
 
-func (iops *InfrahubOps) executeScript(targetService string, scriptContent string, targetPath string, args ...string) (string, error) {
+func (iops *InfrahubOps) executeScript(targetService string, scriptContent string, targetPath string, args ...string) error {
 	// Write embedded script to a temporary file
 	tmpFile, err := os.CreateTemp("", "infrahubops_clean_old_tasks_*.py")
 	if err != nil {
-		return "", fmt.Errorf("failed to create temp file: %w", err)
+		return fmt.Errorf("failed to create temp file: %w", err)
 	}
 	defer os.Remove(tmpFile.Name())
 	if _, err := tmpFile.WriteString(scriptContent); err != nil {
 		tmpFile.Close()
-		return "", fmt.Errorf("failed to write script: %w", err)
+		return fmt.Errorf("failed to write script: %w", err)
 	}
 	tmpFile.Close()
 
 	if _, err := iops.composeExec("cp", "-a", tmpFile.Name(), fmt.Sprintf("%s:%s", targetService, targetPath)); err != nil {
-		return "", fmt.Errorf("failed to copy script to container: %w", err)
+		return fmt.Errorf("failed to copy script to container: %w", err)
 	}
 
 	// Execute script inside container
 	logrus.Info("Executing cleanup script inside task-worker container...")
 
-	var output string
-	if output, err = iops.composeExec(append([]string{"exec", "-T", targetService}, args...)...); err != nil {
-		return "", fmt.Errorf("failed to execute cleanup script: %w %v", err, output)
+	if _, err := iops.composeExecWithStream(append([]string{"exec", "-T", targetService}, args...)...); err != nil {
+		return fmt.Errorf("failed to execute cleanup script: %w", err)
 	}
 
 	// (Best effort) cleanup script inside container
 	_, _ = iops.composeExec("exec", "-T", targetService, "rm", "-f", targetPath)
 
-	return output, nil
+	return nil
 }
 
 // Task Manager (Prefect) maintenance
@@ -674,12 +727,10 @@ func (iops *InfrahubOps) flushFlowRuns(daysToKeep, batchSize int) error {
 		return fmt.Errorf("could not retrieve script: %w", err)
 	}
 
-	var output string
-	if output, err = iops.executeScript("task-worker", string(scriptContent), "/tmp/infrahubops_clean_old_tasks.py", "python", "/tmp/infrahubops_clean_old_tasks.py", strconv.Itoa(daysToKeep), strconv.Itoa(batchSize)); err != nil {
+	if err := iops.executeScript("task-worker", string(scriptContent), "/tmp/infrahubops_clean_old_tasks.py", "python", "-u", "/tmp/infrahubops_clean_old_tasks.py", strconv.Itoa(daysToKeep), strconv.Itoa(batchSize)); err != nil {
 		return err
 	}
 
-	logrus.Info(output)
 	logrus.Info("Flow runs cleanup completed:")
 
 	return nil
@@ -708,12 +759,10 @@ func (iops *InfrahubOps) flushStaleRuns(daysToKeep, batchSize int) error {
 		return fmt.Errorf("could not retrieve script: %w", err)
 	}
 
-	var output string
-	if output, err = iops.executeScript("task-worker", string(scriptContent), "/tmp/infrahubops_clean_stale_tasks.py", "python", "/tmp/infrahubops_clean_stale_tasks.py", strconv.Itoa(daysToKeep), strconv.Itoa(batchSize)); err != nil {
+	if err := iops.executeScript("task-worker", string(scriptContent), "/tmp/infrahubops_clean_stale_tasks.py", "python", "-u", "/tmp/infrahubops_clean_stale_tasks.py", strconv.Itoa(daysToKeep), strconv.Itoa(batchSize)); err != nil {
 		return err
 	}
 
-	logrus.Info(output)
 	logrus.Info("Stale flow runs cleanup completed:")
 
 	return nil
