@@ -50,6 +50,9 @@ type Logger struct{}
 //go:embed scripts/clean_old_tasks.py
 var cleanOldTasksScript string
 
+//go:embed scripts/clean_stale_tasks.py
+var cleanStaleTasksScript string
+
 const (
 	ColorReset  = "\033[0m"
 	ColorRed    = "\033[31m"
@@ -872,6 +875,37 @@ func createEnvironmentCommand(app *InfrahubOps) *cobra.Command {
 	return envCmd
 }
 
+func (iops *InfrahubOps) executeScript(targetService string, scriptContent string, targetPath string, args ...string) (string, error) {
+	// Write embedded script to a temporary file
+	tmpFile, err := os.CreateTemp("", "infrahubops_clean_old_tasks_*.py")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp file: %w", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	if _, err := tmpFile.WriteString(scriptContent); err != nil {
+		tmpFile.Close()
+		return "", fmt.Errorf("failed to write script: %w", err)
+	}
+	tmpFile.Close()
+
+	if _, err := iops.composeExec("cp", "-a", tmpFile.Name(), fmt.Sprintf("%s:%s", targetService, targetPath)); err != nil {
+		return "", fmt.Errorf("failed to copy script to container: %w", err)
+	}
+
+	// Execute script inside container
+	iops.logger.Info("Executing cleanup script inside task-worker container...")
+
+	var output string
+	if output, err = iops.composeExec(append([]string{"exec", "-T", targetService}, args...)...); err != nil {
+		return "", fmt.Errorf("failed to execute cleanup script: %w %v", err, output)
+	}
+
+	// (Best effort) cleanup script inside container
+	_, _ = iops.composeExec("exec", "-T", targetService, "rm", "-f", targetPath)
+
+	return output, nil
+}
+
 // Task Manager (Prefect) maintenance
 func (iops *InfrahubOps) flushFlowRuns(daysToKeep, batchSize int) error {
 	if err := iops.checkPrerequisites(); err != nil {
@@ -881,7 +915,7 @@ func (iops *InfrahubOps) flushFlowRuns(daysToKeep, batchSize int) error {
 		return err
 	}
 
-	if daysToKeep <= 0 {
+	if daysToKeep < 0 {
 		daysToKeep = 30
 	}
 	if batchSize <= 0 {
@@ -890,36 +924,43 @@ func (iops *InfrahubOps) flushFlowRuns(daysToKeep, batchSize int) error {
 
 	iops.logger.Info("Flushing Prefect flow runs older than %d days (batch size %d)...", daysToKeep, batchSize)
 
-	// Write embedded script to a temporary file
-	tmpFile, err := os.CreateTemp("", "infrahubops_clean_old_tasks_*.py")
-	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
-	}
-	defer os.Remove(tmpFile.Name())
-	if _, err := tmpFile.WriteString(cleanOldTasksScript); err != nil {
-		tmpFile.Close()
-		return fmt.Errorf("failed to write script: %w", err)
-	}
-	tmpFile.Close()
-
-	targetPath := "/tmp/infrahubops_clean_old_tasks.py"
-	if _, err := iops.composeExec("cp", "-a", tmpFile.Name(), fmt.Sprintf("task-worker:%s", targetPath)); err != nil {
-		return fmt.Errorf("failed to copy script to container: %w", err)
-	}
-
-	// Execute script inside container
-	iops.logger.Info("Executing cleanup script inside task-worker container...")
-
 	var output string
-	if output, err = iops.composeExec("exec", "-T", "task-worker", "python", targetPath, strconv.Itoa(daysToKeep), strconv.Itoa(batchSize)); err != nil {
-		return fmt.Errorf("failed to execute cleanup script: %w %v", err, output)
+	var err error
+	if output, err = iops.executeScript("task-worker", cleanOldTasksScript, "/tmp/infrahubops_clean_old_tasks.py", "python", "/tmp/infrahubops_clean_old_tasks.py", strconv.Itoa(daysToKeep), strconv.Itoa(batchSize)); err != nil {
+		return err
 	}
-
-	// (Best effort) cleanup script inside container
-	_, _ = iops.composeExec("exec", "-T", "task-worker", "rm", "-f", targetPath)
 
 	iops.logger.Info(output)
 	iops.logger.Success("Flow runs cleanup completed:")
+
+	return nil
+}
+
+func (iops *InfrahubOps) flushStaleRuns(daysToKeep, batchSize int) error {
+	if err := iops.checkPrerequisites(); err != nil {
+		return err
+	}
+	if err := iops.detectEnvironment(); err != nil {
+		return err
+	}
+
+	if daysToKeep < 0 {
+		daysToKeep = 2
+	}
+	if batchSize <= 0 {
+		batchSize = 200
+	}
+
+	iops.logger.Info("Flushing Prefect flow runs older than %d days (batch size %d)...", daysToKeep, batchSize)
+
+	var output string
+	var err error
+	if output, err = iops.executeScript("task-worker", cleanStaleTasksScript, "/tmp/infrahubops_clean_stale_tasks.py", "python", "/tmp/infrahubops_clean_stale_tasks.py", strconv.Itoa(daysToKeep), strconv.Itoa(batchSize)); err != nil {
+		return err
+	}
+
+	iops.logger.Info(output)
+	iops.logger.Success("Stale flow runs cleanup completed:")
 
 	return nil
 }
@@ -969,7 +1010,40 @@ infrahubops taskmanager flush flow-runs 45
 infrahubops taskmanager flush flow-runs 60 500`,
 	}
 
+	staleRunsCmd := &cobra.Command{
+		Use:   "stale-runs [days_to_keep] [batch_size]",
+		Short: "Cancel flow runs still RUNNING and older than the retention period",
+		Args:  cobra.RangeArgs(0, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			days := 2
+			batch := 200
+			var err error
+			if len(args) >= 1 {
+				days, err = strconv.Atoi(args[0])
+				if err != nil {
+					return fmt.Errorf("invalid days_to_keep value: %v", err)
+				}
+			}
+			if len(args) == 2 {
+				batch, err = strconv.Atoi(args[1])
+				if err != nil {
+					return fmt.Errorf("invalid batch_size value: %v", err)
+				}
+			}
+			return app.flushStaleRuns(days, batch)
+		},
+		Example: `# Use defaults (2 days retention, batch size 200)
+infrahubops taskmanager flush stale-runs
+
+# Keep last 45 days
+infrahubops taskmanager flush stale-runs 45
+
+# Keep last 60 days with batch size 500
+infrahubops taskmanager flush stale-runs 60 500`,
+	}
+
 	flushCmd.AddCommand(flowRunsCmd)
+	flushCmd.AddCommand(staleRunsCmd)
 	taskManagerCmd.AddCommand(flushCmd)
 	return taskManagerCmd
 }
