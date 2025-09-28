@@ -209,6 +209,16 @@ func main() {
 	rootCmd.AddCommand(createEnvironmentCommand(app))
 	rootCmd.AddCommand(createTaskManagerCommand(app))
 
+	rootCmd.AddCommand(
+		&cobra.Command{
+			Use:   "version",
+			Short: "Print tool version",
+			Run: func(cmd *cobra.Command, args []string) {
+				logrus.Infof("Version: %v", BuildRevision())
+			},
+		},
+	)
+
 	// Set up configuration
 	cobra.OnInitialize(func() {
 		viper.AutomaticEnv()
