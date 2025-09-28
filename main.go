@@ -12,7 +12,6 @@ import (
 
 // Configuration holds the application configuration
 type Configuration struct {
-	InfrahubImage        string
 	BackupDir            string
 	DockerComposeProject string
 }
@@ -22,27 +21,18 @@ func createRootCommand(app *InfrahubOps) *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:     "infrahub-ops",
 		Aliases: []string{"infrahubops"},
-		Short:   "Infrahub Operations Tool - Phase 1 MVP",
-		Long: `Infrahub Operations Tool - Phase 1 MVP
+		Short:   "Infrahub Operations Tool",
+		Long: `Infrahub Operations Tool
 
-This tool provides backup and restore operations for Infrahub infrastructure.
-
-PHASE 1 SCOPE:
-- Docker Compose deployments only
-- Neo4j and PostgreSQL backup/restore
-- Automatic environment detection
-- Single tarball backup format
-- Orchestrated restore process`,
+This tool provides backup and restore operations for Infrahub infrastructure.`,
 	}
 
 	rootCmd.PersistentFlags().StringVar(&app.config.DockerComposeProject, "project", "", "Target specific Docker Compose project")
 	rootCmd.PersistentFlags().StringVar(&app.config.BackupDir, "backup-dir", app.config.BackupDir, "Backup directory")
-	rootCmd.PersistentFlags().StringVar(&app.config.InfrahubImage, "image", app.config.InfrahubImage, "Infrahub image to use")
 	rootCmd.PersistentFlags().String("log-format", "text", "Log output format: text or json (can also set INFRAHUB_LOG_FORMAT)")
 
 	viper.BindPFlag("project", rootCmd.PersistentFlags().Lookup("project"))
 	viper.BindPFlag("backup-dir", rootCmd.PersistentFlags().Lookup("backup-dir"))
-	viper.BindPFlag("image", rootCmd.PersistentFlags().Lookup("image"))
 	viper.BindPFlag("log-format", rootCmd.PersistentFlags().Lookup("log-format"))
 
 	return rootCmd
@@ -232,9 +222,6 @@ func main() {
 		}
 		if viper.IsSet("backup-dir") {
 			app.config.BackupDir = viper.GetString("backup-dir")
-		}
-		if viper.IsSet("image") {
-			app.config.InfrahubImage = viper.GetString("image")
 		}
 
 		logFormat := viper.GetString("log-format")
