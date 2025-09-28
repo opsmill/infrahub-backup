@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 )
 
 // Utility functions
@@ -152,4 +153,23 @@ func extractTarball(filename, destDir string) error {
 	}
 
 	return nil
+}
+
+func BuildRevision() string {
+	info, _ := debug.ReadBuildInfo()
+	var rev string = "<none>"
+	var dirty string = ""
+	for _, v := range info.Settings {
+		if v.Key == "vcs.revision" {
+			rev = v.Value
+		}
+		if v.Key == "vcs.modified" {
+			if v.Value == "true" {
+				dirty = "-dirty"
+			} else {
+				dirty = ""
+			}
+		}
+	}
+	return rev + dirty
 }
