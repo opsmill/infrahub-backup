@@ -11,7 +11,8 @@ jobs:
   lint:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - name: "Check out repository code"
+        uses: actions/checkout@v5
 
       - name: Set up Go
         uses: actions/setup-go@v6
