@@ -23,4 +23,4 @@ jobs:
 
       - name: Upload
         run: |
-          docker run -v ./bin:/build -e "MC_HOST_bucket=https://${{ secrets.S3_BUCKET_ACCESS_KEY }}:${{ secrets.S3_BUCKET_SECRET_KEY }}@${{ secrets.S3_BUCKET_ENDPOINT }}" minio/mc cp -r /build/* bucket/
+          docker run -v ./bin:/build -e "MC_HOST_bucket=https://${{ secrets.S3_BUCKET_ACCESS_KEY }}:${{ secrets.S3_BUCKET_SECRET_KEY }}@${{ secrets.S3_BUCKET_ENDPOINT }}" minio/mc cp -r /build/ bucket/${{ secrets.S3_BUCKET_NAME }}/
