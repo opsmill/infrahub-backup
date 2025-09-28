@@ -315,19 +315,19 @@ func (iops *InfrahubOps) stopAppContainers() error {
 	return nil
 }
 
-func (iops *InfrahubOps) backupDatabase(backupDir string) error {
+func (iops *InfrahubOps) backupDatabase(backupDir string, backupMetadata string) error {
 	logrus.Info("Backing up Neo4j database...")
 
 	// Create backup directory in container
 	if _, err := iops.composeExec("exec", "-T", "database", "mkdir", "/tmp/infrahubops"); err != nil {
 		return fmt.Errorf("failed to create backup directory: %w", err)
 	}
+	defer iops.composeExec("exec", "-T", "database", "rm", "-rf", "/tmp/infrahubops")
 
 	// Create backup using neo4j-admin
-	if _, err := iops.composeExec("exec", "-T", "database", "neo4j-admin", "database", "backup", "--to-path=/tmp/infrahubops", "neo4j"); err != nil {
-		return fmt.Errorf("failed to backup neo4j: %w", err)
+	if output, err := iops.composeExec("exec", "-T", "database", "neo4j-admin", "database", "backup", "--include-metadata="+backupMetadata, "--to-path=/tmp/infrahubops", "neo4j"); err != nil {
+		return fmt.Errorf("failed to backup neo4j: %w\nOutput: %v", err, output)
 	}
-	defer iops.composeExec("exec", "-T", "database", "rm", "-rf", "/tmp/infrahubops")
 
 	// Copy backup
 	if _, err := iops.composeExec("cp", "database:/tmp/infrahubops", filepath.Join(backupDir, "database")); err != nil {
@@ -342,8 +342,8 @@ func (iops *InfrahubOps) backupTaskManagerDB(backupDir string) error {
 	logrus.Info("Backing up PostgreSQL database...")
 
 	// Create dump
-	if _, err := iops.composeExec("exec", "-T", "task-manager-db", "pg_dump", "-Fc", "-U", "postgres", "-d", "prefect", "-f", "/tmp/infrahubops_prefect.dump"); err != nil {
-		return fmt.Errorf("failed to create postgresql dump: %w", err)
+	if output, err := iops.composeExec("exec", "-T", "task-manager-db", "pg_dump", "-Fc", "-U", "postgres", "-d", "prefect", "-f", "/tmp/infrahubops_prefect.dump"); err != nil {
+		return fmt.Errorf("failed to create postgresql dump: %w\nOutput: %v", err, output)
 	}
 	defer iops.composeExec("exec", "-T", "task-manager-db", "rm", "/tmp/infrahubops_prefect.dump")
 
@@ -361,7 +361,7 @@ type tasksOutput struct {
 	Name string `json:"title"`
 }
 
-func (iops *InfrahubOps) createBackup(force bool) error {
+func (iops *InfrahubOps) createBackup(force bool, neo4jMetadata string) error {
 	if err := iops.checkPrerequisites(); err != nil {
 		return err
 	}
@@ -427,7 +427,7 @@ func (iops *InfrahubOps) createBackup(force bool) error {
 	metadata := iops.createBackupMetadata(backupID)
 
 	// Backup databases
-	if err := iops.backupDatabase(backupDir); err != nil {
+	if err := iops.backupDatabase(backupDir, neo4jMetadata); err != nil {
 		return err
 	}
 
@@ -638,7 +638,7 @@ func (iops *InfrahubOps) restorePostgreSQL(workDir string) error {
 
 	// Restore database
 	if output, err := iops.composeExec("exec", "-T", "task-manager-db", "pg_restore", "-d", "postgres", "-U", "postgres", "--clean", "--create", "/tmp/infrahubops_prefect.dump"); err != nil {
-		return fmt.Errorf("failed to restore postgresql: %w\n%v", err, output)
+		return fmt.Errorf("failed to restore postgresql: %w\nOutput: %v", err, output)
 	}
 
 	return nil
@@ -679,8 +679,13 @@ func (iops *InfrahubOps) restoreNeo4j(workDir string) error {
 	}
 
 	// Restore database
-	if _, err := iops.composeExec("exec", "-T", "-u", "neo4j", "database", "neo4j-admin", "database", "restore", "--overwrite-destination=true", "--from-path=/tmp/infrahubops", "neo4j"); err != nil {
-		return fmt.Errorf("failed to restore neo4j: %w", err)
+	if output, err := iops.composeExec("exec", "-T", "-u", "neo4j", "database", "neo4j-admin", "database", "restore", "--overwrite-destination=true", "--from-path=/tmp/infrahubops", "neo4j"); err != nil {
+		return fmt.Errorf("failed to restore neo4j: %w\nOutput: %v", err, output)
+	}
+
+	// Restore metadata
+	if output, err := iops.composeExec("exec", "-T", "-u", "neo4j", "database", "sh", "-c", "cat /data/scripts/neo4j/restore_metadata.cypher | cypher-shell -u neo4j -padmin -d system --param \"database => 'databasename'\""); err != nil {
+		return fmt.Errorf("failed to restore neo4j metadata: %w\nOutput: %v", err, output)
 	}
 
 	// Start neo4j database
