@@ -82,25 +82,7 @@ func (ce *CommandExecutor) runCommandQuiet(name string, args ...string) error {
 
 // Prerequisites checker
 func (iops *InfrahubOps) checkPrerequisites() error {
-	executor := NewCommandExecutor()
-	missing := []string{}
-
-	// Check for docker
-	if err := executor.runCommandQuiet("docker", "--version"); err != nil {
-		missing = append(missing, "docker")
-	}
-
-	// Check for docker compose
-	if err := executor.runCommandQuiet("docker", "compose", "version"); err != nil {
-		missing = append(missing, "docker-compose")
-	}
-
-	if len(missing) > 0 {
-		logrus.Error("Missing required tools: ", strings.Join(missing, ", "))
-		logrus.Error("Please install the missing tools and try again")
-		return fmt.Errorf("missing prerequisites: %v", missing)
-	}
-
+	// Docker and kubectl are now optional. This function always succeeds.
 	return nil
 }
 
@@ -108,6 +90,11 @@ func (iops *InfrahubOps) checkPrerequisites() error {
 func (iops *InfrahubOps) detectDockerProjects() ([]string, error) {
 	executor := NewCommandExecutor()
 	projects := []string{}
+
+	// Check if docker is available
+	if err := executor.runCommandQuiet("docker", "--version"); err != nil {
+		return projects, nil // Docker not available
+	}
 
 	// Get docker compose projects
 	output, err := executor.runCommand("docker", "compose", "ls")
@@ -141,28 +128,8 @@ func (iops *InfrahubOps) detectDockerProjects() ([]string, error) {
 			projects = append(projects, project)
 		}
 	}
-
-	// Check current directory for docker-compose.yml
-	if _, err := os.Stat("docker-compose.yml"); err == nil {
-		content, err := os.ReadFile("docker-compose.yml")
-		if err == nil && strings.Contains(string(content), "infrahub") {
-			currentDir := filepath.Base(getCurrentDir())
-			projects = append(projects, currentDir)
-		}
-	}
-
-	// Remove duplicates and sort
-	unique := make(map[string]bool)
-	var result []string
-	for _, project := range projects {
-		if !unique[project] {
-			unique[project] = true
-			result = append(result, project)
-		}
-	}
-	sort.Strings(result)
-
-	return result, nil
+	sort.Strings(projects)
+	return projects, nil
 }
 
 // Kubernetes detection (for Phase 1 warning)
