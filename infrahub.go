@@ -1,7 +1,7 @@
 package main
 
 import (
-	_ "embed"
+	"embed"
 	"encoding/json"
 
 	"fmt"
@@ -36,11 +36,8 @@ type InfrahubOps struct {
 
 // Embedded scripts
 //
-//go:embed scripts/clean_old_tasks.py
-var cleanOldTasksScript string
-
-//go:embed scripts/clean_stale_tasks.py
-var cleanStaleTasksScript string
+//go:embed scripts
+var scripts embed.FS
 
 // NewInfrahubOps creates a new InfrahubOps instance
 func NewInfrahubOps() *InfrahubOps {
@@ -671,9 +668,14 @@ func (iops *InfrahubOps) flushFlowRuns(daysToKeep, batchSize int) error {
 
 	logrus.Infof("Flushing Prefect flow runs older than %d days (batch size %d)...", daysToKeep, batchSize)
 
-	var output string
+	var scriptContent []byte
 	var err error
-	if output, err = iops.executeScript("task-worker", cleanOldTasksScript, "/tmp/infrahubops_clean_old_tasks.py", "python", "/tmp/infrahubops_clean_old_tasks.py", strconv.Itoa(daysToKeep), strconv.Itoa(batchSize)); err != nil {
+	if scriptContent, err = scripts.ReadFile("scripts/clean_old_tasks.py"); err != nil {
+		return fmt.Errorf("could not retrieve script: %w", err)
+	}
+
+	var output string
+	if output, err = iops.executeScript("task-worker", string(scriptContent), "/tmp/infrahubops_clean_old_tasks.py", "python", "/tmp/infrahubops_clean_old_tasks.py", strconv.Itoa(daysToKeep), strconv.Itoa(batchSize)); err != nil {
 		return err
 	}
 
@@ -700,9 +702,14 @@ func (iops *InfrahubOps) flushStaleRuns(daysToKeep, batchSize int) error {
 
 	logrus.Infof("Flushing Prefect flow runs older than %d days (batch size %d)...", daysToKeep, batchSize)
 
-	var output string
+	var scriptContent []byte
 	var err error
-	if output, err = iops.executeScript("task-worker", cleanStaleTasksScript, "/tmp/infrahubops_clean_stale_tasks.py", "python", "/tmp/infrahubops_clean_stale_tasks.py", strconv.Itoa(daysToKeep), strconv.Itoa(batchSize)); err != nil {
+	if scriptContent, err = scripts.ReadFile("scripts/clean_stale_tasks.py"); err != nil {
+		return fmt.Errorf("could not retrieve script: %w", err)
+	}
+
+	var output string
+	if output, err = iops.executeScript("task-worker", string(scriptContent), "/tmp/infrahubops_clean_stale_tasks.py", "python", "/tmp/infrahubops_clean_stale_tasks.py", strconv.Itoa(daysToKeep), strconv.Itoa(batchSize)); err != nil {
 		return err
 	}
 
