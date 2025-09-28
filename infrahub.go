@@ -362,13 +362,50 @@ func (iops *InfrahubOps) backupTaskManagerDB(backupDir string) error {
 	return nil
 }
 
-func (iops *InfrahubOps) createBackup() error {
+type tasksOutput struct {
+	Id   string `json:"id"`
+	Name string `json:"title"`
+}
+
+func (iops *InfrahubOps) createBackup(force bool) error {
 	if err := iops.checkPrerequisites(); err != nil {
 		return err
 	}
 
 	if err := iops.detectEnvironment(); err != nil {
 		return err
+	}
+
+	// Check for running tasks unless --force is set
+	if !force {
+		logrus.Info("Checking for running tasks before backup...")
+		var scriptContent string
+		// Read the get_running_tasks.py script from embedded scripts
+		if b, err := scripts.ReadFile("scripts/get_running_tasks.py"); err == nil {
+			scriptContent = string(b)
+		} else {
+			return fmt.Errorf("could not retrieve get_running_tasks.py: %w", err)
+		}
+		for {
+			var output string
+			var err error
+			output, err = iops.executeScript("task-worker", scriptContent, "/tmp/get_running_tasks.py", "python", "-u", "/tmp/get_running_tasks.py")
+			if err != nil {
+				return fmt.Errorf("failed to check running tasks: %w", err)
+			}
+			var tasks []tasksOutput
+			if err = json.Unmarshal([]byte(output), &tasks); err != nil {
+				return fmt.Errorf("could not parse json: %w\n%v", err, output)
+			}
+			if len(tasks) == 0 {
+				logrus.Info("No running tasks detected. Proceeding with backup.")
+				break
+			} else {
+				logrus.Warnf("There are running %v tasks: %v", len(tasks), tasks)
+				logrus.Warnf("Waiting for them to complete... (use --force to override)")
+				time.Sleep(5 * time.Second)
+			}
+		}
 	}
 
 	backupFilename := iops.generateBackupFilename()
@@ -673,34 +710,33 @@ func (iops *InfrahubOps) restoreNeo4j(workDir string) error {
 	return nil
 }
 
-func (iops *InfrahubOps) executeScript(targetService string, scriptContent string, targetPath string, args ...string) error {
+func (iops *InfrahubOps) executeScript(targetService string, scriptContent string, targetPath string, args ...string) (string, error) {
 	// Write embedded script to a temporary file
-	tmpFile, err := os.CreateTemp("", "infrahubops_clean_old_tasks_*.py")
+	tmpFile, err := os.CreateTemp("", "infrahubops_script_*.py")
 	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
+		return "", fmt.Errorf("failed to create temp file: %w", err)
 	}
 	defer os.Remove(tmpFile.Name())
 	if _, err := tmpFile.WriteString(scriptContent); err != nil {
 		tmpFile.Close()
-		return fmt.Errorf("failed to write script: %w", err)
+		return "", fmt.Errorf("failed to write script: %w", err)
 	}
 	tmpFile.Close()
 
-	if _, err := iops.composeExec("cp", "-a", tmpFile.Name(), fmt.Sprintf("%s:%s", targetService, targetPath)); err != nil {
-		return fmt.Errorf("failed to copy script to container: %w", err)
+	if output, err := iops.composeExec("cp", "-a", tmpFile.Name(), fmt.Sprintf("%s:%s", targetService, targetPath)); err != nil {
+		return "", fmt.Errorf("failed to copy script to container: %w\n%v", err, output)
 	}
+	defer iops.composeExec("exec", "-T", targetService, "rm", "-f", targetPath)
 
 	// Execute script inside container
-	logrus.Info("Executing cleanup script inside task-worker container...")
+	logrus.Info("Executing script inside container...")
 
-	if _, err := iops.composeExecWithStream(append([]string{"exec", "-T", targetService}, args...)...); err != nil {
-		return fmt.Errorf("failed to execute cleanup script: %w", err)
+	output, err := iops.composeExecWithStream(append([]string{"exec", "-T", targetService}, args...)...)
+	if err != nil {
+		return output, fmt.Errorf("failed to execute script: %w", err)
 	}
 
-	// (Best effort) cleanup script inside container
-	_, _ = iops.composeExec("exec", "-T", targetService, "rm", "-f", targetPath)
-
-	return nil
+	return output, nil
 }
 
 // Task Manager (Prefect) maintenance
@@ -727,7 +763,7 @@ func (iops *InfrahubOps) flushFlowRuns(daysToKeep, batchSize int) error {
 		return fmt.Errorf("could not retrieve script: %w", err)
 	}
 
-	if err := iops.executeScript("task-worker", string(scriptContent), "/tmp/infrahubops_clean_old_tasks.py", "python", "-u", "/tmp/infrahubops_clean_old_tasks.py", strconv.Itoa(daysToKeep), strconv.Itoa(batchSize)); err != nil {
+	if _, err := iops.executeScript("task-worker", string(scriptContent), "/tmp/infrahubops_clean_old_tasks.py", "python", "-u", "/tmp/infrahubops_clean_old_tasks.py", strconv.Itoa(daysToKeep), strconv.Itoa(batchSize)); err != nil {
 		return err
 	}
 
@@ -759,7 +795,7 @@ func (iops *InfrahubOps) flushStaleRuns(daysToKeep, batchSize int) error {
 		return fmt.Errorf("could not retrieve script: %w", err)
 	}
 
-	if err := iops.executeScript("task-worker", string(scriptContent), "/tmp/infrahubops_clean_stale_tasks.py", "python", "-u", "/tmp/infrahubops_clean_stale_tasks.py", strconv.Itoa(daysToKeep), strconv.Itoa(batchSize)); err != nil {
+	if _, err := iops.executeScript("task-worker", string(scriptContent), "/tmp/infrahubops_clean_stale_tasks.py", "python", "-u", "/tmp/infrahubops_clean_stale_tasks.py", strconv.Itoa(daysToKeep), strconv.Itoa(batchSize)); err != nil {
 		return err
 	}
 
