@@ -327,16 +327,13 @@ func (iops *InfrahubOps) backupDatabase(backupDir string) error {
 	if _, err := iops.composeExec("exec", "-T", "database", "neo4j-admin", "database", "backup", "--to-path=/tmp/infrahubops", "neo4j"); err != nil {
 		return fmt.Errorf("failed to backup neo4j: %w", err)
 	}
+	defer iops.composeExec("exec", "-T", "database", "rm", "-rf", "/tmp/infrahubops")
 
 	// Copy backup
 	if _, err := iops.composeExec("cp", "database:/tmp/infrahubops", filepath.Join(backupDir, "database")); err != nil {
 		return fmt.Errorf("failed to copy database backup: %w", err)
 	}
 
-	// Cleanup container backup
-	if _, err := iops.composeExec("exec", "-T", "database", "rm", "-rf", "/tmp/infrahubops"); err != nil {
-		logrus.Warn("Failed to cleanup container backup directory")
-	}
 	logrus.Info("Neo4j backup completed")
 	return nil
 }
@@ -348,16 +345,13 @@ func (iops *InfrahubOps) backupTaskManagerDB(backupDir string) error {
 	if _, err := iops.composeExec("exec", "-T", "task-manager-db", "pg_dump", "-Fc", "-U", "postgres", "-d", "prefect", "-f", "/tmp/infrahubops_prefect.dump"); err != nil {
 		return fmt.Errorf("failed to create postgresql dump: %w", err)
 	}
+	defer iops.composeExec("exec", "-T", "task-manager-db", "rm", "/tmp/infrahubops_prefect.dump")
 
 	// Copy dump
 	if _, err := iops.composeExec("cp", "task-manager-db:/tmp/infrahubops_prefect.dump", filepath.Join(backupDir, "prefect.dump")); err != nil {
 		return fmt.Errorf("failed to copy postgresql dump: %w", err)
 	}
 
-	// Cleanup container dump
-	if _, err := iops.composeExec("exec", "-T", "task-manager-db", "rm", "/tmp/infrahubops_prefect.dump"); err != nil {
-		logrus.Warn("Failed to cleanup container dump file")
-	}
 	logrus.Info("PostgreSQL backup completed")
 	return nil
 }
@@ -640,15 +634,11 @@ func (iops *InfrahubOps) restorePostgreSQL(workDir string) error {
 	if _, err := iops.composeExec("cp", dumpPath, "task-manager-db:/tmp/infrahubops_prefect.dump"); err != nil {
 		return fmt.Errorf("failed to copy dump to container: %w", err)
 	}
+	defer iops.composeExec("exec", "-T", "task-manager-db", "rm", "/tmp/infrahubops_prefect.dump")
 
 	// Restore database
-	if _, err := iops.composeExec("exec", "-T", "task-manager-db", "pg_restore", "-d", "postgres", "-U", "postgres", "--clean", "--create", "/tmp/infrahubops_prefect.dump"); err != nil {
-		return fmt.Errorf("failed to restore postgresql: %w", err)
-	}
-
-	// Cleanup
-	if _, err := iops.composeExec("exec", "-T", "task-manager-db", "rm", "/tmp/infrahubops_prefect.dump"); err != nil {
-		logrus.Warn("Failed to cleanup dump file")
+	if output, err := iops.composeExec("exec", "-T", "task-manager-db", "pg_restore", "-d", "postgres", "-U", "postgres", "--clean", "--create", "/tmp/infrahubops_prefect.dump"); err != nil {
+		return fmt.Errorf("failed to restore postgresql: %w\n%v", err, output)
 	}
 
 	return nil
@@ -671,16 +661,12 @@ func (iops *InfrahubOps) restartDependencies() error {
 func (iops *InfrahubOps) restoreNeo4j(workDir string) error {
 	logrus.Info("Restoring Neo4j database...")
 
-	// Start database
-	if _, err := iops.composeExec("start", "database"); err != nil {
-		return fmt.Errorf("failed to start database: %w", err)
-	}
-
 	// Copy backup to container
 	backupPath := filepath.Join(workDir, "backup", "database")
 	if _, err := iops.composeExec("cp", backupPath, "database:/tmp/infrahubops"); err != nil {
 		return fmt.Errorf("failed to copy backup to container: %w", err)
 	}
+	defer iops.composeExec("exec", "-T", "database", "rm", "-rf", "/tmp/infrahubops")
 
 	// Change ownership
 	if _, err := iops.composeExec("exec", "-T", "database", "chown", "-R", "neo4j:neo4j", "/tmp/infrahubops"); err != nil {
@@ -700,11 +686,6 @@ func (iops *InfrahubOps) restoreNeo4j(workDir string) error {
 	// Start neo4j database
 	if _, err := iops.composeExec("exec", "-T", "database", "cypher-shell", "-u", "neo4j", "-padmin", "-d", "system", "start database neo4j"); err != nil {
 		return fmt.Errorf("failed to start neo4j database: %w", err)
-	}
-
-	// Cleanup
-	if _, err := iops.composeExec("exec", "-T", "database", "rm", "-rf", "/tmp/infrahubops"); err != nil {
-		logrus.Warn("Failed to cleanup backup directory")
 	}
 
 	return nil
