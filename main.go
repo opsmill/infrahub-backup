@@ -3,7 +3,6 @@ package main
 import (
 	"archive/tar"
 	"compress/gzip"
-	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +14,9 @@ import (
 	"strings"
 	"time"
 
+	_ "embed"
+
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -39,11 +41,7 @@ type BackupMetadata struct {
 // InfrahubOps is the main application struct
 type InfrahubOps struct {
 	config *Configuration
-	logger *Logger
 }
-
-// Logger provides colored logging functionality
-type Logger struct{}
 
 // Embedded scripts
 //
@@ -53,54 +51,22 @@ var cleanOldTasksScript string
 //go:embed scripts/clean_stale_tasks.py
 var cleanStaleTasksScript string
 
-const (
-	ColorReset  = "\033[0m"
-	ColorRed    = "\033[31m"
-	ColorGreen  = "\033[32m"
-	ColorYellow = "\033[33m"
-	ColorBlue   = "\033[34m"
-)
-
-func NewLogger() *Logger {
-	return &Logger{}
-}
-
-func (l *Logger) Info(msg string, args ...interface{}) {
-	fmt.Printf(ColorBlue+"[INFO]"+ColorReset+" "+msg+"\n", args...)
-}
-
-func (l *Logger) Success(msg string, args ...interface{}) {
-	fmt.Printf(ColorGreen+"[SUCCESS]"+ColorReset+" "+msg+"\n", args...)
-}
-
-func (l *Logger) Warning(msg string, args ...interface{}) {
-	fmt.Printf(ColorYellow+"[WARNING]"+ColorReset+" "+msg+"\n", args...)
-}
-
-func (l *Logger) Error(msg string, args ...interface{}) {
-	fmt.Printf(ColorRed+"[ERROR]"+ColorReset+" "+msg+"\n", args...)
-}
-
 // NewInfrahubOps creates a new InfrahubOps instance
 func NewInfrahubOps() *InfrahubOps {
 	config := &Configuration{
 		InfrahubImage: getEnvOrDefault("INFRAHUB_IMAGE", "infrahub:latest"),
 		BackupDir:     getEnvOrDefault("BACKUP_DIR", filepath.Join(getCurrentDir(), "infrahub_backups")),
 	}
-
 	return &InfrahubOps{
 		config: config,
-		logger: NewLogger(),
 	}
 }
 
 // CommandExecutor handles command execution
-type CommandExecutor struct {
-	logger *Logger
-}
+type CommandExecutor struct{}
 
-func NewCommandExecutor(logger *Logger) *CommandExecutor {
-	return &CommandExecutor{logger: logger}
+func NewCommandExecutor() *CommandExecutor {
+	return &CommandExecutor{}
 }
 
 func (ce *CommandExecutor) runCommand(name string, args ...string) (string, error) {
@@ -116,7 +82,7 @@ func (ce *CommandExecutor) runCommandQuiet(name string, args ...string) error {
 
 // Prerequisites checker
 func (iops *InfrahubOps) checkPrerequisites() error {
-	executor := NewCommandExecutor(iops.logger)
+	executor := NewCommandExecutor()
 	missing := []string{}
 
 	// Check for docker
@@ -130,8 +96,8 @@ func (iops *InfrahubOps) checkPrerequisites() error {
 	}
 
 	if len(missing) > 0 {
-		iops.logger.Error("Missing required tools: %s", strings.Join(missing, ", "))
-		iops.logger.Error("Please install the missing tools and try again")
+		logrus.Error("Missing required tools: ", strings.Join(missing, ", "))
+		logrus.Error("Please install the missing tools and try again")
 		return fmt.Errorf("missing prerequisites: %v", missing)
 	}
 
@@ -140,7 +106,7 @@ func (iops *InfrahubOps) checkPrerequisites() error {
 
 // Docker project detection
 func (iops *InfrahubOps) detectDockerProjects() ([]string, error) {
-	executor := NewCommandExecutor(iops.logger)
+	executor := NewCommandExecutor()
 	projects := []string{}
 
 	// Get docker compose projects
@@ -201,7 +167,7 @@ func (iops *InfrahubOps) detectDockerProjects() ([]string, error) {
 
 // Kubernetes detection (for Phase 1 warning)
 func (iops *InfrahubOps) detectK8sNamespaces() ([]string, error) {
-	executor := NewCommandExecutor(iops.logger)
+	executor := NewCommandExecutor()
 
 	// Check if kubectl is available
 	if err := executor.runCommandQuiet("kubectl", "version", "--client"); err != nil {
@@ -228,25 +194,25 @@ func (iops *InfrahubOps) detectK8sNamespaces() ([]string, error) {
 
 // Environment detection
 func (iops *InfrahubOps) detectEnvironment() error {
-	iops.logger.Info("Detecting Infrahub deployment environment...")
+	logrus.Info("Detecting Infrahub deployment environment...")
 
-	iops.logger.Info("Detecting Docker Compose projects...")
+	logrus.Info("Detecting Docker Compose projects...")
 	dockerProjects, err := iops.detectDockerProjects()
 	if err != nil {
 		return fmt.Errorf("error detecting docker projects: %w", err)
 	}
 
 	if len(dockerProjects) > 0 {
-		iops.logger.Success("Found Docker Compose deployment(s):")
+		logrus.Info("Found Docker Compose deployment(s):")
 		for _, project := range dockerProjects {
 			fmt.Printf("  %s\n", project)
 		}
 
 		if len(dockerProjects) > 1 {
-			iops.logger.Warning("Multiple projects found. Use --project=NAME to specify target.")
+			logrus.Warn("Multiple projects found. Use --project=NAME to specify target.")
 		} else {
 			iops.config.DockerComposeProject = dockerProjects[0]
-			iops.logger.Info("Using project: %s", iops.config.DockerComposeProject)
+			logrus.Infof("Using project: %s", iops.config.DockerComposeProject)
 		}
 
 		return nil
@@ -255,16 +221,16 @@ func (iops *InfrahubOps) detectEnvironment() error {
 	// Check for Kubernetes
 	k8sNamespaces, _ := iops.detectK8sNamespaces()
 	if len(k8sNamespaces) > 0 {
-		iops.logger.Warning("Kubernetes deployment detected but not supported in Phase 1")
-		iops.logger.Warning("Phase 1 supports Docker Compose deployments only")
+		logrus.Warn("Kubernetes deployment detected but not supported in Phase 1")
+		logrus.Warn("Phase 1 supports Docker Compose deployments only")
 		for _, ns := range k8sNamespaces {
 			fmt.Printf("  %s\n", ns)
 		}
 		return fmt.Errorf("kubernetes deployments not supported in Phase 1")
 	}
 
-	iops.logger.Error("No Infrahub deployment found")
-	iops.logger.Error("Ensure Infrahub is running via Docker Compose")
+	logrus.Error("No Infrahub deployment found")
+	logrus.Error("Ensure Infrahub is running via Docker Compose")
 	return fmt.Errorf("no infrahub deployment found")
 }
 
@@ -286,7 +252,7 @@ func (iops *InfrahubOps) createBackupMetadata(backupID string) *BackupMetadata {
 }
 
 func (iops *InfrahubOps) getInfrahubVersion() string {
-	executor := NewCommandExecutor(iops.logger)
+	executor := NewCommandExecutor()
 
 	if iops.config.DockerComposeProject == "" {
 		return "unknown"
@@ -304,7 +270,7 @@ func (iops *InfrahubOps) getInfrahubVersion() string {
 }
 
 func (iops *InfrahubOps) composeExec(args ...string) (string, error) {
-	executor := NewCommandExecutor(iops.logger)
+	executor := NewCommandExecutor()
 	cmd := []string{"compose"}
 
 	if iops.config.DockerComposeProject != "" {
@@ -316,7 +282,7 @@ func (iops *InfrahubOps) composeExec(args ...string) (string, error) {
 }
 
 func (iops *InfrahubOps) stopAppContainers() error {
-	iops.logger.Info("Stopping Infrahub application containers...")
+	logrus.Info("Stopping Infrahub application containers...")
 
 	containers := []string{
 		"infrahub-server", "task-worker", "task-manager",
@@ -330,19 +296,19 @@ func (iops *InfrahubOps) stopAppContainers() error {
 		}
 
 		if strings.Contains(psOutput, "Up") {
-			iops.logger.Info("Stopping %s...", container)
+			logrus.Infof("Stopping %s...", container)
 			if _, err := iops.composeExec("stop", container); err != nil {
 				return fmt.Errorf("failed to stop %s: %w", container, err)
 			}
 		}
 	}
 
-	iops.logger.Success("Application containers stopped")
+	logrus.Info("Application containers stopped")
 	return nil
 }
 
 func (iops *InfrahubOps) backupDatabase(backupDir string) error {
-	iops.logger.Info("Backing up Neo4j database...")
+	logrus.Info("Backing up Neo4j database...")
 
 	// Create backup directory in container
 	if _, err := iops.composeExec("exec", "-T", "database", "mkdir", "/tmp/infrahubops"); err != nil {
@@ -361,15 +327,14 @@ func (iops *InfrahubOps) backupDatabase(backupDir string) error {
 
 	// Cleanup container backup
 	if _, err := iops.composeExec("exec", "-T", "database", "rm", "-rf", "/tmp/infrahubops"); err != nil {
-		iops.logger.Warning("Failed to cleanup container backup directory")
+		logrus.Warn("Failed to cleanup container backup directory")
 	}
-
-	iops.logger.Success("Neo4j backup completed")
+	logrus.Info("Neo4j backup completed")
 	return nil
 }
 
 func (iops *InfrahubOps) backupTaskManagerDB(backupDir string) error {
-	iops.logger.Info("Backing up PostgreSQL database...")
+	logrus.Info("Backing up PostgreSQL database...")
 
 	// Create dump
 	if _, err := iops.composeExec("exec", "-T", "task-manager-db", "pg_dump", "-Fc", "-U", "postgres", "-d", "prefect", "-f", "/tmp/infrahubops_prefect.dump"); err != nil {
@@ -383,10 +348,9 @@ func (iops *InfrahubOps) backupTaskManagerDB(backupDir string) error {
 
 	// Cleanup container dump
 	if _, err := iops.composeExec("exec", "-T", "task-manager-db", "rm", "/tmp/infrahubops_prefect.dump"); err != nil {
-		iops.logger.Warning("Failed to cleanup container dump file")
+		logrus.Warn("Failed to cleanup container dump file")
 	}
-
-	iops.logger.Success("PostgreSQL backup completed")
+	logrus.Info("PostgreSQL backup completed")
 	return nil
 }
 
@@ -407,7 +371,7 @@ func (iops *InfrahubOps) createBackup() error {
 	}
 	defer os.RemoveAll(workDir)
 
-	iops.logger.Info("Creating backup: %s", backupFilename)
+	logrus.Infof("Creating backup: %s", backupFilename)
 
 	// Create backup directory structure
 	backupDir := filepath.Join(workDir, "backup")
@@ -442,19 +406,19 @@ func (iops *InfrahubOps) createBackup() error {
 	}
 
 	// TODO: Backup artifact store
-	iops.logger.Info("Artifact store backup will be added in future versions")
+	logrus.Info("Artifact store backup will be added in future versions")
 
 	// Create tarball
-	iops.logger.Info("Creating backup archive...")
+	logrus.Info("Creating backup archive...")
 	if err := iops.createTarball(backupPath, workDir, "backup/"); err != nil {
 		return fmt.Errorf("failed to create archive: %w", err)
 	}
 
-	iops.logger.Success("Backup created: %s", backupPath)
+	logrus.Infof("Backup created: %s", backupPath)
 
 	// Show backup size
 	if stat, err := os.Stat(backupPath); err == nil {
-		iops.logger.Info("Backup size: %s", formatBytes(stat.Size()))
+		logrus.Infof("Backup size: %s", formatBytes(stat.Size()))
 	}
 
 	return nil
@@ -562,17 +526,15 @@ func (iops *InfrahubOps) extractTarball(filename, destDir string) error {
 }
 
 func (iops *InfrahubOps) wipeTransientData() error {
-	iops.logger.Info("Wiping cache and message queue data...")
+	logrus.Info("Wiping cache and message queue data...")
 
 	if _, err := iops.composeExec("exec", "-T", "message-queue", "find", "/var/lib/rabbitmq", "-mindepth", "1", "-delete"); err != nil {
-		iops.logger.Warning("Failed to wipe message queue data: %v", err)
+		logrus.Warnf("Failed to wipe message queue data: %v", err)
 	}
-
 	if _, err := iops.composeExec("exec", "-T", "cache", "find", "/data", "-mindepth", "1", "-delete"); err != nil {
-		iops.logger.Warning("Failed to wipe cache data: %v", err)
+		logrus.Warnf("Failed to wipe cache data: %v", err)
 	}
-
-	iops.logger.Success("Transient data wiped")
+	logrus.Info("Transient data wiped")
 	return nil
 }
 
@@ -595,10 +557,10 @@ func (iops *InfrahubOps) restoreBackup(backupFile string) error {
 	}
 	defer os.RemoveAll(workDir)
 
-	iops.logger.Info("Restoring from backup: %s", backupFile)
+	logrus.Infof("Restoring from backup: %s", backupFile)
 
 	// Extract backup
-	iops.logger.Info("Extracting backup archive...")
+	logrus.Info("Extracting backup archive...")
 	if err := iops.extractTarball(backupFile, workDir); err != nil {
 		return fmt.Errorf("failed to extract backup: %w", err)
 	}
@@ -615,7 +577,7 @@ func (iops *InfrahubOps) restoreBackup(backupFile string) error {
 		return fmt.Errorf("failed to read metadata: %w", err)
 	}
 
-	iops.logger.Info("Backup metadata:")
+	logrus.Info("Backup metadata:")
 	fmt.Println(string(metadataBytes))
 
 	// Wipe transient data
@@ -642,19 +604,19 @@ func (iops *InfrahubOps) restoreBackup(backupFile string) error {
 	}
 
 	// Restart all services
-	iops.logger.Info("Restarting Infrahub services...")
+	logrus.Info("Restarting Infrahub services...")
 	if _, err := iops.composeExec("start", "infrahub-server", "task-worker"); err != nil {
 		return fmt.Errorf("failed to restart infrahub services: %w", err)
 	}
 
-	iops.logger.Success("Restore completed successfully")
-	iops.logger.Info("Infrahub should be available shortly")
+	logrus.Info("Restore completed successfully")
+	logrus.Info("Infrahub should be available shortly")
 
 	return nil
 }
 
 func (iops *InfrahubOps) restorePostgreSQL(workDir string) error {
-	iops.logger.Info("Restoring PostgreSQL database...")
+	logrus.Info("Restoring PostgreSQL database...")
 
 	// Start task-manager-db
 	if _, err := iops.composeExec("start", "task-manager-db"); err != nil {
@@ -674,19 +636,19 @@ func (iops *InfrahubOps) restorePostgreSQL(workDir string) error {
 
 	// Cleanup
 	if _, err := iops.composeExec("exec", "-T", "task-manager-db", "rm", "/tmp/infrahubops_prefect.dump"); err != nil {
-		iops.logger.Warning("Failed to cleanup dump file")
+		logrus.Warn("Failed to cleanup dump file")
 	}
 
 	return nil
 }
 
 func (iops *InfrahubOps) restartDependencies() error {
-	iops.logger.Info("Restarting cache and message-queue")
+	logrus.Info("Restarting cache and message-queue")
 	if _, err := iops.composeExec("start", "cache", "message-queue"); err != nil {
 		return fmt.Errorf("failed to restart cache and message-queue: %w", err)
 	}
 
-	iops.logger.Info("Restarting task manager...")
+	logrus.Info("Restarting task manager...")
 	if _, err := iops.composeExec("start", "task-manager", "task-manager-background-svc"); err != nil {
 		return fmt.Errorf("failed to restart task manager: %w", err)
 	}
@@ -695,7 +657,7 @@ func (iops *InfrahubOps) restartDependencies() error {
 }
 
 func (iops *InfrahubOps) restoreNeo4j(workDir string) error {
-	iops.logger.Info("Restoring Neo4j database...")
+	logrus.Info("Restoring Neo4j database...")
 
 	// Start database
 	if _, err := iops.composeExec("start", "database"); err != nil {
@@ -730,7 +692,7 @@ func (iops *InfrahubOps) restoreNeo4j(workDir string) error {
 
 	// Cleanup
 	if _, err := iops.composeExec("exec", "-T", "database", "rm", "-rf", "/tmp/infrahubops"); err != nil {
-		iops.logger.Warning("Failed to cleanup backup directory")
+		logrus.Warn("Failed to cleanup backup directory")
 	}
 
 	return nil
@@ -786,10 +748,12 @@ PHASE 1 SCOPE:
 	rootCmd.PersistentFlags().StringVar(&app.config.DockerComposeProject, "project", "", "Target specific Docker Compose project")
 	rootCmd.PersistentFlags().StringVar(&app.config.BackupDir, "backup-dir", app.config.BackupDir, "Backup directory")
 	rootCmd.PersistentFlags().StringVar(&app.config.InfrahubImage, "image", app.config.InfrahubImage, "Infrahub image to use")
+	rootCmd.PersistentFlags().String("log-format", "text", "Log output format: text or json (can also set INFRAHUB_LOG_FORMAT)")
 
 	viper.BindPFlag("project", rootCmd.PersistentFlags().Lookup("project"))
 	viper.BindPFlag("backup-dir", rootCmd.PersistentFlags().Lookup("backup-dir"))
 	viper.BindPFlag("image", rootCmd.PersistentFlags().Lookup("image"))
+	viper.BindPFlag("log-format", rootCmd.PersistentFlags().Lookup("log-format"))
 
 	return rootCmd
 }
@@ -857,12 +821,12 @@ func createEnvironmentCommand(app *InfrahubOps) *cobra.Command {
 			}
 
 			if len(projects) > 0 {
-				app.logger.Info("Available Infrahub projects:")
+				logrus.Info("Available Infrahub projects:")
 				for _, project := range projects {
 					fmt.Printf("  %s\n", project)
 				}
 			} else {
-				app.logger.Info("No Infrahub projects found")
+				logrus.Info("No Infrahub projects found")
 			}
 
 			return nil
@@ -893,7 +857,7 @@ func (iops *InfrahubOps) executeScript(targetService string, scriptContent strin
 	}
 
 	// Execute script inside container
-	iops.logger.Info("Executing cleanup script inside task-worker container...")
+	logrus.Info("Executing cleanup script inside task-worker container...")
 
 	var output string
 	if output, err = iops.composeExec(append([]string{"exec", "-T", targetService}, args...)...); err != nil {
@@ -922,7 +886,7 @@ func (iops *InfrahubOps) flushFlowRuns(daysToKeep, batchSize int) error {
 		batchSize = 200
 	}
 
-	iops.logger.Info("Flushing Prefect flow runs older than %d days (batch size %d)...", daysToKeep, batchSize)
+	logrus.Infof("Flushing Prefect flow runs older than %d days (batch size %d)...", daysToKeep, batchSize)
 
 	var output string
 	var err error
@@ -930,8 +894,8 @@ func (iops *InfrahubOps) flushFlowRuns(daysToKeep, batchSize int) error {
 		return err
 	}
 
-	iops.logger.Info(output)
-	iops.logger.Success("Flow runs cleanup completed:")
+	logrus.Info(output)
+	logrus.Info("Flow runs cleanup completed:")
 
 	return nil
 }
@@ -951,7 +915,7 @@ func (iops *InfrahubOps) flushStaleRuns(daysToKeep, batchSize int) error {
 		batchSize = 200
 	}
 
-	iops.logger.Info("Flushing Prefect flow runs older than %d days (batch size %d)...", daysToKeep, batchSize)
+	logrus.Infof("Flushing Prefect flow runs older than %d days (batch size %d)...", daysToKeep, batchSize)
 
 	var output string
 	var err error
@@ -959,8 +923,8 @@ func (iops *InfrahubOps) flushStaleRuns(daysToKeep, batchSize int) error {
 		return err
 	}
 
-	iops.logger.Info(output)
-	iops.logger.Success("Stale flow runs cleanup completed:")
+	logrus.Info(output)
+	logrus.Info("Stale flow runs cleanup completed:")
 
 	return nil
 }
@@ -1072,11 +1036,19 @@ func main() {
 		if viper.IsSet("image") {
 			app.config.InfrahubImage = viper.GetString("image")
 		}
+
+		logFormat := viper.GetString("log-format")
+		switch logFormat {
+		case "json":
+			logrus.SetFormatter(&logrus.JSONFormatter{})
+		default:
+			logrus.SetFormatter(&logrus.TextFormatter{FullTimestamp: true})
+		}
 	})
 
 	// Execute the root command
 	if err := rootCmd.Execute(); err != nil {
-		app.logger.Error("Command failed: %v", err)
+		logrus.Errorf("Command failed: %v", err)
 		os.Exit(1)
 	}
 }
