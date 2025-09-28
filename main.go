@@ -46,14 +46,16 @@ func createBackupCommand(app *InfrahubOps) *cobra.Command {
 	}
 
 	// Create backup subcommand
+	var force bool
 	createCmd := &cobra.Command{
 		Use:   "create",
 		Short: "Create a backup of Infrahub instance",
 		Long:  "Create a complete backup of the Infrahub instance including databases and configurations",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return app.createBackup()
+			return app.createBackup(force)
 		},
 	}
+	createCmd.Flags().BoolVar(&force, "force", false, "Force backup creation even if there are running tasks")
 
 	// Restore backup subcommand
 	restoreCmd := &cobra.Command{
