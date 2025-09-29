@@ -1,0 +1,49 @@
+---
+title: Installing infrahubops
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+This guide provides step-by-step instructions for installing `infrahubops`.
+
+## Supported environments
+
+- Linux (amd64 and arm64)
+- macOS (amd64 and arm64)
+
+## Prerequisites
+
+- Docker (if you are using a Docker Infrahub setup)
+- kubectl (if you are using k8s)
+
+## Install & run infrahubops
+
+1. Download the executable
+
+```bash
+curl https://infrahub.opsmill.io/ops/$(uname -s)/$(uname -m) -o infrahubops
+chmod +x infrahubops
+```
+
+2. Run infrahubops
+
+```bash
+./infrahubops
+```
+
+### Configuration
+
+
+Set the following environment variables as needed:
+
+| Variable                              | Description                                      | Default                                  |
+|---------------------------------------|--------------------------------------------------|------------------------------------------|
+| `INFRAHUB_DB_DATABASE`                | Neo4j database name                              | Fetched from running instance OR `neo4j` |
+| `INFRAHUB_DB_USERNAME`                | Neo4j username                                   | Fetched from running instance OR `neo4j` |
+| `INFRAHUB_DB_PASSWORD`                | Neo4j password                                   | Fetched from running instance OR `admin` |
+| `PREFECT_API_DATABASE_CONNECTION_URL` | Prefect/Postgres connection string               | Fetched from running instance            |
+| `BACKUP_DIR`                          | Directory for storing backups                    | `./infrahub_backups`                     |
+| `INFRAHUB_LOG_FORMAT`                 | Log output format (`text` or `json`)             | `text`                                   |
+
+## Related resources

@@ -1,0 +1,29 @@
+---
+title: infrahubops CLI Commands
+---
+
+The following commands are available in the `infrahubops` CLI:
+
+### Top-level commands
+
+- `infrahubops backup create [--force] [--neo4jmetadata=all|none|users|roles]`
+	- Create a backup of the Infrahub instance.
+- `infrahubops backup restore <backup-file>`
+	- Restore Infrahub from a backup file.
+- `infrahubops environment detect`
+	- Detect the current deployment environment (Docker/k8s).
+- `infrahubops environment list`
+	- List available Infrahub Docker Compose projects.
+- `infrahubops taskmanager flush flow-runs [days_to_keep] [batch_size]`
+	- Delete completed/failed/cancelled flow runs older than the retention period (default: 30 days, batch size 200).
+- `infrahubops taskmanager flush stale-runs [days_to_keep] [batch_size]`
+	- Cancel running flow runs older than the retention period (default: 2 days, batch size 200).
+- `infrahubops version`
+	- Print the tool version.
+
+#### Global flags
+
+- `--project <name>`: Target a specific Docker Compose project.
+- `--backup-dir <path>`: Set the backup directory.
+- `--log-format <text|json>`: Set log output format.
+
