@@ -2,7 +2,8 @@
 
 # Variables
 BINARY_NAME=infrahub-ops
-BUILD_DIR=bin
+BUILD_DIR=$(shell pwd)/bin
+SRC_DIR=src/
 VERSION?=1.0.0
 LDFLAGS=-ldflags "-X main.version=$(VERSION) -s -w"
 
@@ -16,18 +17,18 @@ help: ## Display this help message
 build: ## Build the binary
 	@echo "Building $(BINARY_NAME)..."
 	@mkdir -p $(BUILD_DIR)
-	@go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) .
+	@go build -C $(SRC_DIR) $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)
 	@echo "Binary built: $(BUILD_DIR)/$(BINARY_NAME)"
 
 build-all: ## Build for multiple platforms
 	@echo "Building for multiple platforms..."
 	@mkdir -p $(BUILD_DIR)
-	@GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64 .
-	@GOOS=linux GOARCH=arm64 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-arm64 .
-	@GOOS=darwin GOARCH=amd64 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-amd64 .
-	@GOOS=darwin GOARCH=arm64 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-arm64 .
-	@GOOS=windows GOARCH=amd64 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-windows-amd64.exe .
-	@GOOS=windows GOARCH=arm64 go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-windows-arm64.exe .
+	@GOOS=linux GOARCH=amd64 go build -C $(SRC_DIR) $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64 .
+	@GOOS=linux GOARCH=arm64 go build -C $(SRC_DIR) $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-arm64 .
+	@GOOS=darwin GOARCH=amd64 go build -C $(SRC_DIR) $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-amd64 .
+	@GOOS=darwin GOARCH=arm64 go build -C $(SRC_DIR) $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-arm64 .
+	@GOOS=windows GOARCH=amd64 go build -C $(SRC_DIR) $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-windows-amd64.exe .
+	@GOOS=windows GOARCH=arm64 go build -C $(SRC_DIR) $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-windows-arm64.exe .
 	@echo "Built binaries:"
 	@ls -la $(BUILD_DIR)/
 
