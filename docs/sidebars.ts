@@ -5,9 +5,26 @@ const sidebars: SidebarsConfig = {
     'readme',
     {
       type: 'category',
-      label: 'Guides',
+      label: 'Tutorials',
       items: [
-        'guides/installation',
+        'tutorials/getting-started',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'How-to Guides',
+      items: [
+        'guides/install',
+        'guides/backup-instance',
+        'guides/restore-backup',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'Topics',
+      items: [
+        'topics/backup-strategies',
+        'topics/deployment-environments',
       ],
     },
     {
@@ -15,6 +32,7 @@ const sidebars: SidebarsConfig = {
       label: 'Reference',
       items: [
         'reference/commands',
+        'reference/configuration',
       ],
     },
   ]

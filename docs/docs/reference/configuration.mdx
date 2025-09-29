@@ -2,17 +2,15 @@
 title: Configuration reference
 ---
 
-Complete reference for configuring infrahubops through environment variables, configuration files, and runtime flags.
+Complete reference for configuring infrahubops through environment variables and runtime flags.
 
 ## Configuration methods
 
-Infrahubops can be configured through multiple methods, applied in precedence order:
+Infrahubops can be configured through these methods, applied in precedence order:
 
 1. **Command-line flags** (highest priority)
 2. **Environment variables**
-3. **Configuration file**
-4. **Auto-detection**
-5. **Default values** (lowest priority)
+3. **Default values** (lowest priority)
 
 ## Environment variables
 
@@ -20,26 +18,14 @@ Infrahubops can be configured through multiple methods, applied in precedence or
 
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
-| `BACKUP_DIR` | Directory for storing backup files | `./infrahub_backups` | `/data/backups` |
+| `INFRAHUB_BACKUP_DIR` | Directory for storing backup files | `./infrahub_backups` | `/data/backups` |
 | `INFRAHUB_LOG_FORMAT` | Output format for logs | `text` | `json` |
-| `INFRAHUB_LOG_LEVEL` | Logging verbosity level | `info` | `debug` |
-| `NO_COLOR` | Disable colored terminal output | `false` | `true` |
 
 ### Docker Compose configuration
 
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
-| `INFRAHUB_COMPOSE_PROJECT` | Docker Compose project name | Auto-detect | `infrahub-prod` |
-| `DOCKER_HOST` | Docker daemon socket | `/var/run/docker.sock` | `tcp://docker:2376` |
-| `COMPOSE_FILE` | Docker Compose file path | `docker-compose.yml` | `production.yml` |
-
-### Kubernetes configuration
-
-| Variable | Description | Default | Example |
-|----------|-------------|---------|---------|
-| `INFRAHUB_K8S_NAMESPACE` | Kubernetes namespace | `default` | `infrahub` |
-| `KUBECONFIG` | Path to kubeconfig file | `~/.kube/config` | `/etc/kube/config` |
-| `K8S_TIMEOUT` | Operation timeout in seconds | `300` | `600` |
+| `INFRAHUB_PROJECT` | Docker Compose project name | Auto-detect | `infrahub-prod` |
 
 ### Database configuration
 
@@ -50,114 +36,29 @@ Infrahubops can be configured through multiple methods, applied in precedence or
 | `INFRAHUB_DB_DATABASE` | Neo4j database name | `neo4j` | `infrahub` |
 | `INFRAHUB_DB_USERNAME` | Neo4j username | `neo4j` | `admin` |
 | `INFRAHUB_DB_PASSWORD` | Neo4j password | `admin` | `SecurePass123` |
-| `INFRAHUB_DB_ADDRESS` | Neo4j connection address | Auto-detect | `bolt://localhost:7687` |
-| `INFRAHUB_DB_TLS_ENABLED` | Enable TLS for Neo4j | `false` | `true` |
-| `INFRAHUB_DB_TLS_INSECURE` | Skip TLS verification | `false` | `true` |
 
 #### PostgreSQL (Task Manager)
 
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
 | `PREFECT_API_DATABASE_CONNECTION_URL` | PostgreSQL connection string | Auto-detect | `postgresql://user:pass@localhost/prefect` |
-| `POSTGRES_USER` | PostgreSQL username | `postgres` | `infrahub` |
-| `POSTGRES_PASSWORD` | PostgreSQL password | Auto-detect | `SecurePass456` |
-| `POSTGRES_DB` | PostgreSQL database name | `prefect` | `taskmanager` |
-
-## Configuration file
-
-Infrahubops supports a YAML configuration file for persistent settings.
-
-### File locations
-
-Searched in order:
-
-1. `./infrahubops.yaml` (current directory)
-2. `~/.infrahubops.yaml` (user home)
-3. `/etc/infrahubops/config.yaml` (system-wide)
-
-### File format
-
-```yaml
-# infrahubops.yaml
-
-# General settings
-backup_dir: /data/backups/infrahub
-log_format: json
-log_level: info
-
-# Docker Compose settings
-docker:
-  project: infrahub-production
-  compose_file: docker-compose.prod.yml
-
-# Kubernetes settings
-kubernetes:
-  namespace: infrahub
-  kubeconfig: /etc/kube/config
-  timeout: 600
-
-# Database settings
-databases:
-  neo4j:
-    database: neo4j
-    username: neo4j
-    password: ${NEO4J_PASSWORD}  # Environment variable substitution
-    address: bolt://neo4j:7687
-    tls:
-      enabled: true
-      insecure: false
-
-  postgresql:
-    connection_url: postgresql://infrahub:password@postgres/taskmanager
-
-# Backup settings
-backup:
-  retention_days: 30
-  compression: fast
-  default_components:
-    - database
-    - task-manager-db
-    - artifacts
-  neo4j_metadata: all
-
-# Task manager settings
-task_manager:
-  flush_flow_runs_days: 30
-  flush_stale_runs_days: 2
-  batch_size: 200
-```
-
-### Environment variable substitution
-
-Configuration files support environment variable substitution:
-
-```yaml
-databases:
-  neo4j:
-    password: ${NEO4J_PASSWORD}
-    username: ${NEO4J_USER:-neo4j}  # With default value
-```
 
 ## Command-line flag reference
 
 ### Global flags
 
-| Flag | Environment Override | Config Key |
-|------|---------------------|------------|
-| `--backup-dir` | `BACKUP_DIR` | `backup_dir` |
-| `--project` | `INFRAHUB_COMPOSE_PROJECT` | `docker.project` |
-| `--namespace` | `INFRAHUB_K8S_NAMESPACE` | `kubernetes.namespace` |
-| `--log-format` | `INFRAHUB_LOG_FORMAT` | `log_format` |
-| `--log-level` | `INFRAHUB_LOG_LEVEL` | `log_level` |
+| Flag | Environment Override | Description |
+|------|---------------------|-------------|
+| `--backup-dir` | `INFRAHUB_BACKUP_DIR` | Set backup directory |
+| `--project` | `INFRAHUB_PROJECT` | Target specific Docker Compose project |
+| `--log-format` | `INFRAHUB_LOG_FORMAT` | Set log output format |
 
 ### Backup command flags
 
-| Flag | Environment Override | Config Key |
-|------|---------------------|------------|
-| `--force` | `INFRAHUB_BACKUP_FORCE` | `backup.force` |
-| `--neo4jmetadata` | `INFRAHUB_NEO4J_METADATA` | `backup.neo4j_metadata` |
-| `--components` | `INFRAHUB_BACKUP_COMPONENTS` | `backup.default_components` |
-| `--compress` | `INFRAHUB_BACKUP_COMPRESS` | `backup.compression` |
+| Flag | Description |
+|------|-------------|
+| `--force` | Force backup creation even if tasks are running |
+| `--neo4jmetadata` | Neo4j metadata to include (all, none, users, roles) |
 
 ## Auto-detection behavior
 
@@ -166,29 +67,13 @@ databases:
 Order of detection:
 
 1. `--project` flag
-2. `INFRAHUB_COMPOSE_PROJECT` environment variable
-3. `COMPOSE_PROJECT_NAME` environment variable
-4. Current directory name (if contains docker-compose.yml)
-5. Search for running Infrahub containers
+2. `INFRAHUB_PROJECT` environment variable
+3. Search for running Infrahub containers
 
 Detection command:
+
 ```bash
 docker compose ls --filter "name=*infrahub*"
-```
-
-### Kubernetes namespace detection
-
-Order of detection:
-
-1. `--namespace` flag
-2. `INFRAHUB_K8S_NAMESPACE` environment variable
-3. Current context default namespace
-4. Search for namespaces with Infrahub labels
-
-Detection command:
-
-```bash
-kubectl get namespaces -l app=infrahub
 ```
 
 ### Database credential detection
@@ -196,99 +81,11 @@ kubectl get namespaces -l app=infrahub
 For Docker Compose deployments:
 
 ```bash
-# Neo4j credentials
+# Neo4j credentials from environment
 docker compose exec database printenv NEO4J_AUTH
 
-# PostgreSQL credentials
+# PostgreSQL credentials from environment
 docker compose exec task-manager-db printenv POSTGRES_PASSWORD
-```
-
-For Kubernetes deployments:
-
-```bash
-# From secrets
-kubectl get secret infrahub-db-auth -o jsonpath='{.data.password}' | base64 -d
-
-# From configmaps
-kubectl get configmap infrahub-config -o jsonpath='{.data.db_username}'
-```
-
-## Logging configuration
-
-### Log levels
-
-| Level | Description | Use Case |
-|-------|-------------|----------|
-| `debug` | Detailed diagnostic information | Development and troubleshooting |
-| `info` | General informational messages | Normal operation (default) |
-| `warn` | Warning messages | Potential issues |
-| `error` | Error messages only | Production with minimal output |
-
-### Log formats
-
-#### Text format (default)
-
-```bash
-INFO[0000] Starting backup process...
-INFO[0001] Checking for running tasks...
-INFO[0002] No running tasks found
-```
-
-#### JSON format
-
-```json
-{"level":"info","msg":"Starting backup process...","time":"2025-09-29T14:30:22Z"}
-{"level":"info","msg":"Checking for running tasks...","time":"2025-09-29T14:30:23Z"}
-{"level":"info","msg":"No running tasks found","time":"2025-09-29T14:30:24Z"}
-```
-
-## Security considerations
-
-### Credential storage
-
-**DO NOT:**
-
-- Store passwords in configuration files
-- Commit credentials to version control
-- Use plain text files for sensitive data
-
-**DO:**
-
-- Use environment variables for passwords
-- Leverage secret management systems
-- Use file permissions to protect config files
-- Rotate credentials regularly
-
-### Secure configuration example
-
-```yaml
-# infrahubops.yaml (safe to commit)
-databases:
-  neo4j:
-    username: neo4j
-    password: ${NEO4J_PASSWORD}  # From environment
-
-  postgresql:
-    connection_url: ${DATABASE_URL}  # From environment
-```
-
-```bash
-# .env file (DO NOT COMMIT)
-export NEO4J_PASSWORD='SecurePasswordHere'
-export DATABASE_URL='postgresql://user:pass@localhost/db'
-```
-
-### File permissions
-
-Secure your configuration files:
-
-```bash
-# User-only access
-chmod 600 ~/.infrahubops.yaml
-
-# Root-only for system config
-sudo chmod 600 /etc/infrahubops/config.yaml
-sudo chown root:root /etc/infrahubops/config.yaml
 ```
 
 ## Troubleshooting configuration
@@ -298,7 +95,7 @@ sudo chown root:root /etc/infrahubops/config.yaml
 View effective configuration:
 
 ```bash
-infrahubops --log-level=debug version
+infrahubops --help
 ```
 
 ### Test configuration
@@ -306,7 +103,7 @@ infrahubops --log-level=debug version
 Validate configuration without running operations:
 
 ```bash
-infrahubops backup create --dry-run
+infrahubops environment detect
 ```
 
 ### Common issues
@@ -318,9 +115,8 @@ infrahubops backup create --dry-run
 docker compose ls
 docker ps
 
-# Check Kubernetes
-kubectl config current-context
-kubectl get pods -n infrahub
+# Check for Infrahub containers
+docker ps --filter "name=infrahub"
 ```
 
 **Issue: Authentication failures**
@@ -334,19 +130,6 @@ env | grep PREFECT
 docker compose exec database cypher-shell -u neo4j
 ```
 
-**Issue: Configuration not loading**
-
-```bash
-# Check file permissions
-ls -la ~/.infrahubops.yaml
-
-# Validate YAML syntax
-yamllint ~/.infrahubops.yaml
-
-# Check for typos in environment variables
-set | grep -i infrahub
-```
-
 ## Examples
 
 ### Minimal configuration
@@ -354,29 +137,22 @@ set | grep -i infrahub
 For basic Docker Compose setup:
 
 ```bash
-export BACKUP_DIR=/backups
+export INFRAHUB_BACKUP_DIR=/backups
 infrahubops backup create
 ```
 
 ### Production configuration
 
-```yaml
-# /etc/infrahubops/config.yaml
-log_level: warn
-log_format: json
-backup_dir: /data/backups/infrahub
+```bash
+#!/bin/bash
+# production-backup.sh
 
-docker:
-  project: infrahub-production
+export INFRAHUB_LOG_FORMAT=json
+export INFRAHUB_PROJECT=infrahub-production
+export INFRAHUB_BACKUP_DIR=/data/backups/infrahub
+export INFRAHUB_DB_PASSWORD="${NEO4J_PASSWORD}"
 
-backup:
-  retention_days: 90
-  compression: best
-  neo4j_metadata: all
-
-task_manager:
-  flush_flow_runs_days: 7
-  batch_size: 500
+infrahubops backup create --neo4jmetadata=all
 ```
 
 ### CI/CD configuration
@@ -386,8 +162,8 @@ task_manager:
 # ci-backup.sh
 
 export INFRAHUB_LOG_FORMAT=json
-export INFRAHUB_COMPOSE_PROJECT=infrahub-staging
-export BACKUP_DIR=s3://backups/infrahub
+export INFRAHUB_PROJECT=infrahub-staging
+export INFRAHUB_BACKUP_DIR=./backups
 export INFRAHUB_DB_PASSWORD="${CI_NEO4J_PASSWORD}"
 
 infrahubops backup create --neo4jmetadata=none

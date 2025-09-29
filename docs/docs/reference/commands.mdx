@@ -2,7 +2,7 @@
 title: CLI command reference
 ---
 
-Complete reference for all infrahubops commands, flags, and options.
+Complete reference for all infrahubops commands, flags, and options currently implemented in Phase 1.
 
 ## Command structure
 
@@ -16,13 +16,10 @@ These flags apply to all commands:
 
 | Flag | Description | Default | Environment Variable |
 |------|-------------|---------|---------------------|
-| `--project <name>` | Target specific Docker Compose project | Auto-detect | `INFRAHUB_COMPOSE_PROJECT` |
-| `--namespace <name>` | Target specific Kubernetes namespace | Auto-detect | `INFRAHUB_K8S_NAMESPACE` |
-| `--backup-dir <path>` | Directory for backup files | `./infrahub_backups` | `BACKUP_DIR` |
+| `--project <name>` | Target specific Docker Compose project | Auto-detect | `INFRAHUB_PROJECT` |
+| `--backup-dir <path>` | Directory for backup files | `./infrahub_backups` | `INFRAHUB_BACKUP_DIR` |
 | `--log-format <text\|json>` | Output format for logs | `text` | `INFRAHUB_LOG_FORMAT` |
-| `--log-level <level>` | Logging verbosity (debug, info, warn, error) | `info` | `INFRAHUB_LOG_LEVEL` |
 | `--help, -h` | Show help for any command | - | - |
-| `--version, -v` | Show version information | - | - |
 
 ## Backup commands
 
@@ -42,9 +39,6 @@ infrahubops backup create [flags]
 |------|-------------|---------|
 | `--force` | Force backup even if tasks are running | `false` |
 | `--neo4jmetadata <type>` | Neo4j metadata to include | `all` |
-| `--components <list>` | Components to backup (comma-separated) | `all` |
-| `--compress` | Compression level (none, fast, best) | `fast` |
-| `--dry-run` | Simulate backup without creating files | `false` |
 
 **Neo4j metadata options:**
 
@@ -52,13 +46,6 @@ infrahubops backup create [flags]
 - `users` - Include only user accounts
 - `roles` - Include only role definitions
 - `none` - Exclude all metadata
-
-**Component options:**
-
-- `database` - Neo4j graph database
-- `task-manager-db` - PostgreSQL task database
-- `artifacts` - File artifacts and templates
-- `all` - All components (default)
 
 **Examples:**
 
@@ -71,21 +58,7 @@ infrahubops backup create --force
 
 # Backup without user metadata
 infrahubops backup create --neo4jmetadata=none
-
-# Backup only database
-infrahubops backup create --components=database
-
-# Dry run to test
-infrahubops backup create --dry-run
 ```
-
-**Exit codes:**
-
-- `0` - Success
-- `1` - General error
-- `2` - Running tasks detected (without --force)
-- `3` - Insufficient disk space
-- `4` - Permission denied
 
 ### backup restore
 
@@ -94,90 +67,18 @@ Restores Infrahub from a backup file.
 **Syntax:**
 
 ```bash
-infrahubops backup restore <backup-file> [flags]
+infrahubops backup restore <backup-file>
 ```
 
 **Arguments:**
+
 - `<backup-file>` - Path to backup archive (required)
-
-**Flags:**
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--components <list>` | Components to restore | `all` |
-| `--skip-validation` | Skip backup validation | `false` |
-| `--dry-run` | Show what would be restored | `false` |
 
 **Examples:**
 
 ```bash
 # Basic restore
 infrahubops backup restore infrahub_backup_20250929_143022.tar.gz
-
-# Restore only database
-infrahubops backup restore backup.tar.gz --components=database
-
-# Dry run
-infrahubops backup restore backup.tar.gz --dry-run
-```
-
-**Exit codes:**
-
-- `0` - Success
-- `1` - General error
-- `5` - Invalid backup file
-- `6` - Version incompatibility
-- `7` - Checksum verification failed
-
-### backup list
-
-Lists available backup files.
-
-**Syntax:**
-
-```bash
-infrahubops backup list [flags]
-```
-
-**Flags:**
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--detailed` | Show detailed backup information | `false` |
-| `--sort <field>` | Sort by field (date, size, name) | `date` |
-| `--reverse` | Reverse sort order | `false` |
-
-**Example output:**
-
-```bash
-NAME                                      SIZE    DATE                 VERSION
-infrahub_backup_20250929_143022.tar.gz  512MB   2025-09-29 14:30:22  1.0.0
-infrahub_backup_20250928_020000.tar.gz  498MB   2025-09-28 02:00:00  1.0.0
-```
-
-### backup info
-
-Displays detailed information about a backup file.
-
-**Syntax:**
-
-```bash
-infrahubops backup info <backup-file>
-```
-
-**Example output:**
-
-```
-Backup ID:        20250929_143022
-Created:          2025-09-29T14:30:22Z
-Tool Version:     1.0.0
-Infrahub Version: 0.15.0
-Components:       database, task-manager-db, artifacts
-Metadata:         all
-Size:             512MB
-Checksums:
-  database.tar:   sha256:abc123...
-  task-manager.sql: sha256:def456...
 ```
 
 ## Environment commands
@@ -189,74 +90,36 @@ Detects and displays the current deployment environment.
 **Syntax:**
 
 ```bash
-infrahubops environment detect [flags]
+infrahubops environment detect
 ```
-
-**Flags:**
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--json` | Output in JSON format | `false` |
 
 **Example output:**
 
-```bash
-Deployment Type:  Docker Compose
-Project Name:     infrahub-production
-Status:           Running
-Services:         7 running, 0 stopped
-Version:          0.15.0
+```
+INFO[0000] Detecting deployment environment...
+INFO[0000] Docker environment detected
+INFO[0000] Found Docker Compose project: infrahub-demo
 ```
 
 ### environment list
 
-Lists all available Infrahub projects or namespaces.
+Lists all available Infrahub Docker Compose projects.
 
 **Syntax:**
 
 ```bash
-infrahubops environment list [flags]
+infrahubops environment list
 ```
-
-**Flags:**
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--all` | Include stopped projects | `false` |
-| `--json` | Output in JSON format | `false` |
 
 **Example output:**
 
-```
-PROJECT              STATUS    SERVICES    VERSION
-infrahub-production  Running   7/7         0.15.0
-infrahub-staging     Running   7/7         0.15.0
-infrahub-dev         Stopped   0/7         0.14.0
+```bash
+infrahub-production  Running   7/7
+infrahub-staging     Running   7/7
+infrahub-dev         Stopped   0/7
 ```
 
 ## Task manager commands
-
-### taskmanager status
-
-Shows current task manager status and statistics.
-
-**Syntax:**
-
-```bash
-infrahubops taskmanager status
-```
-
-**Example output:**
-
-```
-Task Manager Status
--------------------
-Running Tasks:     3
-Queued Tasks:      12
-Completed (24h):   156
-Failed (24h):      2
-Database Size:     256MB
-```
 
 ### taskmanager flush
 
@@ -306,23 +169,13 @@ Displays version information.
 **Syntax:**
 
 ```bash
-infrahubops version [flags]
+infrahubops version
 ```
-
-**Flags:**
-
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--json` | Output in JSON format | `false` |
-| `--check` | Check for updates | `false` |
 
 **Example output:**
 
-```
+```bash
 infrahubops version 1.0.0
-Build: abc123def
-Date: 2025-09-29
-Go: 1.21.0
 ```
 
 ### help
@@ -352,16 +205,13 @@ All environment variables that affect infrahubops behavior:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `BACKUP_DIR` | Default backup directory | `./infrahub_backups` |
-| `INFRAHUB_COMPOSE_PROJECT` | Docker Compose project name | Auto-detect |
-| `INFRAHUB_K8S_NAMESPACE` | Kubernetes namespace | `default` |
+| `INFRAHUB_BACKUP_DIR` | Default backup directory | `./infrahub_backups` |
+| `INFRAHUB_PROJECT` | Docker Compose project name | Auto-detect |
 | `INFRAHUB_DB_DATABASE` | Neo4j database name | `neo4j` |
 | `INFRAHUB_DB_USERNAME` | Neo4j username | `neo4j` |
 | `INFRAHUB_DB_PASSWORD` | Neo4j password | `admin` |
 | `PREFECT_API_DATABASE_CONNECTION_URL` | PostgreSQL connection string | Auto-detect |
 | `INFRAHUB_LOG_FORMAT` | Log format (text/json) | `text` |
-| `INFRAHUB_LOG_LEVEL` | Log verbosity | `info` |
-| `NO_COLOR` | Disable colored output | `false` |
 
 ## Configuration precedence
 
@@ -369,26 +219,7 @@ Configuration values are resolved in this order:
 
 1. Command-line flags (highest priority)
 2. Environment variables
-3. Configuration file (`~/.infrahubops.yaml`)
-4. Default values (lowest priority)
-
-## Exit codes
-
-Standard exit codes used across all commands:
-
-| Code | Meaning |
-|------|---------|
-| 0 | Success |
-| 1 | General error |
-| 2 | Command-specific error |
-| 3 | Resource error (disk space, memory) |
-| 4 | Permission error |
-| 5 | Validation error |
-| 6 | Compatibility error |
-| 7 | Integrity error |
-| 126 | Command not executable |
-| 127 | Command not found |
-| 130 | Interrupted (Ctrl+C) |
+3. Default values (lowest priority)
 
 ## Related documentation
 

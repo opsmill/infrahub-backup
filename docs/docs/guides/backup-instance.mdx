@@ -17,23 +17,15 @@ Before creating a backup:
 
 ## Step 1: Check for running tasks
 
-Before initiating a backup, check if there are active tasks that might be interrupted:
-
-```bash
-infrahubops taskmanager status
-```
+Before initiating a backup, check if there are active tasks that might be interrupted by checking the Infrahub web interface or waiting for natural completion.
 
 If tasks are running, you have two options:
 
 <Tabs>
 <TabItem value="wait" label="Wait for Completion" default>
 
-Wait for tasks to complete naturally:
+Wait for tasks to complete naturally by monitoring the Infrahub UI, then proceed with backup:
 ```bash
-# Monitor task status
-watch -n 5 'infrahubops taskmanager status'
-
-# Once clear, proceed with backup
 infrahubops backup create
 ```
 
@@ -60,6 +52,7 @@ Execute the backup command with your desired options:
 ### Basic backup
 
 For a standard backup with all components:
+
 ```bash
 infrahubops backup create
 ```
@@ -85,6 +78,7 @@ infrahubops backup create --neo4jmetadata=all
 ### Custom backup location
 
 Specify an alternative backup directory:
+
 ```bash
 infrahubops backup create --backup-dir=/mnt/backups/infrahub
 ```
@@ -92,6 +86,7 @@ infrahubops backup create --backup-dir=/mnt/backups/infrahub
 ### Target specific project
 
 If running multiple Infrahub instances:
+
 ```bash
 infrahubops backup create --project=infrahub-production
 ```
@@ -100,7 +95,7 @@ infrahubops backup create --project=infrahub-production
 
 The backup process provides detailed progress information:
 
-```
+```bash
 INFO[0000] Starting backup process...
 INFO[0000] Checking for running tasks...
 INFO[0001] No running tasks found
@@ -140,12 +135,14 @@ tar -xzOf infrahub_backups/infrahub_backup_20250929_143022.tar.gz metadata.json 
 ### Validate backup contents
 
 The backup should contain:
+
 - `metadata.json` - Backup information and checksums
 - `database/` - Neo4j database files
 - `task-manager-db.sql` - PostgreSQL dump
 - `artifacts/` - File artifacts and media
 
 Example metadata structure:
+
 ```json
 {
   "metadata_version": 2025092500,
@@ -166,11 +163,8 @@ Example metadata structure:
 Periodically test restoration to ensure backups are valid:
 
 ```bash
-# Test restore in a staging environment
-infrahubops backup restore infrahub_backups/infrahub_backup_20250929_143022.tar.gz --project=infrahub-staging --dry-run
-
 # Review what would be restored
-infrahubops backup info infrahub_backups/infrahub_backup_20250929_143022.tar.gz
+infrahubops backup info infrahub_backups/infrahub_backup_20250929_143022.tar.gz --project=infrahub-staging
 ```
 
 ## Advanced usage
@@ -239,6 +233,6 @@ Confirm your backup strategy works:
 ## Related resources
 
 - [How to restore from backup](./restore-backup.mdx)
-- [How to schedule automated backups](./schedule-backups.mdx)
+- [CLI command reference](../reference/commands.mdx)
 - [Understanding backup strategies](../topics/backup-strategies.mdx)
 - [CLI command reference](../reference/commands.mdx#backup-commands)

@@ -86,38 +86,6 @@ If you have multiple Infrahub projects:
 infrahubops backup restore infrahub_backups/infrahub_backup_20250929_143022.tar.gz --project=infrahub-staging
 ```
 
-### Partial restore options
-
-<Tabs>
-<TabItem value="database-only" label="Database Only">
-
-Restore only the Neo4j database:
-
-```bash
-infrahubops backup restore infrahub_backups/infrahub_backup_20250929_143022.tar.gz --components=database
-```
-
-</TabItem>
-<TabItem value="taskmanager-only" label="Task Manager Only">
-
-Restore only the PostgreSQL task manager:
-
-```bash
-infrahubops backup restore infrahub_backups/infrahub_backup_20250929_143022.tar.gz --components=task-manager-db
-```
-
-</TabItem>
-<TabItem value="artifacts-only" label="Artifacts Only">
-
-Restore only file artifacts:
-
-```bash
-infrahubops backup restore infrahub_backups/infrahub_backup_20250929_143022.tar.gz --components=artifacts
-```
-
-</TabItem>
-</Tabs>
-
 ## Step 3: Monitor restoration progress
 
 Watch the detailed restoration output:
@@ -225,8 +193,8 @@ Check external integrations are working:
 When restoring between different Infrahub versions:
 
 ```bash
-# Check version compatibility first
-infrahubops backup info infrahub_backups/backup.tar.gz
+# Check version compatibility by examining metadata
+tar -xzOf infrahub_backups/backup.tar.gz metadata.json | jq '.infrahub_version'
 
 # If versions differ significantly, restore to matching version first
 docker compose down
@@ -299,5 +267,4 @@ Confirm restoration was successful:
 
 - [How to backup your Infrahub instance](./backup-instance.mdx)
 - [Understanding backup strategies](../topics/backup-strategies.mdx)
-- [Disaster recovery planning](../topics/disaster-recovery.mdx)
-- [CLI command reference](../reference/commands.mdx#restore-commands)
+- [CLI command reference](../reference/commands.mdx)
