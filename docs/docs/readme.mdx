@@ -1,17 +1,37 @@
 ---
-title: Infrahub Ops CLI
+title: Infrahub Operations Tool
 ---
 
-The Infrahub Ops CLI allows you to run maintenance commands on your running Infrahub instances:
+The Infrahub Operations Tool (`infrahubops`) provides essential maintenance capabilities for managing your Infrahub infrastructure. Whether you're backing up critical data, performing routine housekeeping, or troubleshooting issues, this tool streamlines operational tasks for Infrahub deployments.
 
-- Easy database backup and restore
-- Housekeeping tasks
-- Automated troubleshooting bundle collection
+## Getting Started
 
-## Guides
+### Tutorials
 
-- [Install and run the Infrahub Ops CLI](./guides/installation.mdx)
+Learn the fundamentals through hands-on exercises:
 
-## Reference
+- [Getting started with infrahubops](./tutorials/getting-started.mdx) - Your first backup and restore operation
 
-- [Available commands](./references/commands.mdx)
+### Guides
+
+Accomplish specific tasks:
+
+- [How to install infrahubops](./guides/install.mdx) - Install the tool on your system
+- [How to backup your Infrahub instance](./guides/backup-instance.mdx) - Create comprehensive backups
+- [How to restore from backup](./guides/restore-backup.mdx) - Restore your instance from a backup file
+- [How to clean up stale tasks](./guides/clean-stale-tasks.mdx) - Maintain database performance
+- [How to detect your deployment environment](./guides/detect-environment.mdx) - Identify Docker or Kubernetes deployments
+
+### Topics
+
+Understand the concepts and architecture:
+
+- [Understanding backup strategies](./topics/backup-strategies.mdx) - Backup approaches and best practices
+- [About deployment environments](./topics/deployment-environments.mdx) - Docker Compose vs Kubernetes considerations
+
+### Reference
+
+Technical specifications and command details:
+
+- [CLI command reference](./reference/commands.mdx) - Complete list of commands and options
+- [Configuration reference](./reference/configuration.mdx) - Environment variables and settings

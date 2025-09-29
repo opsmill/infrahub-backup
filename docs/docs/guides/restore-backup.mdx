@@ -1,0 +1,303 @@
+---
+title: How to restore from backup
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+This guide shows you how to restore your Infrahub instance from a backup file. If you need to recover from data loss, roll back changes, or migrate to new infrastructure, follow these steps to safely restore your system.
+
+## Prerequisites
+
+Before restoring from backup:
+
+- Have a valid backup file created by infrahubops
+- Ensure sufficient disk space for extraction (3x backup size)
+- Stop all write operations to the current instance
+- Verify you have necessary permissions
+- **Create a current backup** before overwriting existing data
+
+:::danger
+Restoration replaces all existing data. Always verify you have a current backup before proceeding with a restore operation.
+:::
+
+## Step 1: Prepare for restoration
+
+### Verify backup file
+
+First, validate the backup file you plan to restore:
+
+```bash
+# Check file exists and is readable
+ls -lh infrahub_backups/infrahub_backup_20250929_143022.tar.gz
+
+# Verify archive integrity
+tar -tzf infrahub_backups/infrahub_backup_20250929_143022.tar.gz > /dev/null
+if [ $? -eq 0 ]; then
+    echo "Backup archive is valid"
+else
+    echo "ERROR: Backup archive is corrupted"
+    exit 1
+fi
+
+# Examine backup metadata
+tar -xzOf infrahub_backups/infrahub_backup_20250929_143022.tar.gz metadata.json | jq '.'
+```
+
+### Create safety backup
+
+Before overwriting current data, create a safety backup:
+
+```bash
+# Backup current state
+infrahubops backup create --backup-dir=/tmp/safety-backup
+
+# Note the filename for potential recovery
+SAFETY_BACKUP=$(ls -t /tmp/safety-backup/*.tar.gz | head -1)
+echo "Safety backup: $SAFETY_BACKUP"
+```
+
+## Step 2: Execute the restore
+
+### Basic restore
+
+Restore from a backup file:
+
+```bash
+infrahubops backup restore infrahub_backups/infrahub_backup_20250929_143022.tar.gz
+```
+
+The restore process will:
+
+1. Validate backup compatibility
+2. Stop all Infrahub containers
+3. Clear existing data
+4. Restore Neo4j database
+5. Restore PostgreSQL task manager
+6. Restore file artifacts
+7. Restart all services
+
+### Restore to specific project
+
+If you have multiple Infrahub projects:
+
+```bash
+# Restore to a specific Docker Compose project
+infrahubops backup restore infrahub_backups/infrahub_backup_20250929_143022.tar.gz --project=infrahub-staging
+```
+
+### Partial restore options
+
+<Tabs>
+<TabItem value="database-only" label="Database Only">
+
+Restore only the Neo4j database:
+
+```bash
+infrahubops backup restore infrahub_backups/infrahub_backup_20250929_143022.tar.gz --components=database
+```
+
+</TabItem>
+<TabItem value="taskmanager-only" label="Task Manager Only">
+
+Restore only the PostgreSQL task manager:
+
+```bash
+infrahubops backup restore infrahub_backups/infrahub_backup_20250929_143022.tar.gz --components=task-manager-db
+```
+
+</TabItem>
+<TabItem value="artifacts-only" label="Artifacts Only">
+
+Restore only file artifacts:
+
+```bash
+infrahubops backup restore infrahub_backups/infrahub_backup_20250929_143022.tar.gz --components=artifacts
+```
+
+</TabItem>
+</Tabs>
+
+## Step 3: Monitor restoration progress
+
+Watch the detailed restoration output:
+
+```bash
+INFO[0000] Starting restore process...
+INFO[0000] Reading backup metadata...
+INFO[0001] Backup created: 2025-09-29T14:30:22Z
+INFO[0001] Backup version: 1.0.0
+INFO[0001] Validating backup compatibility...
+INFO[0002] Validation successful
+INFO[0002] Stopping all Infrahub containers...
+INFO[0008] All containers stopped
+INFO[0008] Extracting backup archive...
+INFO[0012] Archive extracted successfully
+INFO[0012] Restoring Neo4j database...
+INFO[0025] Neo4j database restored
+INFO[0025] Restoring PostgreSQL database...
+INFO[0030] PostgreSQL database restored
+INFO[0030] Restoring artifacts...
+INFO[0032] Artifacts restored
+INFO[0032] Starting Infrahub containers...
+INFO[0040] All containers started
+INFO[0040] Restore completed successfully
+```
+
+## Step 4: Verify restoration
+
+### Check service health
+
+Verify all services are running:
+
+```bash
+# Check container status
+docker compose ps
+
+# All containers should show "Up" status
+# Example output:
+# NAME                    IMAGE                      STATUS
+# infrahub-server         opsmill/infrahub:stable    Up 2 minutes
+# database                neo4j:5.13                 Up 2 minutes
+# task-manager-db         postgres:15                Up 2 minutes
+```
+
+### Test application access
+
+Confirm Infrahub is accessible:
+
+```bash
+# Test HTTP endpoint
+curl -I http://localhost:8080
+
+# Check GraphQL endpoint
+curl -X POST http://localhost:8080/graphql \
+  -H "Content-Type: application/json" \
+  -d '{"query": "{ InfrahubStatus { version } }"}'
+```
+
+### Validate data integrity
+
+Verify your data was restored correctly:
+
+1. Log into the Infrahub web interface
+2. Check that your schemas are present
+3. Verify critical data objects exist
+4. Test a few key queries or operations
+5. Review recent task history
+
+## Step 5: Post-restoration tasks
+
+### Clear caches
+
+After restoration, clear application caches:
+
+```bash
+# Clear Redis cache if using external cache
+docker compose exec cache redis-cli FLUSHALL
+
+# Restart application containers to clear memory caches
+docker compose restart infrahub-server task-worker
+```
+
+### Update DNS and load balancers
+
+If restoring to new infrastructure:
+
+1. Update DNS records to point to new instance
+2. Reconfigure load balancers
+3. Update monitoring and alerting endpoints
+4. Notify team members of the change
+
+### Verify integrations
+
+Check external integrations are working:
+
+- Git repositories sync correctly
+- External authentication (LDAP/SSO) functions
+- Webhook endpoints are accessible
+- API integrations reconnect properly
+
+## Advanced scenarios
+
+### Cross-version restoration
+
+When restoring between different Infrahub versions:
+
+```bash
+# Check version compatibility first
+infrahubops backup info infrahub_backups/backup.tar.gz
+
+# If versions differ significantly, restore to matching version first
+docker compose down
+docker compose -f docker-compose.v0.14.yml up -d
+infrahubops backup restore infrahub_backups/backup.tar.gz
+
+# Then upgrade to target version
+docker compose down
+docker compose up -d
+```
+
+### Disaster recovery
+
+For complete disaster recovery:
+
+```bash
+#!/bin/bash
+# Disaster recovery script
+
+# 1. Download latest backup from remote storage
+aws s3 cp s3://my-bucket/infrahub-backups/latest.tar.gz /tmp/
+
+# 2. Deploy fresh Infrahub instance
+git clone https://github.com/opsmill/infrahub
+cd infrahub
+docker compose up -d
+
+# 3. Wait for services to initialize
+sleep 30
+
+# 4. Restore from backup
+infrahubops backup restore /tmp/latest.tar.gz
+
+# 5. Verify restoration
+if curl -f http://localhost:8080/health; then
+    echo "Recovery successful"
+else
+    echo "Recovery failed - check logs"
+    exit 1
+fi
+```
+
+### Rollback procedure
+
+If restoration fails, rollback to safety backup:
+
+```bash
+# Stop failed instance
+docker compose down
+
+# Restore from safety backup
+infrahubops backup restore $SAFETY_BACKUP
+
+# Start services
+docker compose up -d
+```
+
+## Validation
+
+Confirm restoration was successful:
+
+- ✓ All services are running
+- ✓ Web interface is accessible
+- ✓ Data appears complete and correct
+- ✓ Authentication works
+- ✓ Background tasks are processing
+- ✓ Integrations are functional
+
+## Related resources
+
+- [How to backup your Infrahub instance](./backup-instance.mdx)
+- [Understanding backup strategies](../topics/backup-strategies.mdx)
+- [Disaster recovery planning](../topics/disaster-recovery.mdx)
+- [CLI command reference](../reference/commands.mdx#restore-commands)

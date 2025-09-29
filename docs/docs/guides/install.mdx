@@ -1,0 +1,275 @@
+---
+title: How to install infrahubops
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+This guide shows you how to install the Infrahub Operations Tool on your system. If you need to deploy infrahubops across multiple servers or integrate it into your CI/CD pipeline, these instructions provide the necessary steps for each scenario.
+
+## Prerequisites
+
+Before installing infrahubops, ensure you have:
+
+- Administrative or sudo access on your system
+- One of the following deployment environments:
+  - Docker with Docker Compose (for Docker deployments)
+  - kubectl configured (for Kubernetes deployments)
+- Network access to download the binary or build from source
+
+## Installation methods
+
+<Tabs>
+<TabItem value="direct" label="Direct Download" default>
+
+### Download the pre-built binary
+
+If you want the fastest installation, download the pre-built binary directly:
+
+```bash
+# Download the appropriate binary for your system
+curl https://infrahub.opsmill.io/ops/$(uname -s)/$(uname -m) -o infrahubops
+
+# Make it executable
+chmod +x infrahubops
+
+# Move to a directory in your PATH (optional)
+sudo mv infrahubops /usr/local/bin/
+```
+
+</TabItem>
+<TabItem value="manual" label="Manual Selection">
+
+### Select and download a specific version
+
+If you need a specific version or architecture, manually select the appropriate binary:
+
+1. Identify your system architecture:
+
+   ```bash
+   uname -s  # Operating system (Linux/Darwin)
+   uname -m  # Architecture (x86_64/aarch64)
+   ```
+
+2. Download the matching binary:
+   - **Linux AMD64**: `curl -L https://infrahub.opsmill.io/ops/Linux/x86_64 -o infrahubops`
+   - **Linux ARM64**: `curl -L https://infrahub.opsmill.io/ops/Linux/aarch64 -o infrahubops`
+   - **macOS AMD64**: `curl -L https://infrahub.opsmill.io/ops/Darwin/x86_64 -o infrahubops`
+   - **macOS ARM64**: `curl -L https://infrahub.opsmill.io/ops/Darwin/arm64 -o infrahubops`
+
+3. Make executable and optionally install system-wide:
+
+   ```bash
+   chmod +x infrahubops
+   sudo mv infrahubops /usr/local/bin/  # Optional
+   ```
+
+</TabItem>
+<TabItem value="source" label="Build from Source">
+
+### Build from source code
+
+If you want to build from source or contribute to development:
+
+1. Install Go 1.21 or later:
+
+   ```bash
+   # Check if Go is installed
+   go version
+   ```
+
+2. Clone the repository:
+
+   ```bash
+   git clone https://github.com/opsmill/infrahub-ops-cli.git
+   cd infrahub-ops-cli
+   ```
+
+3. Build the binary:
+
+   ```bash
+   make build
+   ```
+
+4. Install to your PATH:
+
+   ```bash
+   sudo cp bin/infrahub-ops /usr/local/bin/infrahubops
+   ```
+
+</TabItem>
+<TabItem value="container" label="Container Image">
+
+### Run via container
+
+If you prefer not to install binaries directly, run infrahubops in a container:
+
+```bash
+# Create an alias for convenience
+alias infrahubops='docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v $(pwd):/workspace opsmill/infrahubops:latest'
+
+# Use the alias
+infrahubops version
+```
+
+:::note
+When using the container method, ensure volume mounts provide access to:
+
+- Docker socket for Docker Compose operations
+- Backup directory for storing/retrieving backups
+- Kubeconfig for Kubernetes operations
+
+:::
+
+</TabItem>
+</Tabs>
+
+## Verify installation
+
+After installation, verify infrahubops is working correctly:
+
+```bash
+# Check version
+infrahubops version
+
+# Verify environment detection
+infrahubops environment detect
+
+# Display help
+infrahubops --help
+```
+
+Expected output:
+```
+infrahubops version 1.0.0
+```
+
+## Configure environment
+
+infrahubops uses environment variables for configuration. Set these based on your deployment:
+
+### Docker Compose deployments
+
+```bash
+# Optional: Target a specific project
+export INFRAHUB_COMPOSE_PROJECT=infrahub-production
+
+# Optional: Custom backup location
+export BACKUP_DIR=/data/backups/infrahub
+```
+
+### Kubernetes deployments
+
+```bash
+# Set the namespace
+export INFRAHUB_K8S_NAMESPACE=infrahub
+
+# Set kubeconfig if not default
+export KUBECONFIG=/path/to/kubeconfig
+```
+
+### Database credentials
+
+If your deployment uses non-default credentials:
+
+```bash
+# Neo4j settings
+export INFRAHUB_DB_USERNAME=neo4j
+export INFRAHUB_DB_PASSWORD=your-password
+export INFRAHUB_DB_DATABASE=neo4j
+
+# PostgreSQL settings (for task manager)
+export PREFECT_API_DATABASE_CONNECTION_URL=postgresql://user:pass@localhost/prefect
+```
+
+## Validation
+
+Confirm infrahubops can connect to your Infrahub instance:
+
+```bash
+# List available projects (Docker)
+infrahubops environment list
+
+# Test backup creation (dry run)
+infrahubops backup create --dry-run
+```
+
+If these commands succeed, installation is complete.
+
+## Advanced usage
+
+### System service installation
+
+To run scheduled backups, install as a systemd service:
+
+1. Create service file:
+
+   ```bash
+   sudo tee /etc/systemd/system/infrahubops-backup.service > /dev/null <<EOF
+   [Unit]
+   Description=Infrahub Backup Service
+   After=docker.service
+   Requires=docker.service
+
+   [Service]
+   Type=oneshot
+   ExecStart=/usr/local/bin/infrahubops backup create
+   User=infrahub
+   Group=docker
+
+   [Install]
+   WantedBy=multi-user.target
+   EOF
+   ```
+
+2. Create timer for daily backups:
+
+   ```bash
+   sudo tee /etc/systemd/system/infrahubops-backup.timer > /dev/null <<EOF
+   [Unit]
+   Description=Daily Infrahub Backup
+
+   [Timer]
+   OnCalendar=daily
+   Persistent=true
+
+   [Install]
+   WantedBy=timers.target
+   EOF
+   ```
+
+3. Enable and start:
+
+   ```bash
+   sudo systemctl enable infrahubops-backup.timer
+   sudo systemctl start infrahubops-backup.timer
+   ```
+
+### CI/CD integration
+
+For GitLab CI/CD:
+
+```yaml
+backup-infrahub:
+  image: opsmill/infrahubops:latest
+  script:
+    - infrahubops backup create
+  only:
+    - schedules
+```
+
+For GitHub Actions:
+
+```yaml
+- name: Backup Infrahub
+  run: |
+    curl -L https://infrahub.opsmill.io/ops/Linux/x86_64 -o infrahubops
+    chmod +x infrahubops
+    ./infrahubops backup create
+```
+
+## Related resources
+
+- [Getting started tutorial](../tutorials/getting-started.mdx)
+- [Configuration reference](../reference/configuration.mdx)
+- [How to schedule automated backups](./schedule-backups.mdx)
