@@ -19,6 +19,7 @@ func createRootCommand(app *InfrahubOps) *cobra.Command {
 		Long: `Infrahub Operations Tool
 
 This tool provides backup and restore operations for Infrahub infrastructure.`,
+		SilenceUsage: true,
 	}
 
 	rootCmd.PersistentFlags().StringVar(&app.config.DockerComposeProject, "project", "", "Target specific Docker Compose project")
