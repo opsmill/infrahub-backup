@@ -39,11 +39,18 @@ Set the following environment variables as needed:
 
 | Variable                              | Description                                      | Default                                  |
 |---------------------------------------|--------------------------------------------------|------------------------------------------|
+| `INFRAHUB_PROJECT`                    | Docker Compose project override                  | Auto-detected                             |
+| `INFRAHUB_K8S_NAMESPACE`              | Kubernetes namespace override                    | Auto-detected                             |
 | `INFRAHUB_DB_DATABASE`                | Neo4j database name                              | Fetched from running instance OR `neo4j` |
 | `INFRAHUB_DB_USERNAME`                | Neo4j username                                   | Fetched from running instance OR `neo4j` |
 | `INFRAHUB_DB_PASSWORD`                | Neo4j password                                   | Fetched from running instance OR `admin` |
 | `PREFECT_API_DATABASE_CONNECTION_URL` | Prefect/Postgres connection string               | Fetched from running instance            |
 | `BACKUP_DIR`                          | Directory for storing backups                    | `./infrahub_backups`                     |
 | `INFRAHUB_LOG_FORMAT`                 | Log output format (`text` or `json`)             | `text`                                   |
+
+You can also set the same overrides at runtime using CLI flags:
+
+- `infrahubops --project <docker_project>` to target a specific Docker Compose deployment.
+- `infrahubops --k8s-namespace <namespace>` to target a specific Kubernetes deployment.
 
 ## Related resources

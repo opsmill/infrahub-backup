@@ -13,7 +13,7 @@ The following commands are available in the `infrahubops` CLI:
 - `infrahubops environment detect`
 	- Detect the current deployment environment (Docker/k8s).
 - `infrahubops environment list`
-	- List available Infrahub Docker Compose projects.
+	- List available Infrahub Docker Compose projects and Kubernetes namespaces.
 - `infrahubops taskmanager flush flow-runs [days_to_keep] [batch_size]`
 	- Delete completed/failed/cancelled flow runs older than the retention period (default: 30 days, batch size 200).
 - `infrahubops taskmanager flush stale-runs [days_to_keep] [batch_size]`
@@ -24,6 +24,7 @@ The following commands are available in the `infrahubops` CLI:
 #### Global flags
 
 - `--project <name>`: Target a specific Docker Compose project.
+- `--k8s-namespace <name>`: Target a specific Kubernetes namespace.
 - `--backup-dir <path>`: Set the backup directory.
 - `--log-format <text|json>`: Set log output format.
 
