@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -24,10 +25,12 @@ This tool provides backup and restore operations for Infrahub infrastructure.`,
 
 	rootCmd.PersistentFlags().StringVar(&app.config.DockerComposeProject, "project", "", "Target specific Docker Compose project")
 	rootCmd.PersistentFlags().StringVar(&app.config.BackupDir, "backup-dir", app.config.BackupDir, "Backup directory")
+	rootCmd.PersistentFlags().StringVar(&app.config.K8sNamespace, "k8s-namespace", app.config.K8sNamespace, "Target Kubernetes namespace")
 	rootCmd.PersistentFlags().String("log-format", "text", "Log output format: text or json (can also set INFRAHUB_LOG_FORMAT)")
 
 	viper.BindPFlag("project", rootCmd.PersistentFlags().Lookup("project"))
 	viper.BindPFlag("backup-dir", rootCmd.PersistentFlags().Lookup("backup-dir"))
+	viper.BindPFlag("k8s-namespace", rootCmd.PersistentFlags().Lookup("k8s-namespace"))
 	viper.BindPFlag("log-format", rootCmd.PersistentFlags().Lookup("log-format"))
 
 	return rootCmd
@@ -91,21 +94,30 @@ func createEnvironmentCommand(app *InfrahubOps) *cobra.Command {
 	// List environments subcommand
 	listCmd := &cobra.Command{
 		Use:   "list",
-		Short: "List available Infrahub projects",
-		Long:  "List all available Infrahub projects in the current environment",
+		Short: "List available Infrahub targets",
+		Long:  "List all available Infrahub deployment targets (Docker projects or Kubernetes namespaces)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			projects, err := app.detectDockerProjects()
-			if err != nil {
-				return err
+			executor := NewCommandExecutor()
+			dockerProjects, _ := ListDockerProjects(executor)
+			k8sNamespaces, _ := ListKubernetesNamespaces(executor)
+
+			if len(dockerProjects) == 0 && len(k8sNamespaces) == 0 {
+				logrus.Info("No Infrahub deployments detected")
+				return nil
 			}
 
-			if len(projects) > 0 {
-				logrus.Info("Available Infrahub projects:")
-				for _, project := range projects {
+			if len(dockerProjects) > 0 {
+				logrus.Info("Docker Compose projects:")
+				for _, project := range dockerProjects {
 					fmt.Printf("  %s\n", project)
 				}
-			} else {
-				logrus.Info("No Infrahub projects found")
+			}
+
+			if len(k8sNamespaces) > 0 {
+				logrus.Info("Kubernetes namespaces:")
+				for _, ns := range k8sNamespaces {
+					fmt.Printf("  %s\n", ns)
+				}
 			}
 
 			return nil
@@ -222,6 +234,7 @@ func main() {
 
 	// Set up configuration
 	cobra.OnInitialize(func() {
+		viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
 		viper.AutomaticEnv()
 		viper.SetEnvPrefix("INFRAHUB")
 
@@ -231,6 +244,9 @@ func main() {
 		}
 		if viper.IsSet("backup-dir") {
 			app.config.BackupDir = viper.GetString("backup-dir")
+		}
+		if viper.IsSet("k8s-namespace") {
+			app.config.K8sNamespace = viper.GetString("k8s-namespace")
 		}
 
 		logFormat := viper.GetString("log-format")

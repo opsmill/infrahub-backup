@@ -42,28 +42,29 @@ func (iops *InfrahubOps) createBackupMetadata(backupID string) *BackupMetadata {
 }
 
 func (iops *InfrahubOps) stopAppContainers() error {
-	logrus.Info("Stopping Infrahub application containers...")
+	logrus.Info("Stopping Infrahub application services...")
 
-	containers := []string{
+	services := []string{
 		"infrahub-server", "task-worker", "task-manager",
 		"task-manager-background-svc", "cache", "message-queue",
 	}
 
-	for _, container := range containers {
-		psOutput, err := iops.composeExec("ps", container)
+	for _, service := range services {
+		running, err := iops.IsServiceRunning(service)
 		if err != nil {
+			logrus.Debugf("Could not determine status of %s: %v", service, err)
 			continue
 		}
 
-		if strings.Contains(psOutput, "Up") {
-			logrus.Infof("Stopping %s...", container)
-			if _, err := iops.composeExec("stop", container); err != nil {
-				return fmt.Errorf("failed to stop %s: %w", container, err)
+		if running {
+			logrus.Infof("Stopping %s...", service)
+			if err := iops.StopServices(service); err != nil {
+				return fmt.Errorf("failed to stop %s: %w", service, err)
 			}
 		}
 	}
 
-	logrus.Info("Application containers stopped")
+	logrus.Info("Application services stopped")
 	return nil
 }
 
@@ -71,21 +72,26 @@ func (iops *InfrahubOps) backupDatabase(backupDir string, backupMetadata string)
 	logrus.Info("Backing up Neo4j database...")
 
 	// Create backup directory in container
-	if _, err := iops.composeExec("exec", "-T", "database", "mkdir", "-p", "/tmp/infrahubops"); err != nil {
+	if _, err := iops.Exec("database", []string{"mkdir", "-p", "/tmp/infrahubops"}, nil); err != nil {
 		return fmt.Errorf("failed to create backup directory: %w", err)
 	}
-	defer iops.composeExec("exec", "-T", "database", "rm", "-rf", "/tmp/infrahubops")
+	defer func() {
+		if _, err := iops.Exec("database", []string{"rm", "-rf", "/tmp/infrahubops"}, nil); err != nil {
+			logrus.Warnf("Failed to remove temporary Neo4j backup directory: %v", err)
+		}
+	}()
 
 	// Create backup using neo4j-admin
-	if output, err := iops.composeExec(
-		"exec", "-T", "database", "neo4j-admin", "database", "backup",
-		"--include-metadata="+backupMetadata, "--to-path=/tmp/infrahubops", iops.config.Neo4jDatabase,
+	if output, err := iops.Exec(
+		"database",
+		[]string{"neo4j-admin", "database", "backup", "--include-metadata=" + backupMetadata, "--to-path=/tmp/infrahubops", iops.config.Neo4jDatabase},
+		nil,
 	); err != nil {
 		return fmt.Errorf("failed to backup neo4j: %w\nOutput: %v", err, output)
 	}
 
 	// Copy backup
-	if _, err := iops.composeExec("cp", "database:/tmp/infrahubops", filepath.Join(backupDir, "database")); err != nil {
+	if err := iops.CopyFrom("database", "/tmp/infrahubops", filepath.Join(backupDir, "database")); err != nil {
 		return fmt.Errorf("failed to copy database backup: %w", err)
 	}
 
@@ -97,17 +103,24 @@ func (iops *InfrahubOps) backupTaskManagerDB(backupDir string) error {
 	logrus.Info("Backing up PostgreSQL database...")
 
 	// Create dump
-	if output, err := iops.composeExec(
-		"exec", "-T", "-e", "PGPASSWORD="+iops.config.PostgresPassword, "task-manager-db", "pg_dump", "-Fc",
-		"-U", iops.config.PostgresUsername, "-d", iops.config.PostgresDatabase,
-		"-f", "/tmp/infrahubops_prefect.dump",
+	opts := &ExecOptions{Env: map[string]string{
+		"PGPASSWORD": iops.config.PostgresPassword,
+	}}
+	if output, err := iops.Exec(
+		"task-manager-db",
+		[]string{"pg_dump", "-Fc", "-U", iops.config.PostgresUsername, "-d", iops.config.PostgresDatabase, "-f", "/tmp/infrahubops_prefect.dump"},
+		opts,
 	); err != nil {
 		return fmt.Errorf("failed to create postgresql dump: %w\nOutput: %v", err, output)
 	}
-	defer iops.composeExec("exec", "-T", "task-manager-db", "rm", "/tmp/infrahubops_prefect.dump")
+	defer func() {
+		if _, err := iops.Exec("task-manager-db", []string{"rm", "/tmp/infrahubops_prefect.dump"}, nil); err != nil {
+			logrus.Warnf("Failed to remove temporary postgres dump: %v", err)
+		}
+	}()
 
 	// Copy dump
-	if _, err := iops.composeExec("cp", "task-manager-db:/tmp/infrahubops_prefect.dump", filepath.Join(backupDir, "prefect.dump")); err != nil {
+	if err := iops.CopyFrom("task-manager-db", "/tmp/infrahubops_prefect.dump", filepath.Join(backupDir, "prefect.dump")); err != nil {
 		return fmt.Errorf("failed to copy postgresql dump: %w", err)
 	}
 
@@ -256,10 +269,10 @@ func (iops *InfrahubOps) createBackup(force bool, neo4jMetadata string) error {
 func (iops *InfrahubOps) wipeTransientData() error {
 	logrus.Info("Wiping cache and message queue data...")
 
-	if _, err := iops.composeExec("exec", "-T", "message-queue", "find", "/var/lib/rabbitmq", "-mindepth", "1", "-delete"); err != nil {
+	if _, err := iops.Exec("message-queue", []string{"find", "/var/lib/rabbitmq", "-mindepth", "1", "-delete"}, nil); err != nil {
 		logrus.Warnf("Failed to wipe message queue data: %v", err)
 	}
-	if _, err := iops.composeExec("exec", "-T", "cache", "find", "/data", "-mindepth", "1", "-delete"); err != nil {
+	if _, err := iops.Exec("cache", []string{"find", "/data", "-mindepth", "1", "-delete"}, nil); err != nil {
 		logrus.Warnf("Failed to wipe cache data: %v", err)
 	}
 	logrus.Info("Transient data wiped")
@@ -370,7 +383,7 @@ func (iops *InfrahubOps) restoreBackup(backupFile string) error {
 
 	// Restart all services
 	logrus.Info("Restarting Infrahub services...")
-	if _, err := iops.composeExec("start", "infrahub-server", "task-worker"); err != nil {
+	if err := iops.StartServices("infrahub-server", "task-worker"); err != nil {
 		return fmt.Errorf("failed to restart infrahub services: %w", err)
 	}
 
@@ -384,22 +397,30 @@ func (iops *InfrahubOps) restorePostgreSQL(workDir string) error {
 	logrus.Info("Restoring PostgreSQL database...")
 
 	// Start task-manager-db
-	if _, err := iops.composeExec("start", "task-manager-db"); err != nil {
+	if err := iops.StartServices("task-manager-db"); err != nil {
 		return fmt.Errorf("failed to start task-manager-db: %w", err)
 	}
 
 	// Copy dump to container
 	dumpPath := filepath.Join(workDir, "backup", "prefect.dump")
-	if _, err := iops.composeExec("cp", dumpPath, "task-manager-db:/tmp/infrahubops_prefect.dump"); err != nil {
+	if err := iops.CopyTo("task-manager-db", dumpPath, "/tmp/infrahubops_prefect.dump"); err != nil {
 		return fmt.Errorf("failed to copy dump to container: %w", err)
 	}
-	defer iops.composeExec("exec", "-T", "task-manager-db", "rm", "/tmp/infrahubops_prefect.dump")
+	defer func() {
+		if _, err := iops.Exec("task-manager-db", []string{"rm", "/tmp/infrahubops_prefect.dump"}, nil); err != nil {
+			logrus.Warnf("Failed to remove temporary postgres dump: %v", err)
+		}
+	}()
 
 	// Restore database
-	if output, err := iops.composeExec(
-		"exec", "-T", "-e", "PGPASSWORD="+iops.config.PostgresPassword, "task-manager-db", "pg_restore",
-		"-d", "postgres", "-U", iops.config.PostgresUsername,
-		"--clean", "--create", "/tmp/infrahubops_prefect.dump",
+	opts := &ExecOptions{Env: map[string]string{
+		"PGPASSWORD": iops.config.PostgresPassword,
+	}}
+	if output, err := iops.Exec(
+		"task-manager-db",
+		// "-x", "--no-owner" for role does not exist
+		[]string{"pg_restore", "-d", "postgres", "-U", iops.config.PostgresUsername, "--clean", "--create", "/tmp/infrahubops_prefect.dump"},
+		opts,
 	); err != nil {
 		return fmt.Errorf("failed to restore postgresql: %w\nOutput: %v", err, output)
 	}
@@ -412,46 +433,53 @@ func (iops *InfrahubOps) restoreNeo4j(workDir string) error {
 
 	// Copy backup to container
 	backupPath := filepath.Join(workDir, "backup", "database")
-	if _, err := iops.composeExec("cp", backupPath, "database:/tmp/infrahubops"); err != nil {
+	if err := iops.CopyTo("database", backupPath, "/tmp/infrahubops"); err != nil {
 		return fmt.Errorf("failed to copy backup to container: %w", err)
 	}
-	defer iops.composeExec("exec", "-T", "database", "rm", "-rf", "/tmp/infrahubops")
+	defer func() {
+		if _, err := iops.Exec("database", []string{"rm", "-rf", "/tmp/infrahubops"}, nil); err != nil {
+			logrus.Warnf("Failed to cleanup temporary Neo4j backup data: %v", err)
+		}
+	}()
 
 	// Change ownership
-	if _, err := iops.composeExec("exec", "-T", "database", "chown", "-R", "neo4j:neo4j", "/tmp/infrahubops"); err != nil {
+	if _, err := iops.Exec("database", []string{"chown", "-R", "neo4j:neo4j", "/tmp/infrahubops"}, nil); err != nil {
 		return fmt.Errorf("failed to change backup ownership: %w", err)
 	}
 
 	// Stop neo4j database
-	if _, err := iops.composeExec(
-		"exec", "-T", "database", "cypher-shell",
-		"-u", iops.config.Neo4jUsername, "-p"+iops.config.Neo4jPassword, "-d", "system",
-		"stop database "+iops.config.Neo4jDatabase,
+	if _, err := iops.Exec(
+		"database",
+		[]string{"cypher-shell", "-u", iops.config.Neo4jUsername, "-p" + iops.config.Neo4jPassword, "-d", "system", "stop database " + iops.config.Neo4jDatabase},
+		nil,
 	); err != nil {
 		return fmt.Errorf("failed to stop neo4j database: %w", err)
 	}
 
 	// Restore database
-	if output, err := iops.composeExec(
-		"exec", "-T", "-u", "neo4j", "database",
-		"neo4j-admin", "database", "restore", "--overwrite-destination=true",
-		"--from-path=/tmp/infrahubops", iops.config.Neo4jDatabase,
+	opts := &ExecOptions{User: "neo4j"}
+	if output, err := iops.Exec(
+		"database",
+		[]string{"neo4j-admin", "database", "restore", "--overwrite-destination=true", "--from-path=/tmp/infrahubops", iops.config.Neo4jDatabase},
+		opts,
 	); err != nil {
 		return fmt.Errorf("failed to restore neo4j: %w\nOutput: %v", err, output)
 	}
 
 	// Restore metadata
-	if output, err := iops.composeExec(
-		"exec", "-T", "-u", "neo4j", "database", "sh", "-c",
-		"cat /data/scripts/neo4j/restore_metadata.cypher | cypher-shell -u "+iops.config.Neo4jUsername+" -p"+iops.config.Neo4jPassword+" -d system --param \"database => '"+iops.config.Neo4jDatabase+"'\"",
+	if output, err := iops.Exec(
+		"database",
+		[]string{"sh", "-c", "cat /data/scripts/neo4j/restore_metadata.cypher | cypher-shell -u " + iops.config.Neo4jUsername + " -p" + iops.config.Neo4jPassword + " -d system --param \"database => '" + iops.config.Neo4jDatabase + "'\""},
+		opts,
 	); err != nil {
 		return fmt.Errorf("failed to restore neo4j metadata: %w\nOutput: %v", err, output)
 	}
 
 	// Start neo4j database
-	if _, err := iops.composeExec(
-		"exec", "-T", "database", "cypher-shell",
-		"-u", iops.config.Neo4jUsername, "-p"+iops.config.Neo4jPassword, "-d", "system", "start database "+iops.config.Neo4jDatabase,
+	if _, err := iops.Exec(
+		"database",
+		[]string{"cypher-shell", "-u", iops.config.Neo4jUsername, "-p" + iops.config.Neo4jPassword, "-d", "system", "start database " + iops.config.Neo4jDatabase},
+		nil,
 	); err != nil {
 		return fmt.Errorf("failed to start neo4j database: %w", err)
 	}

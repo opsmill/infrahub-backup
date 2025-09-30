@@ -3,13 +3,13 @@ package main
 import (
 	"bufio"
 	"embed"
+	"errors"
 	"regexp"
 
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -20,6 +20,7 @@ import (
 type Configuration struct {
 	BackupDir            string
 	DockerComposeProject string
+	K8sNamespace         string
 	Neo4jUsername        string
 	Neo4jPassword        string
 	Neo4jDatabase        string
@@ -30,7 +31,11 @@ type Configuration struct {
 
 // InfrahubOps is the main application struct
 type InfrahubOps struct {
-	config *Configuration
+	config            *Configuration
+	backend           EnvironmentBackend
+	executor          *CommandExecutor
+	dockerBackend     *DockerBackend
+	kubernetesBackend *KubernetesBackend
 }
 
 // Embedded scripts
@@ -40,11 +45,14 @@ var scripts embed.FS
 
 // NewInfrahubOps creates a new InfrahubOps instance
 func NewInfrahubOps() *InfrahubOps {
+	executor := NewCommandExecutor()
 	config := &Configuration{
-		BackupDir: getEnvOrDefault("BACKUP_DIR", filepath.Join(getCurrentDir(), "infrahub_backups")),
+		BackupDir:    getEnvOrDefault("BACKUP_DIR", filepath.Join(getCurrentDir(), "infrahub_backups")),
+		K8sNamespace: os.Getenv("INFRAHUB_K8S_NAMESPACE"),
 	}
 	return &InfrahubOps{
-		config: config,
+		config:   config,
+		executor: executor,
 	}
 }
 
@@ -99,12 +107,136 @@ func (ce *CommandExecutor) runCommandWithStream(name string, args ...string) (st
 		done <- struct{}{}
 	}()
 
-	// Wait for both stdout and stderr to finish
 	<-done
 	<-done
 
 	err := cmd.Wait()
 	return output, err
+}
+
+func (iops *InfrahubOps) getDockerBackend() *DockerBackend {
+	if iops.dockerBackend == nil {
+		iops.dockerBackend = NewDockerBackend(iops.config, iops.executor)
+	}
+	return iops.dockerBackend
+}
+
+func (iops *InfrahubOps) getKubernetesBackend() *KubernetesBackend {
+	if iops.kubernetesBackend == nil {
+		iops.kubernetesBackend = NewKubernetesBackend(iops.config, iops.executor)
+	}
+	return iops.kubernetesBackend
+}
+
+func (iops *InfrahubOps) backendOrder() []EnvironmentBackend {
+	order := []EnvironmentBackend{}
+	add := func(backend EnvironmentBackend) {
+		if backend == nil {
+			return
+		}
+		for _, existing := range order {
+			if existing.Name() == backend.Name() {
+				return
+			}
+		}
+		order = append(order, backend)
+	}
+
+	if iops.config.K8sNamespace != "" {
+		add(iops.getKubernetesBackend())
+	}
+	if iops.config.DockerComposeProject != "" {
+		add(iops.getDockerBackend())
+	}
+
+	add(iops.getDockerBackend())
+	add(iops.getKubernetesBackend())
+
+	return order
+}
+
+func (iops *InfrahubOps) ensureBackend() (EnvironmentBackend, error) {
+	if iops.backend != nil {
+		return iops.backend, nil
+	}
+
+	detectionErrors := []string{}
+	for _, backend := range iops.backendOrder() {
+		if backend == nil {
+			continue
+		}
+		if err := backend.Detect(); err != nil {
+			if !errors.Is(err, ErrEnvironmentNotFound) {
+				detectionErrors = append(detectionErrors, fmt.Sprintf("%s: %v", backend.Name(), err))
+			}
+			continue
+		}
+		iops.backend = backend
+		logrus.Infof("Detected %s environment (%s)", backend.Name(), backend.Info())
+		return backend, nil
+	}
+
+	if len(detectionErrors) > 0 {
+		return nil, fmt.Errorf("environment detection errors: %s", strings.Join(detectionErrors, "; "))
+	}
+
+	return nil, fmt.Errorf("no Infrahub environment detected")
+}
+
+func (iops *InfrahubOps) Exec(service string, command []string, opts *ExecOptions) (string, error) {
+	backend, err := iops.ensureBackend()
+	if err != nil {
+		return "", err
+	}
+	return backend.Exec(service, command, opts)
+}
+
+func (iops *InfrahubOps) ExecStream(service string, command []string, opts *ExecOptions) (string, error) {
+	backend, err := iops.ensureBackend()
+	if err != nil {
+		return "", err
+	}
+	return backend.ExecStream(service, command, opts)
+}
+
+func (iops *InfrahubOps) CopyTo(service, src, dest string) error {
+	backend, err := iops.ensureBackend()
+	if err != nil {
+		return err
+	}
+	return backend.CopyTo(service, src, dest)
+}
+
+func (iops *InfrahubOps) CopyFrom(service, src, dest string) error {
+	backend, err := iops.ensureBackend()
+	if err != nil {
+		return err
+	}
+	return backend.CopyFrom(service, src, dest)
+}
+
+func (iops *InfrahubOps) StartServices(services ...string) error {
+	backend, err := iops.ensureBackend()
+	if err != nil {
+		return err
+	}
+	return backend.Start(services...)
+}
+
+func (iops *InfrahubOps) StopServices(services ...string) error {
+	backend, err := iops.ensureBackend()
+	if err != nil {
+		return err
+	}
+	return backend.Stop(services...)
+}
+
+func (iops *InfrahubOps) IsServiceRunning(service string) (bool, error) {
+	backend, err := iops.ensureBackend()
+	if err != nil {
+		return false, err
+	}
+	return backend.IsRunning(service)
 }
 
 // Prerequisites checker
@@ -113,149 +245,78 @@ func (iops *InfrahubOps) checkPrerequisites() error {
 	return nil
 }
 
-// Docker project detection
-func (iops *InfrahubOps) detectDockerProjects() ([]string, error) {
-	executor := NewCommandExecutor()
-	projects := []string{}
-
-	// Check if docker is available
-	if err := executor.runCommandQuiet("docker", "--version"); err != nil {
-		return projects, nil // Docker not available
-	}
-
-	// Get docker compose projects
-	output, err := executor.runCommand("docker", "compose", "ls")
-	if err != nil {
-		return projects, nil // Not an error, just no projects
-	}
-
-	lines := strings.Split(output, "\n")
-	for _, line := range lines {
-		if strings.HasPrefix(line, "NAME") {
-			continue // Skip header
-		}
-
-		fields := strings.Fields(line)
-		if len(fields) == 0 {
-			continue
-		}
-
-		project := fields[0]
-		if project == "" {
-			continue
-		}
-
-		// Check if project has infrahub services
-		psOutput, err := executor.runCommand("docker", "compose", "-p", project, "ps", "-a")
-		if err != nil {
-			continue
-		}
-
-		if strings.Contains(strings.ToLower(psOutput), "infrahub") {
-			projects = append(projects, project)
-		}
-	}
-	sort.Strings(projects)
-	return projects, nil
-}
-
-// Kubernetes detection (for Phase 1 warning)
-func (iops *InfrahubOps) detectK8sNamespaces() ([]string, error) {
-	executor := NewCommandExecutor()
-
-	// Check if kubectl is available
-	if err := executor.runCommandQuiet("kubectl", "version", "--client"); err != nil {
-		return nil, nil // kubectl not available
-	}
-
-	output, err := executor.runCommand("kubectl", "get", "pods", "--all-namespaces",
-		"-o", "custom-columns=:metadata.namespace", "-l", "app.kubernetes.io/name=infrahub")
-	if err != nil {
-		return nil, nil // No error, just no pods found
-	}
-
-	namespaces := []string{}
-	lines := strings.Split(output, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line != "" && line != "NAMESPACE" {
-			namespaces = append(namespaces, line)
-		}
-	}
-
-	return namespaces, nil
-}
-
 func (iops *InfrahubOps) fetchDatabaseCredentials() error {
-	iops.config.Neo4jDatabase = os.Getenv("INFRAHUB_DB_DATABASE")
-	iops.config.Neo4jUsername = os.Getenv("INFRAHUB_DB_USERNAME")
-	iops.config.Neo4jPassword = os.Getenv("INFRAHUB_DB_PASSWORD")
-
-	var connConfig *pgx.ConnConfig
-	var err error
-	if connConfig, err = pgx.ParseConfig(os.Getenv("PREFECT_API_DATABASE_CONNECTION_URL")); err != nil {
-		return fmt.Errorf("could not parse PREFECT_API_DATABASE_CONNECTION_URL")
-	} else {
-		iops.config.PostgresDatabase = connConfig.Database
-		iops.config.PostgresUsername = connConfig.User
-		iops.config.PostgresPassword = connConfig.Password
+	if _, err := iops.ensureBackend(); err != nil {
+		return err
 	}
 
-	if iops.config.Neo4jDatabase == "" {
-		// Get Neo4j credentials from infrahub-server env
-		envOut, err := iops.composeExec("exec", "-T", "infrahub-server", "env")
+	if value := os.Getenv("INFRAHUB_DB_DATABASE"); value != "" {
+		iops.config.Neo4jDatabase = value
+	}
+	if value := os.Getenv("INFRAHUB_DB_USERNAME"); value != "" {
+		iops.config.Neo4jUsername = value
+	}
+	if value := os.Getenv("INFRAHUB_DB_PASSWORD"); value != "" {
+		iops.config.Neo4jPassword = value
+	}
+
+	iops.applyPrefectConnection(os.Getenv("PREFECT_API_DATABASE_CONNECTION_URL"))
+
+	if iops.config.Neo4jDatabase == "" || iops.config.Neo4jUsername == "" || iops.config.Neo4jPassword == "" {
+		envOut, err := iops.Exec("infrahub-server", []string{"env"}, nil)
 		if err != nil {
 			logrus.Warnf("Could not get infrahub-server env, using default Neo4j credentials: %v", err)
-		}
-
-		iops.config.Neo4jDatabase = "neo4j"
-		iops.config.Neo4jUsername = "neo4j"
-		iops.config.Neo4jPassword = "admin"
-
-		if envOut != "" {
+		} else {
 			for _, line := range strings.Split(envOut, "\n") {
-				if after, ok := strings.CutPrefix(line, "INFRAHUB_DB_USERNAME="); ok {
-					iops.config.Neo4jUsername = after
-				} else if after, ok := strings.CutPrefix(line, "INFRAHUB_DB_PASSWORD="); ok {
-					iops.config.Neo4jPassword = after
-				} else if after, ok := strings.CutPrefix(line, "INFRAHUB_DB_DATABASE="); ok {
+				if after, ok := strings.CutPrefix(line, "INFRAHUB_DB_DATABASE="); ok && iops.config.Neo4jDatabase == "" {
 					iops.config.Neo4jDatabase = after
+				}
+				if after, ok := strings.CutPrefix(line, "INFRAHUB_DB_USERNAME="); ok && iops.config.Neo4jUsername == "" {
+					iops.config.Neo4jUsername = after
+				}
+				if after, ok := strings.CutPrefix(line, "INFRAHUB_DB_PASSWORD="); ok && iops.config.Neo4jPassword == "" {
+					iops.config.Neo4jPassword = after
 				}
 			}
 		}
+
+		if iops.config.Neo4jDatabase == "" {
+			iops.config.Neo4jDatabase = "neo4j"
+		}
+		if iops.config.Neo4jUsername == "" {
+			iops.config.Neo4jUsername = "neo4j"
+		}
+		if iops.config.Neo4jPassword == "" {
+			iops.config.Neo4jPassword = "admin"
+		}
 	}
 
-	if iops.config.PostgresDatabase == "" {
-		// Get Neo4j credentials from infrahub-server env
-		envOut, err := iops.composeExec("exec", "-T", "task-manager", "env")
+	if iops.config.PostgresDatabase == "" || iops.config.PostgresUsername == "" || iops.config.PostgresPassword == "" {
+		envOut, err := iops.Exec("task-manager", []string{"env"}, nil)
 		if err != nil {
 			logrus.Warnf("Could not get task-manager env, using default Postgres credentials: %v", err)
-		}
-
-		iops.config.PostgresDatabase = "prefect"
-		iops.config.PostgresUsername = "postgres"
-		iops.config.PostgresPassword = "prefect"
-
-		if envOut != "" {
+		} else {
 			for _, line := range strings.Split(envOut, "\n") {
 				if after, ok := strings.CutPrefix(line, "PREFECT_API_DATABASE_CONNECTION_URL="); ok {
-					postgresDsn := after
-
-					// contains postgres+asyncpg, which is not go compatible...
-					re := regexp.MustCompile("postgres(.*)://(.*)")
-					postgresDsn = re.ReplaceAllString(postgresDsn, "postgres://$2")
-
-					if connConfig, err = pgx.ParseConfig(postgresDsn); err != nil {
-						return fmt.Errorf("could not parse PREFECT_API_DATABASE_CONNECTION_URL within task-manager")
-					} else {
-						logrus.Info(connConfig.Database)
-						iops.config.PostgresDatabase = connConfig.Database
-						iops.config.PostgresUsername = connConfig.User
-						iops.config.PostgresPassword = connConfig.Password
-					}
-
+					iops.applyPrefectConnection(after)
 					break
 				}
+			}
+		}
+
+		if iops.config.PostgresDatabase == "" {
+			iops.config.PostgresDatabase = "prefect"
+		}
+		if iops.config.PostgresUsername == "" {
+			iops.config.PostgresUsername = "postgres"
+			if iops.backend.Name() == "kubernetes" {
+				iops.config.PostgresUsername = "prefect"
+			}
+		}
+		if iops.config.PostgresPassword == "" {
+			iops.config.PostgresPassword = "prefect"
+			if iops.backend.Name() == "kubernetes" {
+				iops.config.PostgresPassword = "prefect-rocks"
 			}
 		}
 	}
@@ -263,103 +324,81 @@ func (iops *InfrahubOps) fetchDatabaseCredentials() error {
 	return nil
 }
 
+func (iops *InfrahubOps) applyPrefectConnection(connStr string) {
+	if connStr == "" {
+		return
+	}
+
+	re := regexp.MustCompile("postgres(.*)://(.*)")
+	normalized := re.ReplaceAllString(connStr, "postgres://$2")
+
+	connConfig, err := pgx.ParseConfig(normalized)
+	if err != nil {
+		logrus.Warnf("Could not parse PREFECT_API_DATABASE_CONNECTION_URL: %v", err)
+		return
+	}
+
+	if connConfig.Database != "" {
+		iops.config.PostgresDatabase = connConfig.Database
+	}
+	if connConfig.User != "" {
+		iops.config.PostgresUsername = connConfig.User
+	}
+	if connConfig.Password != "" {
+		iops.config.PostgresPassword = connConfig.Password
+	}
+}
+
 // Environment detection
 func (iops *InfrahubOps) detectEnvironment() error {
 	logrus.Info("Detecting Infrahub deployment environment...")
-
-	logrus.Info("Detecting Docker Compose projects...")
-	dockerProjects, err := iops.detectDockerProjects()
+	backend, err := iops.ensureBackend()
 	if err != nil {
-		return fmt.Errorf("error detecting docker projects: %w", err)
+		return err
 	}
 
-	if len(dockerProjects) > 0 {
-		logrus.Info("Found Docker Compose deployment(s):")
-		for _, project := range dockerProjects {
-			fmt.Printf("  %s\n", project)
-		}
-
-		if len(dockerProjects) > 1 {
-			logrus.Warn("Multiple projects found. Use --project=NAME to specify target.")
-		} else {
-			iops.config.DockerComposeProject = dockerProjects[0]
-			logrus.Infof("Using project: %s", iops.config.DockerComposeProject)
-		}
-
-		if err := iops.fetchDatabaseCredentials(); err != nil {
-			return fmt.Errorf("could not fetch database credentials: %w", err)
-		}
-
-		return nil
+	if backend.Info() != "" {
+		logrus.Infof("Target: %s", backend.Info())
 	}
 
-	// Check for Kubernetes
-	k8sNamespaces, _ := iops.detectK8sNamespaces()
-	if len(k8sNamespaces) > 0 {
-		logrus.Warn("Kubernetes deployment detected but not supported in Phase 1")
-		logrus.Warn("Phase 1 supports Docker Compose deployments only")
-		for _, ns := range k8sNamespaces {
-			fmt.Printf("  %s\n", ns)
-		}
-		return fmt.Errorf("kubernetes deployments not supported in Phase 1")
+	if err := iops.fetchDatabaseCredentials(); err != nil {
+		return fmt.Errorf("could not fetch database credentials: %w", err)
 	}
 
-	logrus.Error("No Infrahub deployment found")
-	logrus.Error("Ensure Infrahub is running via Docker Compose")
-	return fmt.Errorf("no infrahub deployment found")
+	return nil
 }
 
 func (iops *InfrahubOps) getInfrahubVersion() string {
-	executor := NewCommandExecutor()
-
-	if iops.config.DockerComposeProject == "" {
-		return "unknown"
-	}
-
-	cmd := []string{"compose", "-p", iops.config.DockerComposeProject, "exec", "-T", "infrahub-server",
-		"python", "-c", "import infrahub; print(infrahub.__version__)"}
-
-	output, err := executor.runCommand("docker", cmd...)
+	output, err := iops.Exec("infrahub-server", []string{"python", "-c", "import infrahub; print(infrahub.__version__)"}, nil)
 	if err != nil {
+		logrus.Warnf("Could not detect Infrahub version: %v", err)
 		return "unknown"
 	}
 
 	return strings.TrimSpace(output)
 }
 
-func (iops *InfrahubOps) composeExec(args ...string) (string, error) {
-	executor := NewCommandExecutor()
-	cmd := []string{"compose"}
-
-	if iops.config.DockerComposeProject != "" {
-		cmd = append(cmd, "-p", iops.config.DockerComposeProject)
-	}
-
-	cmd = append(cmd, args...)
-	return executor.runCommand("docker", cmd...)
-}
-
-func (iops *InfrahubOps) composeExecWithStream(args ...string) (string, error) {
-	executor := NewCommandExecutor()
-	cmd := []string{"compose"}
-
-	if iops.config.DockerComposeProject != "" {
-		cmd = append(cmd, "-p", iops.config.DockerComposeProject)
-	}
-
-	cmd = append(cmd, args...)
-	return executor.runCommandWithStream("docker", cmd...)
-}
-
 func (iops *InfrahubOps) restartDependencies() error {
 	logrus.Info("Restarting cache and message-queue")
-	if _, err := iops.composeExec("start", "cache", "message-queue"); err != nil {
+	if err := iops.StopServices("cache", "message-queue"); err != nil {
+		logrus.Debugf("Failed to stop cache/message-queue: %v", err)
+	}
+	if err := iops.StartServices("cache", "message-queue"); err != nil {
 		return fmt.Errorf("failed to restart cache and message-queue: %w", err)
 	}
 
 	logrus.Info("Restarting task manager...")
-	if _, err := iops.composeExec("start", "task-manager", "task-manager-background-svc"); err != nil {
-		return fmt.Errorf("failed to restart task manager: %w", err)
+	if err := iops.StopServices("task-manager"); err != nil {
+		logrus.Debugf("Failed to stop task-manager: %v", err)
+	}
+	if err := iops.StopServices("task-manager-background-svc"); err != nil {
+		logrus.Debugf("Failed to stop optional task-manager-background-svc: %v", err)
+	}
+	if err := iops.StartServices("task-manager"); err != nil {
+		return fmt.Errorf("failed to restart task-manager: %w", err)
+	}
+	if err := iops.StartServices("task-manager-background-svc"); err != nil {
+		logrus.Infof("Skipping optional task-manager-background-svc restart: %v", err)
 	}
 
 	return nil
@@ -378,15 +417,19 @@ func (iops *InfrahubOps) executeScript(targetService string, scriptContent strin
 	}
 	tmpFile.Close()
 
-	if output, err := iops.composeExec("cp", "-a", tmpFile.Name(), fmt.Sprintf("%s:%s", targetService, targetPath)); err != nil {
-		return "", fmt.Errorf("failed to copy script to container: %w\n%v", err, output)
+	if err := iops.CopyTo(targetService, tmpFile.Name(), targetPath); err != nil {
+		return "", fmt.Errorf("failed to copy script to target: %w", err)
 	}
-	defer iops.composeExec("exec", "-T", targetService, "rm", "-f", targetPath)
+	defer func() {
+		if _, err := iops.Exec(targetService, []string{"rm", "-f", targetPath}, nil); err != nil {
+			logrus.Warnf("Failed to clean up script %s on %s: %v", targetPath, targetService, err)
+		}
+	}()
 
 	// Execute script inside container
 	logrus.Info("Executing script inside container...")
 
-	output, err := iops.composeExecWithStream(append([]string{"exec", "-T", targetService}, args...)...)
+	output, err := iops.ExecStream(targetService, args, nil)
 	if err != nil {
 		return output, fmt.Errorf("failed to execute script: %w", err)
 	}
