@@ -10,6 +10,7 @@ This guide walks you through creating a comprehensive backup of your Infrahub in
 ## Prerequisites
 
 Before creating a backup:
+
 - Ensure infrahubops is installed and configured
 - Verify you have sufficient disk space (at least 2x your database size)
 - Have write permissions to the backup directory
@@ -25,6 +26,7 @@ If tasks are running, you have two options:
 <TabItem value="wait" label="Wait for Completion" default>
 
 Wait for tasks to complete naturally by monitoring the Infrahub UI, then proceed with backup:
+
 ```bash
 infrahubops backup create
 ```
@@ -33,6 +35,7 @@ infrahubops backup create
 <TabItem value="force" label="Force Backup">
 
 Force backup despite running tasks:
+
 ```bash
 # Force backup (tasks will be interrupted)
 infrahubops backup create --force
