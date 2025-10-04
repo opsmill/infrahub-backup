@@ -30,9 +30,6 @@ Before starting this tutorial, ensure you have:
 
 First, download and install the infrahubops binary for your operating system.
 
-<Tabs>
-<TabItem value="linux-mac" label="Linux/macOS">
-
 ```bash
 # Download the binary for your architecture
 curl https://infrahub.opsmill.io/ops/$(uname -s)/$(uname -m) -o infrahubops
@@ -43,26 +40,6 @@ chmod +x infrahubops
 # Verify installation
 ./infrahubops version
 ```
-
-</TabItem>
-<TabItem value="manual" label="Manual Download">
-
-Visit the releases page and download the appropriate binary for your system:
-
-- Linux AMD64: `infrahub-ops-linux-amd64`
-- Linux ARM64: `infrahub-ops-linux-arm64`
-- macOS AMD64: `infrahub-ops-darwin-amd64`
-- macOS ARM64: `infrahub-ops-darwin-arm64`
-
-Then make it executable:
-
-```bash
-chmod +x infrahub-ops-*
-mv infrahub-ops-* infrahubops
-```
-
-</TabItem>
-</Tabs>
 
 You should see output similar to:
 

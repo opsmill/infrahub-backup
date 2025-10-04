@@ -21,14 +21,6 @@ const sidebars: SidebarsConfig = {
     },
     {
       type: 'category',
-      label: 'Topics',
-      items: [
-        'topics/backup-strategies',
-        'topics/deployment-environments',
-      ],
-    },
-    {
-      type: 'category',
       label: 'Reference',
       items: [
         'reference/commands',
