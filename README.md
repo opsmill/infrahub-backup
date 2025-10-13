@@ -2,7 +2,7 @@
 ![Infrahub Logo](https://assets-global.website-files.com/657aff4a26dd8afbab24944b/657b0e0678f7fd35ce130776_Logo%20INFRAHUB.svg)
 <!-- markdownlint-restore -->
 
-# infrahubops
+# Infrahub Ops CLI
 
 [Infrahub](https://github.com/opsmill/infrahub) by [OpsMill](https://opsmill.com) acts as a central hub to manage the data, templates and playbooks that powers your infrastructure. At its heart, Infrahub is built on 3 fundamental pillars:
 
@@ -12,12 +12,21 @@
 
 ## Introduction
 
-`infrahubops` allows you to run maintenance commands on your running Infrahub instances:
+The Infrahub Ops CLI allows you to run maintenance commands on your running Infrahub instances:
 
 - Easy database backup and restore
 - Housekeeping tasks
 - Automated troubleshooting bundle collection
 
-## Using infrahubops
+## Available executables
 
-Documentation for using `infrahubops` is available [here](https://docs.infrahub.app/infrahubops/)
+Each operational area is exposed as its own binary:
+
+- `infrahub-backup` – create and restore Infrahub backups
+- `infrahub-environment` – inspect running deployments and environment metadata
+- `infrahub-taskmanager` – maintain Prefect flow runs and task queues
+- `infrahub-version` – display Infrahub and CLI version information
+
+## Using the CLI
+
+Documentation for using the Infrahub Ops tooling is available [here](https://docs.infrahub.app/infrahubops/)

@@ -1,9 +1,9 @@
-.PHONY: build clean install test lint fmt vet help
+.PHONY: build build-all clean install test lint fmt vet help
 
 # Variables
-BINARY_NAME=infrahub-ops
+BINARIES=infrahub-backup infrahub-environment infrahub-taskmanager infrahub-version
 BUILD_DIR=$(shell pwd)/bin
-SRC_DIR=src/
+SRC_ROOT=./src
 VERSION?=1.0.0
 LDFLAGS=-ldflags "-X main.version=$(VERSION) -s -w"
 
@@ -14,28 +14,37 @@ help: ## Display this help message
 	@echo "Available targets:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-15s %s\n", $$1, $$2}'
 
-build: ## Build the binary
-	@echo "Building $(BINARY_NAME)..."
+build: ## Build all CLI binaries for the current platform
+	@echo "Building Infrahub CLI binaries..."
 	@mkdir -p $(BUILD_DIR)
-	@go build -C $(SRC_DIR) $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)
-	@echo "Binary built: $(BUILD_DIR)/$(BINARY_NAME)"
+	@for bin in $(BINARIES); do \
+		echo "  $$bin"; \
+		go build $(LDFLAGS) -o $(BUILD_DIR)/$$bin $(SRC_ROOT)/cmd/$$bin; \
+	done
+	@echo "Binaries available in $(BUILD_DIR)"
 
 build-all: ## Build for multiple platforms
-	@echo "Building for multiple platforms..."
+	@echo "Building multi-platform binaries..."
 	@mkdir -p $(BUILD_DIR)
-	@GOOS=linux GOARCH=amd64 go build -C $(SRC_DIR) $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64 .
-	@GOOS=linux GOARCH=arm64 go build -C $(SRC_DIR) $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-arm64 .
-	@GOOS=darwin GOARCH=amd64 go build -C $(SRC_DIR) $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-amd64 .
-	@GOOS=darwin GOARCH=arm64 go build -C $(SRC_DIR) $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-arm64 .
-	@GOOS=windows GOARCH=amd64 go build -C $(SRC_DIR) $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-windows-amd64.exe .
-	@GOOS=windows GOARCH=arm64 go build -C $(SRC_DIR) $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-windows-arm64.exe .
-	@echo "Built binaries:"
-	@ls -la $(BUILD_DIR)/
+	@for bin in $(BINARIES); do \
+		for platform in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do \
+			OS=$${platform%/*}; \
+			ARCH=$${platform#*/}; \
+			EXT=$$( [ "$$OS" = "windows" ] && echo ".exe" ); \
+			OUT=$(BUILD_DIR)/$$bin-$$OS-$$ARCH$$EXT; \
+			echo "  $$bin ($$OS/$$ARCH)"; \
+			GOOS=$$OS GOARCH=$$ARCH go build $(LDFLAGS) -o "$$OUT" $(SRC_ROOT)/cmd/$$bin; \
+		done; \
+	done
+	@echo "Built binaries are located in $(BUILD_DIR)"
 
-install: build ## Install the binary to $GOPATH/bin
-	@echo "Installing $(BINARY_NAME)..."
-	@go install $(LDFLAGS) .
-	@echo "$(BINARY_NAME) installed to $(shell go env GOPATH)/bin/"
+install: ## Install the binaries to $GOPATH/bin
+	@echo "Installing Infrahub CLI binaries..."
+	@for bin in $(BINARIES); do \
+		echo "  $$bin"; \
+		go install $(LDFLAGS) $(SRC_ROOT)/cmd/$$bin; \
+	done
+	@echo "Binaries installed to $(shell go env GOPATH)/bin/"
 
 clean: ## Clean build artifacts
 	@echo "Cleaning build artifacts..."
@@ -77,13 +86,13 @@ deps-update: ## Update dependencies
 run-example: build ## Run example commands
 	@echo "Running example commands..."
 	@echo "1. Environment detection:"
-	@./$(BUILD_DIR)/$(BINARY_NAME) environment detect || true
+	@./$(BUILD_DIR)/infrahub-environment detect || true
 	@echo ""
-	@echo "2. List projects:"
-	@./$(BUILD_DIR)/$(BINARY_NAME) environment list || true
+	@echo "2. Backup help:"
+	@./$(BUILD_DIR)/infrahub-backup --help || true
 	@echo ""
-	@echo "3. Help:"
-	@./$(BUILD_DIR)/$(BINARY_NAME) --help
+	@echo "3. Version information:"
+	@./$(BUILD_DIR)/infrahub-version || true
 
 dev-setup: ## Set up development environment
 	@echo "Setting up development environment..."

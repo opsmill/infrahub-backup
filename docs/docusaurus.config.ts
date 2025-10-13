@@ -55,7 +55,7 @@ const config: Config = {
       items: [
         {
           type: "docSidebar",
-          sidebarId: "infrahubopsSidebar",
+          sidebarId: "infrahubOpsSidebar",
           position: "left",
           label: "infrahubops",
         },

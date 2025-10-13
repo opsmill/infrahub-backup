@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"encoding/json"
@@ -518,58 +518,6 @@ func selectorMatchesLabels(selector string, labels map[string]string) bool {
 	return true
 }
 
-func (k *KubernetesBackend) prepareCommand(command []string, opts *ExecOptions) []string {
-	if opts == nil {
-		return command
-	}
-
-	result := make([]string, len(command))
-	copy(result, command)
-
-	if len(opts.Env) > 0 {
-		keys := make([]string, 0, len(opts.Env))
-		for key := range opts.Env {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		envArgs := []string{"env"}
-		for _, key := range keys {
-			envArgs = append(envArgs, fmt.Sprintf("%s=%s", key, opts.Env[key]))
-		}
-		result = append(envArgs, result...)
-	}
-
-	/*
-		not required since k8s user in neo4j is neo4j
-		if opts.User != "" {
-			commandString := shellQuoteCommand(result)
-			result = []string{"su", "-", opts.User, "-s", "/bin/sh", "-c", commandString}
-		}
-	*/
-
-	return result
-}
-
-/*
-func shellQuoteCommand(parts []string) string {
-	quoted := make([]string, len(parts))
-	for i, part := range parts {
-		quoted[i] = shellQuote(part)
-	}
-	return strings.Join(quoted, " ")
-}
-
-func shellQuote(value string) string {
-	if value == "" {
-		return "''"
-	}
-	if !strings.ContainsAny(value, " ' \"$`!#&()*;<>?|{}[]~") {
-		return value
-	}
-	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
-}
-*/
-
 func nonEmptyLines(output string) []string {
 	lines := []string{}
 	for _, line := range strings.Split(output, "\n") {
@@ -648,4 +596,51 @@ func ListKubernetesNamespaces(executor *CommandExecutor) ([]string, error) {
 	}
 	namespaces := unique(nonEmptyLines(output))
 	return namespaces, nil
+}
+
+func (k *KubernetesBackend) prepareCommand(command []string, opts *ExecOptions) []string {
+	if opts == nil {
+		return command
+	}
+
+	result := make([]string, len(command))
+	copy(result, command)
+
+	if len(opts.Env) > 0 {
+		keys := make([]string, 0, len(opts.Env))
+		for key := range opts.Env {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		envArgs := []string{"env"}
+		for _, key := range keys {
+			envArgs = append(envArgs, fmt.Sprintf("%s=%s", key, opts.Env[key]))
+		}
+		result = append(envArgs, result...)
+	}
+
+	if opts.User != "" {
+		commandString := shellQuoteCommand(result)
+		result = []string{"su", "-", opts.User, "-s", "/bin/sh", "-c", commandString}
+	}
+
+	return result
+}
+
+func shellQuoteCommand(parts []string) string {
+	quoted := make([]string, len(parts))
+	for i, part := range parts {
+		quoted[i] = shellQuote(part)
+	}
+	return strings.Join(quoted, " ")
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if !strings.ContainsAny(value, " ' \"$`!#&()*;<>?|{}[]~") {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
