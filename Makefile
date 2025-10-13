@@ -1,7 +1,7 @@
 .PHONY: build build-all clean install test lint fmt vet help
 
 # Variables
-BINARIES=infrahub-backup infrahub-environment infrahub-taskmanager infrahub-version
+BINARIES=infrahub-backup infrahub-taskmanager
 BUILD_DIR=$(shell pwd)/bin
 SRC_ROOT=./src
 VERSION?=1.0.0
@@ -86,13 +86,13 @@ deps-update: ## Update dependencies
 run-example: build ## Run example commands
 	@echo "Running example commands..."
 	@echo "1. Environment detection:"
-	@./$(BUILD_DIR)/infrahub-environment detect || true
+	@./$(BUILD_DIR)/infrahub-taskmanager environment detect || true
 	@echo ""
 	@echo "2. Backup help:"
 	@./$(BUILD_DIR)/infrahub-backup --help || true
 	@echo ""
 	@echo "3. Version information:"
-	@./$(BUILD_DIR)/infrahub-version || true
+	@./$(BUILD_DIR)/infrahub-backup version || true
 
 dev-setup: ## Set up development environment
 	@echo "Setting up development environment..."

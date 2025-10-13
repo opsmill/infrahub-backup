@@ -22,10 +22,8 @@ The Infrahub Ops CLI allows you to run maintenance commands on your running Infr
 
 Each operational area is exposed as its own binary:
 
-- `infrahub-backup` – create and restore Infrahub backups
-- `infrahub-environment` – inspect running deployments and environment metadata
-- `infrahub-taskmanager` – maintain Prefect flow runs and task queues
-- `infrahub-version` – display Infrahub and CLI version information
+- `infrahub-backup` – create/restore backups, inspect environments, and show build metadata
+- `infrahub-taskmanager` – maintain Prefect flow runs, inspect environments, and show build metadata
 
 ## Using the CLI
 

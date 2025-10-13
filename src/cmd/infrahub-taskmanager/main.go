@@ -22,6 +22,7 @@ func main() {
 	}
 
 	app.ConfigureRootCommand(rootCmd, iops)
+	app.AttachEnvironmentCommands(rootCmd, iops)
 
 	flushCmd := &cobra.Command{
 		Use:   "flush",
@@ -80,6 +81,16 @@ func main() {
 	flushCmd.AddCommand(flowRunsCmd)
 	flushCmd.AddCommand(staleRunsCmd)
 	rootCmd.AddCommand(flushCmd)
+
+	versionCmd := &cobra.Command{
+		Use:   "version",
+		Short: "Print Infrahub Ops CLI build information",
+		Run: func(cmd *cobra.Command, args []string) {
+			logrus.Infof("Version: %s", app.BuildRevision())
+		},
+	}
+
+	rootCmd.AddCommand(versionCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		logrus.Errorf("Command failed: %v", err)

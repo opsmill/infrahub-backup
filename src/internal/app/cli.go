@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/sirupsen/logrus"
@@ -50,4 +51,59 @@ func ConfigureRootCommand(cmd *cobra.Command, app *InfrahubOps) {
 			logrus.SetFormatter(&logrus.TextFormatter{FullTimestamp: true})
 		}
 	})
+}
+
+// AttachEnvironmentCommands wires the environment detection subcommands onto a root command.
+func AttachEnvironmentCommands(rootCmd *cobra.Command, app *InfrahubOps) {
+	envCmd := &cobra.Command{
+		Use:   "environment",
+		Short: "Environment detection and management",
+		Long:  "Detect and list Infrahub deployment environments across Docker and Kubernetes.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return cmd.Help()
+		},
+	}
+
+	detectCmd := &cobra.Command{
+		Use:   "detect",
+		Short: "Detect the active deployment environment",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return app.DetectEnvironment()
+		},
+	}
+
+	listCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List available Infrahub deployment targets",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			executor := NewCommandExecutor()
+			dockerProjects, _ := ListDockerProjects(executor)
+			k8sNamespaces, _ := ListKubernetesNamespaces(executor)
+
+			if len(dockerProjects) == 0 && len(k8sNamespaces) == 0 {
+				logrus.Info("No Infrahub deployments detected")
+				return nil
+			}
+
+			if len(dockerProjects) > 0 {
+				logrus.Info("Docker Compose projects:")
+				for _, project := range dockerProjects {
+					fmt.Printf("  %s\n", project)
+				}
+			}
+
+			if len(k8sNamespaces) > 0 {
+				logrus.Info("Kubernetes namespaces:")
+				for _, ns := range k8sNamespaces {
+					fmt.Printf("  %s\n", ns)
+				}
+			}
+
+			return nil
+		},
+	}
+
+	envCmd.AddCommand(detectCmd)
+	envCmd.AddCommand(listCmd)
+	rootCmd.AddCommand(envCmd)
 }
