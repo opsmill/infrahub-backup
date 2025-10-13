@@ -10,13 +10,12 @@ The operational tooling is split into dedicated binaries. The following commands
 	- Create a backup of the Infrahub instance.
 - `infrahub-backup restore <backup-file>`
 	- Restore Infrahub from a backup archive.
-
-### `infrahub-environment`
-
-- `infrahub-environment detect`
+- `infrahub-backup environment detect`
 	- Detect the current deployment environment (Docker/k8s).
-- `infrahub-environment list`
+- `infrahub-backup environment list`
 	- List Infrahub Docker Compose projects and Kubernetes namespaces.
+- `infrahub-backup version`
+	- Print Infrahub Ops CLI build information.
 
 ### `infrahub-taskmanager`
 
@@ -24,11 +23,12 @@ The operational tooling is split into dedicated binaries. The following commands
 	- Delete completed/failed/cancelled flow runs older than the retention period (default: 30 days, batch size 200).
 - `infrahub-taskmanager flush stale-runs [days_to_keep] [batch_size]`
 	- Cancel running flow runs older than the retention period (default: 2 days, batch size 200).
-
-### `infrahub-version`
-
-- `infrahub-version`
-	- Print Infrahub and CLI version details.
+- `infrahub-taskmanager environment detect`
+	- Detect the current deployment environment (Docker/k8s).
+- `infrahub-taskmanager environment list`
+	- List Infrahub Docker Compose projects and Kubernetes namespaces.
+- `infrahub-taskmanager version`
+	- Print Infrahub Ops CLI build information.
 
 #### Shared flags
 

@@ -23,26 +23,22 @@ This guide provides step-by-step instructions for installing the Infrahub Ops CL
 
 ```bash
 curl -L https://infrahub.opsmill.io/ops/$(uname -s)/$(uname -m)/infrahub-backup -o infrahub-backup
-curl -L https://infrahub.opsmill.io/ops/$(uname -s)/$(uname -m)/infrahub-environment -o infrahub-environment
 curl -L https://infrahub.opsmill.io/ops/$(uname -s)/$(uname -m)/infrahub-taskmanager -o infrahub-taskmanager
-curl -L https://infrahub.opsmill.io/ops/$(uname -s)/$(uname -m)/infrahub-version -o infrahub-version
 chmod +x infrahub-*
 ```
 
 2. Run a command
 
 ```bash
-./infrahub-environment detect
+./infrahub-taskmanager environment detect
 ```
 
 ### Available binaries
 
 | Binary | Purpose |
 | --- | --- |
-| `infrahub-backup` | Create and restore Infrahub backups |
-| `infrahub-environment` | Inspect and detect deployment environments |
-| `infrahub-taskmanager` | Run housekeeping operations against Prefect |
-| `infrahub-version` | Print version information |
+| `infrahub-backup` | Create/restore backups, inspect environments, and display build metadata |
+| `infrahub-taskmanager` | Prefect housekeeping tasks, environment inspection, and build metadata |
 
 ### Configuration
 
