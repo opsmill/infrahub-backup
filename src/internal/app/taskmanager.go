@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"fmt"
@@ -7,12 +7,12 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// Task Manager (Prefect) maintenance
-func (iops *InfrahubOps) flushFlowRuns(daysToKeep, batchSize int) error {
+// FlushFlowRuns removes completed Prefect runs beyond the retention window.
+func (iops *InfrahubOps) FlushFlowRuns(daysToKeep, batchSize int) error {
 	if err := iops.checkPrerequisites(); err != nil {
 		return err
 	}
-	if err := iops.detectEnvironment(); err != nil {
+	if err := iops.DetectEnvironment(); err != nil {
 		return err
 	}
 
@@ -27,7 +27,7 @@ func (iops *InfrahubOps) flushFlowRuns(daysToKeep, batchSize int) error {
 
 	var scriptContent []byte
 	var err error
-	if scriptContent, err = scripts.ReadFile("scripts/clean_old_tasks.py"); err != nil {
+	if scriptContent, err = readEmbeddedScript("clean_old_tasks.py"); err != nil {
 		return fmt.Errorf("could not retrieve script: %w", err)
 	}
 
@@ -40,11 +40,12 @@ func (iops *InfrahubOps) flushFlowRuns(daysToKeep, batchSize int) error {
 	return nil
 }
 
-func (iops *InfrahubOps) flushStaleRuns(daysToKeep, batchSize int) error {
+// FlushStaleRuns cancels running Prefect flow runs that exceeded retention.
+func (iops *InfrahubOps) FlushStaleRuns(daysToKeep, batchSize int) error {
 	if err := iops.checkPrerequisites(); err != nil {
 		return err
 	}
-	if err := iops.detectEnvironment(); err != nil {
+	if err := iops.DetectEnvironment(); err != nil {
 		return err
 	}
 
@@ -59,7 +60,7 @@ func (iops *InfrahubOps) flushStaleRuns(daysToKeep, batchSize int) error {
 
 	var scriptContent []byte
 	var err error
-	if scriptContent, err = scripts.ReadFile("scripts/clean_stale_tasks.py"); err != nil {
+	if scriptContent, err = readEmbeddedScript("clean_stale_tasks.py"); err != nil {
 		return fmt.Errorf("could not retrieve script: %w", err)
 	}
 

@@ -1,20 +1,29 @@
-package main
+package app
 
 import (
 	"bufio"
 	"embed"
 	"errors"
-	"regexp"
-
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/sirupsen/logrus"
 )
+
+// scriptsFS holds the embedded maintenance scripts.
+//
+//go:embed scripts/*
+var scriptsFS embed.FS
+
+// Embeddable scripts require exposing a helper to other packages.
+func ReadScript(name string) ([]byte, error) {
+	return scriptsFS.ReadFile("scripts/" + name)
+}
 
 // Configuration holds the application configuration
 type Configuration struct {
@@ -38,11 +47,6 @@ type InfrahubOps struct {
 	kubernetesBackend *KubernetesBackend
 }
 
-// Embedded scripts
-//
-//go:embed scripts
-var scripts embed.FS
-
 // NewInfrahubOps creates a new InfrahubOps instance
 func NewInfrahubOps() *InfrahubOps {
 	executor := NewCommandExecutor()
@@ -54,6 +58,10 @@ func NewInfrahubOps() *InfrahubOps {
 		config:   config,
 		executor: executor,
 	}
+}
+
+func (iops *InfrahubOps) Config() *Configuration {
+	return iops.config
 }
 
 // CommandExecutor handles command execution
@@ -309,15 +317,9 @@ func (iops *InfrahubOps) fetchDatabaseCredentials() error {
 		}
 		if iops.config.PostgresUsername == "" {
 			iops.config.PostgresUsername = "postgres"
-			if iops.backend.Name() == "kubernetes" {
-				iops.config.PostgresUsername = "prefect"
-			}
 		}
 		if iops.config.PostgresPassword == "" {
 			iops.config.PostgresPassword = "prefect"
-			if iops.backend.Name() == "kubernetes" {
-				iops.config.PostgresPassword = "prefect-rocks"
-			}
 		}
 	}
 
@@ -350,7 +352,7 @@ func (iops *InfrahubOps) applyPrefectConnection(connStr string) {
 }
 
 // Environment detection
-func (iops *InfrahubOps) detectEnvironment() error {
+func (iops *InfrahubOps) DetectEnvironment() error {
 	logrus.Info("Detecting Infrahub deployment environment...")
 	backend, err := iops.ensureBackend()
 	if err != nil {

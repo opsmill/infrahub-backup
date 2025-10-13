@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"encoding/json"
@@ -24,137 +24,26 @@ type BackupMetadata struct {
 	Checksums       map[string]string `json:"checksums,omitempty"`
 }
 
-// Backup operations
-func (iops *InfrahubOps) generateBackupFilename() string {
-	timestamp := time.Now().Format("20060102_150405")
-	return fmt.Sprintf("infrahub_backup_%s.tar.gz", timestamp)
-}
-
-func (iops *InfrahubOps) createBackupMetadata(backupID string) *BackupMetadata {
-	return &BackupMetadata{
-		MetadataVersion: metadataVersion,
-		BackupID:        backupID,
-		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
-		ToolVersion:     BuildRevision(),
-		InfrahubVersion: iops.getInfrahubVersion(),
-		Components:      []string{"database", "task-manager-db", "artifacts"},
-	}
-}
-
-func (iops *InfrahubOps) stopAppContainers() error {
-	logrus.Info("Stopping Infrahub application services...")
-
-	services := []string{
-		"infrahub-server", "task-worker", "task-manager",
-		"task-manager-background-svc", "cache", "message-queue",
-	}
-
-	for _, service := range services {
-		running, err := iops.IsServiceRunning(service)
-		if err != nil {
-			logrus.Debugf("Could not determine status of %s: %v", service, err)
-			continue
-		}
-
-		if running {
-			logrus.Infof("Stopping %s...", service)
-			if err := iops.StopServices(service); err != nil {
-				return fmt.Errorf("failed to stop %s: %w", service, err)
-			}
-		}
-	}
-
-	logrus.Info("Application services stopped")
-	return nil
-}
-
-func (iops *InfrahubOps) backupDatabase(backupDir string, backupMetadata string) error {
-	logrus.Info("Backing up Neo4j database...")
-
-	// Create backup directory in container
-	if _, err := iops.Exec("database", []string{"mkdir", "-p", "/tmp/infrahubops"}, nil); err != nil {
-		return fmt.Errorf("failed to create backup directory: %w", err)
-	}
-	defer func() {
-		if _, err := iops.Exec("database", []string{"rm", "-rf", "/tmp/infrahubops"}, nil); err != nil {
-			logrus.Warnf("Failed to remove temporary Neo4j backup directory: %v", err)
-		}
-	}()
-
-	// Create backup using neo4j-admin
-	if output, err := iops.Exec(
-		"database",
-		[]string{"neo4j-admin", "database", "backup", "--include-metadata=" + backupMetadata, "--to-path=/tmp/infrahubops", iops.config.Neo4jDatabase},
-		nil,
-	); err != nil {
-		return fmt.Errorf("failed to backup neo4j: %w\nOutput: %v", err, output)
-	}
-
-	// Copy backup
-	if err := iops.CopyFrom("database", "/tmp/infrahubops", filepath.Join(backupDir, "database")); err != nil {
-		return fmt.Errorf("failed to copy database backup: %w", err)
-	}
-
-	logrus.Info("Neo4j backup completed")
-	return nil
-}
-
-func (iops *InfrahubOps) backupTaskManagerDB(backupDir string) error {
-	logrus.Info("Backing up PostgreSQL database...")
-
-	// Create dump
-	opts := &ExecOptions{Env: map[string]string{
-		"PGPASSWORD": iops.config.PostgresPassword,
-	}}
-	if output, err := iops.Exec(
-		"task-manager-db",
-		[]string{"pg_dump", "-Fc", "-U", iops.config.PostgresUsername, "-d", iops.config.PostgresDatabase, "-f", "/tmp/infrahubops_prefect.dump"},
-		opts,
-	); err != nil {
-		return fmt.Errorf("failed to create postgresql dump: %w\nOutput: %v", err, output)
-	}
-	defer func() {
-		if _, err := iops.Exec("task-manager-db", []string{"rm", "/tmp/infrahubops_prefect.dump"}, nil); err != nil {
-			logrus.Warnf("Failed to remove temporary postgres dump: %v", err)
-		}
-	}()
-
-	// Copy dump
-	if err := iops.CopyFrom("task-manager-db", "/tmp/infrahubops_prefect.dump", filepath.Join(backupDir, "prefect.dump")); err != nil {
-		return fmt.Errorf("failed to copy postgresql dump: %w", err)
-	}
-
-	logrus.Info("PostgreSQL backup completed")
-	return nil
-}
-
-type tasksOutput struct {
-	Id   string `json:"id"`
-	Name string `json:"title"`
-}
-
-func (iops *InfrahubOps) createBackup(force bool, neo4jMetadata string) error {
+// CreateBackup creates a full backup of the Infrahub deployment
+func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string) error {
 	if err := iops.checkPrerequisites(); err != nil {
 		return err
 	}
 
-	if err := iops.detectEnvironment(); err != nil {
+	if err := iops.DetectEnvironment(); err != nil {
 		return err
 	}
 
 	// Check for running tasks unless --force is set
 	if !force {
 		logrus.Info("Checking for running tasks before backup...")
-		var scriptContent string
-		// Read the get_running_tasks.py script from embedded scripts
-		if b, err := scripts.ReadFile("scripts/get_running_tasks.py"); err == nil {
-			scriptContent = string(b)
-		} else {
+		scriptBytes, err := readEmbeddedScript("get_running_tasks.py")
+		if err != nil {
 			return fmt.Errorf("could not retrieve get_running_tasks.py: %w", err)
 		}
+		scriptContent := string(scriptBytes)
 		for {
 			var output string
-			var err error
 			output, err = iops.executeScript("task-worker", scriptContent, "/tmp/get_running_tasks.py", "python", "-u", "/tmp/get_running_tasks.py")
 			if err != nil {
 				return fmt.Errorf("failed to check running tasks: %w", err)
@@ -264,22 +153,8 @@ func (iops *InfrahubOps) createBackup(force bool, neo4jMetadata string) error {
 	return nil
 }
 
-// Restore operations
-
-func (iops *InfrahubOps) wipeTransientData() error {
-	logrus.Info("Wiping cache and message queue data...")
-
-	if _, err := iops.Exec("message-queue", []string{"find", "/var/lib/rabbitmq", "-mindepth", "1", "-delete"}, nil); err != nil {
-		logrus.Warnf("Failed to wipe message queue data: %v", err)
-	}
-	if _, err := iops.Exec("cache", []string{"find", "/data", "-mindepth", "1", "-delete"}, nil); err != nil {
-		logrus.Warnf("Failed to wipe cache data: %v", err)
-	}
-	logrus.Info("Transient data wiped")
-	return nil
-}
-
-func (iops *InfrahubOps) restoreBackup(backupFile string) error {
+// RestoreBackup restores an Infrahub deployment from a backup archive
+func (iops *InfrahubOps) RestoreBackup(backupFile string) error {
 	if _, err := os.Stat(backupFile); os.IsNotExist(err) {
 		return fmt.Errorf("backup file not found: %s", backupFile)
 	}
@@ -288,7 +163,7 @@ func (iops *InfrahubOps) restoreBackup(backupFile string) error {
 		return err
 	}
 
-	if err := iops.detectEnvironment(); err != nil {
+	if err := iops.DetectEnvironment(); err != nil {
 		return err
 	}
 
@@ -390,6 +265,127 @@ func (iops *InfrahubOps) restoreBackup(backupFile string) error {
 	logrus.Info("Restore completed successfully")
 	logrus.Info("Infrahub should be available shortly")
 
+	return nil
+}
+
+func (iops *InfrahubOps) generateBackupFilename() string {
+	timestamp := time.Now().Format("20060102_150405")
+	return fmt.Sprintf("infrahub_backup_%s.tar.gz", timestamp)
+}
+
+func (iops *InfrahubOps) createBackupMetadata(backupID string) *BackupMetadata {
+	return &BackupMetadata{
+		MetadataVersion: metadataVersion,
+		BackupID:        backupID,
+		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
+		ToolVersion:     BuildRevision(),
+		InfrahubVersion: iops.getInfrahubVersion(),
+		Components:      []string{"database", "task-manager-db", "artifacts"},
+	}
+}
+
+func (iops *InfrahubOps) stopAppContainers() error {
+	logrus.Info("Stopping Infrahub application services...")
+
+	services := []string{
+		"infrahub-server", "task-worker", "task-manager",
+		"task-manager-background-svc", "cache", "message-queue",
+	}
+
+	for _, service := range services {
+		running, err := iops.IsServiceRunning(service)
+		if err != nil {
+			logrus.Debugf("Could not determine status of %s: %v", service, err)
+			continue
+		}
+
+		if running {
+			logrus.Infof("Stopping %s...", service)
+			if err := iops.StopServices(service); err != nil {
+				return fmt.Errorf("failed to stop %s: %w", service, err)
+			}
+		}
+	}
+
+	logrus.Info("Application services stopped")
+	return nil
+}
+
+func (iops *InfrahubOps) backupDatabase(backupDir string, backupMetadata string) error {
+	logrus.Info("Backing up Neo4j database...")
+
+	// Create backup directory in container
+	if _, err := iops.Exec("database", []string{"mkdir", "-p", "/tmp/infrahubops"}, nil); err != nil {
+		return fmt.Errorf("failed to create backup directory: %w", err)
+	}
+	defer func() {
+		if _, err := iops.Exec("database", []string{"rm", "-rf", "/tmp/infrahubops"}, nil); err != nil {
+			logrus.Warnf("Failed to remove temporary Neo4j backup directory: %v", err)
+		}
+	}()
+
+	// Create backup using neo4j-admin
+	if output, err := iops.Exec(
+		"database",
+		[]string{"neo4j-admin", "database", "backup", "--include-metadata=" + backupMetadata, "--to-path=/tmp/infrahubops", iops.config.Neo4jDatabase},
+		nil,
+	); err != nil {
+		return fmt.Errorf("failed to backup neo4j: %w\nOutput: %v", err, output)
+	}
+
+	// Copy backup
+	if err := iops.CopyFrom("database", "/tmp/infrahubops", filepath.Join(backupDir, "database")); err != nil {
+		return fmt.Errorf("failed to copy database backup: %w", err)
+	}
+
+	logrus.Info("Neo4j backup completed")
+	return nil
+}
+
+func (iops *InfrahubOps) backupTaskManagerDB(backupDir string) error {
+	logrus.Info("Backing up PostgreSQL database...")
+
+	// Create dump
+	opts := &ExecOptions{Env: map[string]string{
+		"PGPASSWORD": iops.config.PostgresPassword,
+	}}
+	if output, err := iops.Exec(
+		"task-manager-db",
+		[]string{"pg_dump", "-Fc", "-U", iops.config.PostgresUsername, "-d", iops.config.PostgresDatabase, "-f", "/tmp/infrahubops_prefect.dump"},
+		opts,
+	); err != nil {
+		return fmt.Errorf("failed to create postgresql dump: %w\nOutput: %v", err, output)
+	}
+	defer func() {
+		if _, err := iops.Exec("task-manager-db", []string{"rm", "/tmp/infrahubops_prefect.dump"}, nil); err != nil {
+			logrus.Warnf("Failed to remove temporary postgres dump: %v", err)
+		}
+	}()
+
+	// Copy dump
+	if err := iops.CopyFrom("task-manager-db", "/tmp/infrahubops_prefect.dump", filepath.Join(backupDir, "prefect.dump")); err != nil {
+		return fmt.Errorf("failed to copy postgresql dump: %w", err)
+	}
+
+	logrus.Info("PostgreSQL backup completed")
+	return nil
+}
+
+type tasksOutput struct {
+	Id   string `json:"id"`
+	Name string `json:"title"`
+}
+
+func (iops *InfrahubOps) wipeTransientData() error {
+	logrus.Info("Wiping cache and message queue data...")
+
+	if _, err := iops.Exec("message-queue", []string{"find", "/var/lib/rabbitmq", "-mindepth", "1", "-delete"}, nil); err != nil {
+		logrus.Warnf("Failed to wipe message queue data: %v", err)
+	}
+	if _, err := iops.Exec("cache", []string{"find", "/data", "-mindepth", "1", "-delete"}, nil); err != nil {
+		logrus.Warnf("Failed to wipe cache data: %v", err)
+	}
+	logrus.Info("Transient data wiped")
 	return nil
 }
 

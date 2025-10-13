@@ -1,4 +1,4 @@
-package main
+package app
 
 import (
 	"archive/tar"
@@ -172,4 +172,8 @@ func BuildRevision() string {
 		}
 	}
 	return rev + dirty
+}
+
+func readEmbeddedScript(name string) ([]byte, error) {
+	return scriptsFS.ReadFile("scripts/" + name)
 }
