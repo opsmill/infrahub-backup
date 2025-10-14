@@ -37,29 +37,8 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string) error {
 	// Check for running tasks unless --force is set
 	if !force {
 		logrus.Info("Checking for running tasks before backup...")
-		scriptBytes, err := readEmbeddedScript("get_running_tasks.py")
-		if err != nil {
-			return fmt.Errorf("could not retrieve get_running_tasks.py: %w", err)
-		}
-		scriptContent := string(scriptBytes)
-		for {
-			var output string
-			output, err = iops.executeScript("task-worker", scriptContent, "/tmp/get_running_tasks.py", "python", "-u", "/tmp/get_running_tasks.py")
-			if err != nil {
-				return fmt.Errorf("failed to check running tasks: %w", err)
-			}
-			var tasks []tasksOutput
-			if err = json.Unmarshal([]byte(output), &tasks); err != nil {
-				return fmt.Errorf("could not parse json: %w\n%v", err, output)
-			}
-			if len(tasks) == 0 {
-				logrus.Info("No running tasks detected. Proceeding with backup.")
-				break
-			} else {
-				logrus.Warnf("There are running %v tasks: %v", len(tasks), tasks)
-				logrus.Warnf("Waiting for them to complete... (use --force to override)")
-				time.Sleep(5 * time.Second)
-			}
+		if err := iops.waitForRunningTasks(); err != nil {
+			return err
 		}
 	}
 
@@ -151,6 +130,81 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string) error {
 	}
 
 	return nil
+}
+
+func (iops *InfrahubOps) waitForRunningTasks() error {
+	useInfrahubctl := true
+	var scriptContent string
+
+	loadScriptContent := func() error {
+		if scriptContent != "" {
+			return nil
+		}
+		scriptBytes, err := readEmbeddedScript("get_running_tasks.py")
+		if err != nil {
+			return fmt.Errorf("could not retrieve get_running_tasks.py: %w", err)
+		}
+		scriptContent = string(scriptBytes)
+		return nil
+	}
+
+	isCommandNotFound := func(err error, output string) bool {
+		if err == nil {
+			return false
+		}
+		errMsg := strings.ToLower(err.Error())
+		if strings.Contains(errMsg, "no such command") {
+			return true
+		}
+		outputLower := strings.ToLower(output)
+		return strings.Contains(outputLower, "no such command")
+	}
+
+	for {
+		var (
+			output string
+			err    error
+		)
+
+		if useInfrahubctl {
+			output, err = iops.Exec("task-worker", []string{"infrahubctl", "task", "list", "--json", "--state", "running", "--state", "pending"}, nil)
+			if err != nil {
+				if isCommandNotFound(err, output) {
+					logrus.Infof("infrahubctl task list command not available in task-worker, falling back to embedded script")
+					useInfrahubctl = false
+					if loadErr := loadScriptContent(); loadErr != nil {
+						return loadErr
+					}
+					continue
+				}
+				return fmt.Errorf("failed to check running tasks: %w\n%s", err, output)
+			}
+		} else {
+			if err := loadScriptContent(); err != nil {
+				return err
+			}
+			output, err = iops.executeScript("task-worker", scriptContent, "/tmp/get_running_tasks.py", "python", "-u", "/tmp/get_running_tasks.py")
+			if err != nil {
+				return fmt.Errorf("failed to check running tasks: %w", err)
+			}
+		}
+
+		output = strings.TrimSpace(output)
+		var tasks []tasksOutput
+		if output != "" {
+			if err := json.Unmarshal([]byte(output), &tasks); err != nil {
+				return fmt.Errorf("could not parse json: %w\n%v", err, output)
+			}
+		}
+		if len(tasks) == 0 {
+			logrus.Info("No running tasks detected. Proceeding with backup.")
+			return nil
+		}
+
+		logrus.Warnf("There are running %v tasks: %v", len(tasks), tasks)
+		logrus.Warnf("Waiting for them to complete... (use --force to override)")
+		time.Sleep(5 * time.Second)
+	}
 }
 
 // RestoreBackup restores an Infrahub deployment from a backup archive
