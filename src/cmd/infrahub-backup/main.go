@@ -27,8 +27,9 @@ func main() {
 	var neo4jMetadata string
 
 	createCmd := &cobra.Command{
-		Use:   "create",
-		Short: "Create a backup of the current Infrahub instance",
+		Use:          "create",
+		Short:        "Create a backup of the current Infrahub instance",
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return iops.CreateBackup(force, neo4jMetadata)
 		},
@@ -37,9 +38,10 @@ func main() {
 	createCmd.Flags().StringVar(&neo4jMetadata, "neo4jmetadata", "all", "Whether to backup neo4j metadata or not (all, none, users, roles)")
 
 	restoreCmd := &cobra.Command{
-		Use:   "restore <backup-file>",
-		Short: "Restore Infrahub from a backup archive",
-		Args:  cobra.ExactArgs(1),
+		Use:          "restore <backup-file>",
+		Short:        "Restore Infrahub from a backup archive",
+		Args:         cobra.ExactArgs(1),
+		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return iops.RestoreBackup(args[0])
 		},
