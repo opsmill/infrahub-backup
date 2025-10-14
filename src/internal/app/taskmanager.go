@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/sirupsen/logrus"
 )
@@ -25,13 +26,9 @@ func (iops *InfrahubOps) FlushFlowRuns(daysToKeep, batchSize int) error {
 
 	logrus.Infof("Flushing Prefect flow runs older than %d days (batch size %d)...", daysToKeep, batchSize)
 
-	var scriptContent []byte
-	var err error
-	if scriptContent, err = readEmbeddedScript("clean_old_tasks.py"); err != nil {
-		return fmt.Errorf("could not retrieve script: %w", err)
-	}
-
-	if _, err := iops.executeScript("task-worker", string(scriptContent), "/tmp/infrahubops_clean_old_tasks.py", "python", "-u", "/tmp/infrahubops_clean_old_tasks.py", strconv.Itoa(daysToKeep), strconv.Itoa(batchSize)); err != nil {
+	primaryCmd := []string{"infrahub", "tasks", "flush", "flow-runs", "--days-to-keep", strconv.Itoa(daysToKeep), "--batch-size", strconv.Itoa(batchSize)}
+	scriptArgs := []string{"python", "-u", "/tmp/infrahubops_clean_old_tasks.py", strconv.Itoa(daysToKeep), strconv.Itoa(batchSize)}
+	if err := iops.runTaskCommandWithFallback(primaryCmd, "clean_old_tasks.py", "/tmp/infrahubops_clean_old_tasks.py", scriptArgs); err != nil {
 		return err
 	}
 
@@ -58,17 +55,50 @@ func (iops *InfrahubOps) FlushStaleRuns(daysToKeep, batchSize int) error {
 
 	logrus.Infof("Flushing Prefect flow runs older than %d days (batch size %d)...", daysToKeep, batchSize)
 
-	var scriptContent []byte
-	var err error
-	if scriptContent, err = readEmbeddedScript("clean_stale_tasks.py"); err != nil {
-		return fmt.Errorf("could not retrieve script: %w", err)
-	}
-
-	if _, err := iops.executeScript("task-worker", string(scriptContent), "/tmp/infrahubops_clean_stale_tasks.py", "python", "-u", "/tmp/infrahubops_clean_stale_tasks.py", strconv.Itoa(daysToKeep), strconv.Itoa(batchSize)); err != nil {
+	primaryCmd := []string{"infrahub", "tasks", "flush", "stale-runs", "--days-to-keep", strconv.Itoa(daysToKeep), "--batch-size", strconv.Itoa(batchSize)}
+	scriptArgs := []string{"python", "-u", "/tmp/infrahubops_clean_stale_tasks.py", strconv.Itoa(daysToKeep), strconv.Itoa(batchSize)}
+	if err := iops.runTaskCommandWithFallback(primaryCmd, "clean_stale_tasks.py", "/tmp/infrahubops_clean_stale_tasks.py", scriptArgs); err != nil {
 		return err
 	}
 
 	logrus.Info("Stale flow runs cleanup completed:")
 
 	return nil
+}
+
+func (iops *InfrahubOps) runTaskCommandWithFallback(primaryCmd []string, scriptName, scriptTarget string, scriptExecArgs []string) error {
+	commandLabel := strings.Join(primaryCmd, " ")
+	output, err := iops.Exec("task-worker", primaryCmd, nil)
+	if err == nil {
+		if trimmed := strings.TrimSpace(output); trimmed != "" {
+			logrus.Info(trimmed)
+		}
+		return nil
+	}
+
+	isCommandNotFound := func(err error, output string) bool {
+		if err == nil {
+			return false
+		}
+		errMsg := strings.ToLower(err.Error())
+		if strings.Contains(errMsg, "no such command") {
+			return true
+		}
+		outputLower := strings.ToLower(output)
+		return strings.Contains(outputLower, "no such command")
+	}
+
+	if isCommandNotFound(err, output) {
+		logrus.Infof("infrahub CLI command not available in task-worker, falling back to %s", scriptName)
+		scriptContent, readErr := readEmbeddedScript(scriptName)
+		if readErr != nil {
+			return fmt.Errorf("could not retrieve script: %w", readErr)
+		}
+		if _, execErr := iops.executeScript("task-worker", string(scriptContent), scriptTarget, scriptExecArgs...); execErr != nil {
+			return execErr
+		}
+		return nil
+	}
+
+	return fmt.Errorf("failed to execute %s: %w\n%s", commandLabel, err, output)
 }
