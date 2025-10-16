@@ -6,6 +6,7 @@ BUILD_DIR=$(shell pwd)/bin
 SRC_ROOT=./src
 VERSION?=1.0.0
 LDFLAGS=-ldflags "-X main.version=$(VERSION) -s -w"
+CGO_ENABLED=0
 
 # Default target
 help: ## Display this help message
@@ -19,7 +20,7 @@ build: ## Build all CLI binaries for the current platform
 	@mkdir -p $(BUILD_DIR)
 	@for bin in $(BINARIES); do \
 		echo "  $$bin"; \
-		go build $(LDFLAGS) -o $(BUILD_DIR)/$$bin $(SRC_ROOT)/cmd/$$bin; \
+		CGO_ENABLED=$(CGO_ENABLED) go build $(LDFLAGS) -o $(BUILD_DIR)/$$bin $(SRC_ROOT)/cmd/$$bin; \
 	done
 	@echo "Binaries available in $(BUILD_DIR)"
 
@@ -33,7 +34,7 @@ build-all: ## Build for multiple platforms
 			EXT=$$( [ "$$OS" = "windows" ] && echo ".exe" ); \
 			OUT=$(BUILD_DIR)/$$bin-$$OS-$$ARCH$$EXT; \
 			echo "  $$bin ($$OS/$$ARCH)"; \
-			GOOS=$$OS GOARCH=$$ARCH go build $(LDFLAGS) -o "$$OUT" $(SRC_ROOT)/cmd/$$bin; \
+			CGO_ENABLED=$(CGO_ENABLED) GOOS=$$OS GOARCH=$$ARCH go build $(LDFLAGS) -o "$$OUT" $(SRC_ROOT)/cmd/$$bin; \
 		done; \
 	done
 	@echo "Built binaries are located in $(BUILD_DIR)"
