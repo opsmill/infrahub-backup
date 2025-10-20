@@ -11,7 +11,7 @@ This guide walks you through creating a comprehensive backup of your Infrahub in
 
 Before creating a backup:
 
-- Ensure infrahubops is installed and configured
+- Ensure infrahub-backup is installed and configured
 - Verify you have sufficient disk space (at least 2x your database size)
 - Have write permissions to the backup directory
 - Confirm your Infrahub instance is accessible
@@ -28,7 +28,7 @@ If tasks are running, you have two options:
 Wait for tasks to complete naturally by monitoring the Infrahub UI, then proceed with backup:
 
 ```bash
-infrahubops backup create
+infrahub-backup create
 ```
 
 </TabItem>
@@ -38,7 +38,7 @@ Force backup despite running tasks:
 
 ```bash
 # Force backup (tasks will be interrupted)
-infrahubops backup create --force
+infrahub-backup create --force
 ```
 
 :::warning
@@ -57,7 +57,7 @@ Execute the backup command with your desired options:
 For a standard backup with all components:
 
 ```bash
-infrahubops backup create
+infrahub-backup create
 ```
 
 ### Selective metadata backup
@@ -66,16 +66,16 @@ Control which Neo4j metadata to include:
 
 ```bash
 # Backup without metadata (smallest size)
-infrahubops backup create --neo4jmetadata=none
+infrahub-backup create --neo4jmetadata=none
 
 # Backup with only user accounts
-infrahubops backup create --neo4jmetadata=users
+infrahub-backup create --neo4jmetadata=users
 
 # Backup with only roles
-infrahubops backup create --neo4jmetadata=roles
+infrahub-backup create --neo4jmetadata=roles
 
 # Backup with everything (default)
-infrahubops backup create --neo4jmetadata=all
+infrahub-backup create --neo4jmetadata=all
 ```
 
 ### Custom backup location
@@ -83,7 +83,7 @@ infrahubops backup create --neo4jmetadata=all
 Specify an alternative backup directory:
 
 ```bash
-infrahubops backup create --backup-dir=/mnt/backups/infrahub
+infrahub-backup create --backup-dir=/mnt/backups/infrahub
 ```
 
 ### Target specific project
@@ -91,7 +91,7 @@ infrahubops backup create --backup-dir=/mnt/backups/infrahub
 If running multiple Infrahub instances:
 
 ```bash
-infrahubops backup create --project=infrahub-production
+infrahub-backup create --project=infrahub-production
 ```
 
 ## Step 3: Monitor backup progress
@@ -166,8 +166,8 @@ Example metadata structure:
 Periodically test restoration to ensure backups are valid:
 
 ```bash
-# Review what would be restored
-infrahubops backup info infrahub_backups/infrahub_backup_20250929_143022.tar.gz --project=infrahub-staging
+# Review what would be restored (test in staging environment)
+infrahub-backup restore infrahub_backups/infrahub_backup_20250929_143022.tar.gz --project=infrahub-staging
 ```
 
 ## Advanced usage
@@ -181,10 +181,10 @@ Create a cron job for regular backups:
 crontab -e
 
 # Add daily backup at 2 AM
-0 2 * * * /usr/local/bin/infrahubops backup create >> /var/log/infrahub-backup.log 2>&1
+0 2 * * * /usr/local/bin/infrahub-backup create >> /var/log/infrahub-backup.log 2>&1
 
 # With retention management (keep 7 days)
-0 2 * * * /usr/local/bin/infrahubops backup create && find /path/to/backups -name "*.tar.gz" -mtime +7 -delete
+0 2 * * * /usr/local/bin/infrahub-backup create && find /path/to/backups -name "*.tar.gz" -mtime +7 -delete
 ```
 
 ### Backup with notification
@@ -193,7 +193,7 @@ Create a wrapper script for notifications:
 
 ```bash
 #!/bin/bash
-BACKUP_RESULT=$(infrahubops backup create 2>&1)
+BACKUP_RESULT=$(infrahub-backup create 2>&1)
 if [ $? -eq 0 ]; then
     echo "Backup successful" | mail -s "Infrahub Backup Success" ops@example.com
 else
@@ -208,7 +208,7 @@ After local backup, transfer to remote storage:
 
 ```bash
 # Backup locally first
-infrahubops backup create
+infrahub-backup create
 
 # Transfer to remote storage
 LATEST_BACKUP=$(ls -t infrahub_backups/*.tar.gz | head -1)

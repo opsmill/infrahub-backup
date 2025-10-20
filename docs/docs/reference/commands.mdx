@@ -2,17 +2,19 @@
 title: CLI command reference
 ---
 
-Complete reference for all infrahubops commands, flags, and options currently implemented in Phase 1.
+Complete reference for all Infrahub Operations Tools commands, flags, and options. The tools are split into two specialized binaries: `infrahub-backup` for backup/restore operations and `infrahub-taskmanager` for task manager maintenance.
 
-## Command structure
+## infrahub-backup
+
+### Command structure
 
 ```bash
-infrahubops [global-flags] <command> <subcommand> [flags] [arguments]
+infrahub-backup [global-flags] <command> [flags] [arguments]
 ```
 
-## Global flags
+### Global flags
 
-These flags apply to all commands:
+These flags apply to all infrahub-backup commands:
 
 | Flag | Description | Default | Environment Variable |
 |------|-------------|---------|---------------------|
@@ -21,16 +23,16 @@ These flags apply to all commands:
 | `--log-format <text\|json>` | Output format for logs | `text` | `INFRAHUB_LOG_FORMAT` |
 | `--help, -h` | Show help for any command | - | - |
 
-## Backup commands
+### Backup commands
 
-### backup create
+#### create
 
 Creates a comprehensive backup of the Infrahub instance.
 
 **Syntax:**
 
 ```bash
-infrahubops backup create [flags]
+infrahub-backup create [flags]
 ```
 
 **Flags:**
@@ -51,23 +53,23 @@ infrahubops backup create [flags]
 
 ```bash
 # Basic backup
-infrahubops backup create
+infrahub-backup create
 
 # Force backup with running tasks
-infrahubops backup create --force
+infrahub-backup create --force
 
 # Backup without user metadata
-infrahubops backup create --neo4jmetadata=none
+infrahub-backup create --neo4jmetadata=none
 ```
 
-### backup restore
+#### restore
 
 Restores Infrahub from a backup file.
 
 **Syntax:**
 
 ```bash
-infrahubops backup restore <backup-file>
+infrahub-backup restore <backup-file>
 ```
 
 **Arguments:**
@@ -78,19 +80,19 @@ infrahubops backup restore <backup-file>
 
 ```bash
 # Basic restore
-infrahubops backup restore infrahub_backup_20250929_143022.tar.gz
+infrahub-backup restore infrahub_backup_20250929_143022.tar.gz
 ```
 
-## Environment commands
+### Environment commands
 
-### environment detect
+#### environment detect
 
 Detects and displays the current deployment environment.
 
 **Syntax:**
 
 ```bash
-infrahubops environment detect
+infrahub-backup environment detect
 ```
 
 **Example output:**
@@ -101,14 +103,14 @@ INFO[0000] Docker environment detected
 INFO[0000] Found Docker Compose project: infrahub-demo
 ```
 
-### environment list
+#### environment list
 
 Lists all available Infrahub Docker Compose projects.
 
 **Syntax:**
 
 ```bash
-infrahubops environment list
+infrahub-backup environment list
 ```
 
 **Example output:**
@@ -119,23 +121,61 @@ infrahub-staging     Running   7/7
 infrahub-dev         Stopped   0/7
 ```
 
-## Task manager commands
+### Utility commands
 
-### taskmanager flush
+#### version
+
+Displays version information.
+
+**Syntax:**
+
+```bash
+infrahub-backup version
+```
+
+**Example output:**
+
+```bash
+Version: 1.0.0
+```
+
+## infrahub-taskmanager
+
+### Command structure
+
+```bash
+infrahub-taskmanager [global-flags] <command> <subcommand> [flags] [arguments]
+```
+
+### Global flags
+
+These flags apply to all infrahub-taskmanager commands:
+
+| Flag | Description | Default | Environment Variable |
+|------|-------------|---------|---------------------|
+| `--project <name>` | Target specific Docker Compose project | Auto-detect | `INFRAHUB_PROJECT` |
+| `--log-format <text\|json>` | Output format for logs | `text` | `INFRAHUB_LOG_FORMAT` |
+| `--help, -h` | Show help for any command | - | - |
+
+### Task manager commands
+
+#### flush
 
 Cleans up old task records.
 
 **Syntax:**
 
 ```bash
-infrahubops taskmanager flush <type> [days] [batch-size]
+infrahub-taskmanager flush <type> [days] [batch-size]
 ```
+
+**Subcommands:**
+
+- `flow-runs [days] [batch-size]` - Delete completed/failed/cancelled flow runs older than retention period
+- `stale-runs [days] [batch-size]` - Cancel flow runs still RUNNING and older than retention period
 
 **Arguments:**
 
-- `<type>` - Type of flush operation (required)
-  - `flow-runs` - Remove old completed/failed runs
-  - `stale-runs` - Cancel stuck running tasks
 - `[days]` - Age threshold in days (optional)
 - `[batch-size]` - Records per batch (optional)
 
@@ -148,70 +188,71 @@ infrahubops taskmanager flush <type> [days] [batch-size]
 
 ```bash
 # Clean flows older than 30 days
-infrahubops taskmanager flush flow-runs
+infrahub-taskmanager flush flow-runs
 
 # Clean flows older than 7 days
-infrahubops taskmanager flush flow-runs 7
+infrahub-taskmanager flush flow-runs 7
 
 # Cancel stale runs older than 1 day
-infrahubops taskmanager flush stale-runs 1
+infrahub-taskmanager flush stale-runs 1
 
 # Custom batch size
-infrahubops taskmanager flush flow-runs 30 500
+infrahub-taskmanager flush flow-runs 30 500
 ```
 
-## Utility commands
+### Environment commands
 
-### version
+#### environment detect
+
+Detects and displays the current deployment environment.
+
+**Syntax:**
+
+```bash
+infrahub-taskmanager environment detect
+```
+
+#### environment list
+
+Lists all available Infrahub Docker Compose projects.
+
+**Syntax:**
+
+```bash
+infrahub-taskmanager environment list
+```
+
+### Utility commands
+
+#### version
 
 Displays version information.
 
 **Syntax:**
 
 ```bash
-infrahubops version
+infrahub-taskmanager version
 ```
 
 **Example output:**
 
 ```bash
-infrahubops version 1.0.0
+Version: 1.0.0
 ```
 
-### help
+## Common environment variables
 
-Shows help for any command.
+Environment variables that affect the Infrahub Operations Tools:
 
-**Syntax:**
-
-```bash
-infrahubops help [command]
-```
-
-**Examples:**
-
-```bash
-# General help
-infrahubops help
-
-# Command-specific help
-infrahubops help backup
-infrahubops help backup create
-```
-
-## Environment variables
-
-All environment variables that affect infrahubops behavior:
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `INFRAHUB_BACKUP_DIR` | Default backup directory | `./infrahub_backups` |
-| `INFRAHUB_PROJECT` | Docker Compose project name | Auto-detect |
-| `INFRAHUB_DB_DATABASE` | Neo4j database name | `neo4j` |
-| `INFRAHUB_DB_USERNAME` | Neo4j username | `neo4j` |
-| `INFRAHUB_DB_PASSWORD` | Neo4j password | `admin` |
-| `PREFECT_API_DATABASE_CONNECTION_URL` | PostgreSQL connection string | Auto-detect |
-| `INFRAHUB_LOG_FORMAT` | Log format (text/json) | `text` |
+| Variable | Description | Default | Used By |
+|----------|-------------|---------|---------|
+| `INFRAHUB_BACKUP_DIR` | Default backup directory | `./infrahub_backups` | infrahub-backup |
+| `INFRAHUB_PROJECT` | Docker Compose project name | Auto-detect | Both tools |
+| `INFRAHUB_DB_DATABASE` | Neo4j database name | `neo4j` | infrahub-backup |
+| `INFRAHUB_DB_USERNAME` | Neo4j username | `neo4j` | infrahub-backup |
+| `INFRAHUB_DB_PASSWORD` | Neo4j password | `admin` | infrahub-backup |
+| `PREFECT_API_DATABASE_CONNECTION_URL` | PostgreSQL connection string | Auto-detect | Both tools |
+| `INFRAHUB_LOG_FORMAT` | Log format (text/json) | `text` | Both tools |
 
 ## Configuration precedence
 

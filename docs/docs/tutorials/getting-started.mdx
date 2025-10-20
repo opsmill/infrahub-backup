@@ -1,17 +1,17 @@
 ---
-title: Getting Started with infrahubops
+title: Getting Started with Infrahub Operations Tools
 ---
 
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 
-This tutorial walks you through your first experience with `infrahubops`, teaching you the fundamentals by creating a backup of your Infrahub instance and then restoring it. By the end of this tutorial, you'll understand the basic workflow and be confident in using the tool for essential maintenance tasks.
+This tutorial walks you through your first experience with the Infrahub Operations Tools, teaching you the fundamentals by creating a backup of your Infrahub instance and then restoring it. By the end of this tutorial, you'll understand the basic workflow and be confident in using `infrahub-backup` for essential maintenance tasks.
 
 ## What you'll learn
 
 In this tutorial, you'll:
 
-- Install infrahubops on your system
+- Install infrahub-backup on your system
 - Detect your Infrahub deployment environment
 - Create your first backup
 - Verify the backup was successful
@@ -26,33 +26,34 @@ Before starting this tutorial, ensure you have:
 - Terminal access with sudo privileges
 - At least 1GB of free disk space for backups
 
-## Step 1: Install infrahubops
+## Step 1: Install infrahub-backup
 
-First, download and install the infrahubops binary for your operating system.
+First, install the infrahub-backup tool. The recommended method is to build from source:
 
 ```bash
-# Download the binary for your architecture
-curl https://infrahub.opsmill.io/ops/$(uname -s)/$(uname -m) -o infrahubops
+# Clone the repository
+git clone https://github.com/opsmill/infrahub-ops-cli.git
+cd infrahub-ops-cli
 
-# Make it executable
-chmod +x infrahubops
+# Build the binaries
+make build
 
 # Verify installation
-./infrahubops version
+./bin/infrahub-backup version
 ```
 
 You should see output similar to:
 
 ```bash
-infrahubops version 1.0.0
+Version: 1.0.0
 ```
 
 ## Step 2: Detect your environment
 
-Before performing any operations, verify that infrahubops can detect your Infrahub deployment:
+Before performing any operations, verify that infrahub-backup can detect your Infrahub deployment:
 
 ```bash
-./infrahubops environment detect
+./bin/infrahub-backup environment detect
 ```
 
 Expected output:
@@ -66,7 +67,7 @@ INFO[0000] Found Docker Compose project: infrahub-demo
 If you have multiple Infrahub projects, list them all:
 
 ```bash
-./infrahubops environment list
+./bin/infrahub-backup environment list
 ```
 
 This shows all available Docker Compose projects running Infrahub.
@@ -84,7 +85,7 @@ Now, let's create a backup of your Infrahub instance. This operation will:
 Run the backup command:
 
 ```bash
-./infrahubops backup create
+./bin/infrahub-backup create
 ```
 
 You'll see detailed progress output:
@@ -138,7 +139,7 @@ Restoring will replace all current data in your Infrahub instance. In a producti
 
 ```bash
 # Replace with your actual backup filename
-./infrahubops backup restore infrahub_backups/infrahub_backup_20250929_143022.tar.gz
+./bin/infrahub-backup restore infrahub_backups/infrahub_backup_20250929_143022.tar.gz
 ```
 
 The restore process will:
@@ -180,9 +181,9 @@ All containers should be in the "Up" state, and the HTTP request should return a
 
 ## What you've learned
 
-Congratulations! You've completed your first backup and restore cycle with infrahubops. You now know how to:
+Congratulations! You've completed your first backup and restore cycle with the Infrahub Operations Tools. You now know how to:
 
-- Install and verify infrahubops
+- Install and verify infrahub-backup
 - Detect your deployment environment
 - Create comprehensive backups of your Infrahub instance
 - Restore from a backup file

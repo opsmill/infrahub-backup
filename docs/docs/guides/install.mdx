@@ -1,21 +1,22 @@
 ---
-title: How to install infrahubops
+title: How to install Infrahub Operations Tools
 ---
 
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 
-This guide shows you how to install the Infrahub Operations Tool on your system. If you need to deploy infrahubops across multiple servers or integrate it into your CI/CD pipeline, these instructions provide the necessary steps for each scenario.
+This guide shows you how to install the Infrahub Operations Tools on your system. The tools are split into two specialized binaries: `infrahub-backup` for backup and restore operations, and `infrahub-taskmanager` for task manager maintenance. If you need to deploy these tools across multiple servers or integrate them into your CI/CD pipeline, these instructions provide the necessary steps for each scenario.
 
 ## Prerequisites
 
-Before installing infrahubops, ensure you have:
+Before installing the Infrahub Operations Tools, ensure you have:
 
 - Administrative or sudo access on your system
+- Go 1.21 or later installed
 - One of the following deployment environments:
   - Docker with Docker Compose (for Docker deployments)
   - kubectl configured (for Kubernetes deployments)
-- Network access to download the binary or build from source
+- Git and network access to clone the repository
 
 ## Installation methods
 
@@ -69,7 +70,7 @@ If you need a specific version or architecture, manually select the appropriate 
 
 ### Build from source code
 
-If you want to build from source or contribute to development:
+To install the Infrahub Operations Tools, build from source:
 
 1. Install Go 1.21 or later:
 
@@ -85,7 +86,7 @@ If you want to build from source or contribute to development:
    cd infrahub-ops-cli
    ```
 
-3. Build the binary:
+3. Build the binaries:
 
    ```bash
    make build
@@ -94,60 +95,37 @@ If you want to build from source or contribute to development:
 4. Install to your PATH:
 
    ```bash
-   sudo cp bin/infrahub-ops /usr/local/bin/infrahubops
+   sudo cp bin/infrahub-backup bin/infrahub-taskmanager /usr/local/bin/
    ```
-
-</TabItem>
-<TabItem value="container" label="Container Image">
-
-### Run via container
-
-If you prefer not to install binaries directly, run infrahubops in a container:
-
-```bash
-# Create an alias for convenience
-alias infrahubops='docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v $(pwd):/workspace opsmill/infrahubops:latest'
-
-# Use the alias
-infrahubops version
-```
-
-:::note
-When using the container method, ensure volume mounts provide access to:
-
-- Docker socket for Docker Compose operations
-- Backup directory for storing/retrieving backups
-- Kubeconfig for Kubernetes operations
-
-:::
-
 </TabItem>
 </Tabs>
 
 ## Verify installation
 
-After installation, verify infrahubops is working correctly:
+After installation, verify the tools are working correctly:
 
 ```bash
-# Check version
-infrahubops version
+# Check versions
+infrahub-backup version
+infrahub-taskmanager version
 
 # Verify environment detection
-infrahubops environment detect
+infrahub-backup environment detect
 
 # Display help
-infrahubops --help
+infrahub-backup --help
+infrahub-taskmanager --help
 ```
 
 Expected output:
 
 ```bash
-infrahubops version 1.0.0
+Version: 1.0.0
 ```
 
 ## Configure environment
 
-infrahubops uses environment variables for configuration. Set these based on your deployment:
+The Infrahub Operations Tools use environment variables for configuration. Set these based on your deployment:
 
 ### Docker Compose deployments
 
@@ -185,14 +163,14 @@ export PREFECT_API_DATABASE_CONNECTION_URL=postgresql://user:pass@localhost/pref
 
 ## Validation
 
-Confirm infrahubops can connect to your Infrahub instance:
+Confirm the tools can connect to your Infrahub instance:
 
 ```bash
 # List available projects (Docker)
-infrahubops environment list
+infrahub-backup environment list
 
-# Test backup creation (dry run)
-infrahubops backup create --dry-run
+# Test environment detection
+infrahub-taskmanager environment detect
 ```
 
 If these commands succeed, installation is complete.
@@ -206,7 +184,7 @@ To run scheduled backups, install as a systemd service:
 1. Create service file:
 
    ```bash
-   sudo tee /etc/systemd/system/infrahubops-backup.service > /dev/null <<EOF
+   sudo tee /etc/systemd/system/infrahub-backup.service > /dev/null <<EOF
    [Unit]
    Description=Infrahub Backup Service
    After=docker.service
@@ -214,7 +192,7 @@ To run scheduled backups, install as a systemd service:
 
    [Service]
    Type=oneshot
-   ExecStart=/usr/local/bin/infrahubops backup create
+   ExecStart=/usr/local/bin/infrahub-backup create
    User=infrahub
    Group=docker
 
@@ -226,7 +204,7 @@ To run scheduled backups, install as a systemd service:
 2. Create timer for daily backups:
 
    ```bash
-   sudo tee /etc/systemd/system/infrahubops-backup.timer > /dev/null <<EOF
+   sudo tee /etc/systemd/system/infrahub-backup.timer > /dev/null <<EOF
    [Unit]
    Description=Daily Infrahub Backup
 
@@ -242,8 +220,8 @@ To run scheduled backups, install as a systemd service:
 3. Enable and start:
 
    ```bash
-   sudo systemctl enable infrahubops-backup.timer
-   sudo systemctl start infrahubops-backup.timer
+   sudo systemctl enable infrahub-backup.timer
+   sudo systemctl start infrahub-backup.timer
    ```
 
 ### CI/CD integration
@@ -252,9 +230,13 @@ For GitLab CI/CD:
 
 ```yaml
 backup-infrahub:
-  image: opsmill/infrahubops:latest
+  image: golang:1.21
+  before_script:
+    - git clone https://github.com/opsmill/infrahub-ops-cli.git
+    - cd infrahub-ops-cli
+    - make build
   script:
-    - infrahubops backup create
+    - ./bin/infrahub-backup create
   only:
     - schedules
 ```
@@ -262,11 +244,16 @@ backup-infrahub:
 For GitHub Actions:
 
 ```yaml
+- name: Build Infrahub Backup Tool
+  run: |
+    git clone https://github.com/opsmill/infrahub-ops-cli.git
+    cd infrahub-ops-cli
+    make build
+
 - name: Backup Infrahub
   run: |
-    curl -L https://infrahub.opsmill.io/ops/Linux/x86_64 -o infrahubops
-    chmod +x infrahubops
-    ./infrahubops backup create
+    cd infrahub-ops-cli
+    ./bin/infrahub-backup create
 ```
 
 ## Related resources

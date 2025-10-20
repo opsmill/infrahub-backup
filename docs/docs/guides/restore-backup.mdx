@@ -11,7 +11,7 @@ This guide shows you how to restore your Infrahub instance from a backup file. I
 
 Before restoring from backup:
 
-- Have a valid backup file created by infrahubops
+- Have a valid backup file created by infrahub-backup
 - Ensure sufficient disk space for extraction (3x backup size)
 - Stop all write operations to the current instance
 - Verify you have necessary permissions
@@ -50,7 +50,7 @@ Before overwriting current data, create a safety backup:
 
 ```bash
 # Backup current state
-infrahubops backup create --backup-dir=/tmp/safety-backup
+infrahub-backup create --backup-dir=/tmp/safety-backup
 
 # Note the filename for potential recovery
 SAFETY_BACKUP=$(ls -t /tmp/safety-backup/*.tar.gz | head -1)
@@ -64,7 +64,7 @@ echo "Safety backup: $SAFETY_BACKUP"
 Restore from a backup file:
 
 ```bash
-infrahubops backup restore infrahub_backups/infrahub_backup_20250929_143022.tar.gz
+infrahub-backup restore infrahub_backups/infrahub_backup_20250929_143022.tar.gz
 ```
 
 The restore process will:
@@ -83,7 +83,7 @@ If you have multiple Infrahub projects:
 
 ```bash
 # Restore to a specific Docker Compose project
-infrahubops backup restore infrahub_backups/infrahub_backup_20250929_143022.tar.gz --project=infrahub-staging
+infrahub-backup restore infrahub_backups/infrahub_backup_20250929_143022.tar.gz --project=infrahub-staging
 ```
 
 ## Step 3: Monitor restoration progress
@@ -199,7 +199,7 @@ tar -xzOf infrahub_backups/backup.tar.gz metadata.json | jq '.infrahub_version'
 # If versions differ significantly, restore to matching version first
 docker compose down
 docker compose -f docker-compose.v0.14.yml up -d
-infrahubops backup restore infrahub_backups/backup.tar.gz
+infrahub-backup restore infrahub_backups/backup.tar.gz
 
 # Then upgrade to target version
 docker compose down
@@ -226,7 +226,7 @@ docker compose up -d
 sleep 30
 
 # 4. Restore from backup
-infrahubops backup restore /tmp/latest.tar.gz
+infrahub-backup restore /tmp/latest.tar.gz
 
 # 5. Verify restoration
 if curl -f http://localhost:8080/health; then
@@ -246,7 +246,7 @@ If restoration fails, rollback to safety backup:
 docker compose down
 
 # Restore from safety backup
-infrahubops backup restore $SAFETY_BACKUP
+infrahub-backup restore $SAFETY_BACKUP
 
 # Start services
 docker compose up -d
