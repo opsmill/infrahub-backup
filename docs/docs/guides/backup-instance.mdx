@@ -37,13 +37,8 @@ infrahub-backup create
 Force backup despite running tasks:
 
 ```bash
-# Force backup (tasks will be interrupted)
+# Force backup (running tasks will be ignored)
 infrahub-backup create --force
-```
-
-:::warning
-Forcing backup will stop running tasks. Ensure this won't impact critical operations.
-:::
 
 </TabItem>
 </Tabs>
