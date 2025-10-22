@@ -2,11 +2,11 @@
 title: Configuration reference
 ---
 
-Complete reference for configuring infrahubops through environment variables and runtime flags.
+Complete reference for configuring Infrahub Operations Tool through environment variables and runtime flags.
 
 ## Configuration methods
 
-Infrahubops can be configured through these methods, applied in precedence order:
+Tools can be configured through these methods, applied in precedence order:
 
 1. **Command-line flags** (highest priority)
 2. **Environment variables**
@@ -95,7 +95,7 @@ docker compose exec task-manager-db printenv POSTGRES_PASSWORD
 View effective configuration:
 
 ```bash
-infrahubops --help
+infrahub-backup --help
 ```
 
 ### Test configuration
@@ -103,7 +103,7 @@ infrahubops --help
 Validate configuration without running operations:
 
 ```bash
-infrahubops environment detect
+infrahub-backup environment detect
 ```
 
 ### Common issues
@@ -138,7 +138,7 @@ For basic Docker Compose setup:
 
 ```bash
 export INFRAHUB_BACKUP_DIR=/backups
-infrahubops backup create
+infrahub-backup create
 ```
 
 ### Production configuration
@@ -152,24 +152,11 @@ export INFRAHUB_PROJECT=infrahub-production
 export INFRAHUB_BACKUP_DIR=/data/backups/infrahub
 export INFRAHUB_DB_PASSWORD="${NEO4J_PASSWORD}"
 
-infrahubops backup create --neo4jmetadata=all
+infrahub-backup create --neo4jmetadata=all
 ```
 
-### CI/CD configuration
-
-```bash
-#!/bin/bash
-# ci-backup.sh
-
-export INFRAHUB_LOG_FORMAT=json
-export INFRAHUB_PROJECT=infrahub-staging
-export INFRAHUB_BACKUP_DIR=./backups
-export INFRAHUB_DB_PASSWORD="${CI_NEO4J_PASSWORD}"
-
-infrahubops backup create --neo4jmetadata=none
-```
 
 ## Related documentation
 
 - [CLI command reference](./commands.mdx)
-- [How to install infrahubops](../guides/install.mdx)
+- [How to install](../guides/install.mdx)

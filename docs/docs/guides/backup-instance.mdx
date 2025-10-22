@@ -105,8 +105,6 @@ INFO[0005] Backing up Neo4j database...
 INFO[0015] Neo4j backup completed (1.2GB)
 INFO[0015] Backing up PostgreSQL database...
 INFO[0018] PostgreSQL backup completed (256MB)
-INFO[0018] Backing up artifacts...
-INFO[0020] Artifacts backup completed (512MB)
 INFO[0020] Creating compressed archive...
 INFO[0025] Archive created: infrahub_backup_20250929_143022.tar.gz
 INFO[0025] Starting application containers...
@@ -137,8 +135,7 @@ The backup should contain:
 
 - `backup_information.json` - Backup information and checksums
 - `database/` - Neo4j database files
-- `task-manager-db.sql` - PostgreSQL dump
-- `artifacts/` - File artifacts and media
+- `prefect.dump` - PostgreSQL dump
 
 Example metadata structure:
 
@@ -149,10 +146,10 @@ Example metadata structure:
   "created_at": "2025-09-29T14:30:22Z",
   "tool_version": "1.0.0",
   "infrahub_version": "0.15.0",
-  "components": ["database", "task-manager-db", "artifacts"],
+  "components": ["database", "task-manager-db"],
   "checksums": {
-    "database.tar": "sha256:abc123...",
-    "task-manager-db.sql": "sha256:def456..."
+    "database": "sha256:abc123...",
+    "prefect.dump": "sha256:def456..."
   }
 }
 ```
