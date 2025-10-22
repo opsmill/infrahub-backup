@@ -6,13 +6,10 @@ The Infrahub Operations Tool provides essential maintenance capabilities for man
 
 ## Overview
 
-- Backups are essential when using Infrahub in production: your source of truth contains all the data for your infrastructure and you can't afford to lose it. You should be able to restore a backup and your data in case of a disaster recovery.
-  For this having reliable backups and testing them by restoring is essential.
-  Backing up Infrahub is hard: we need consistent backups since Infrahub relies on multiple components: neo4j for its database, postgresql for the task manager's database, artifacts
-  Doing a backup for each of those, at the same time, is hard. The Operations tool is here to make it easier.
-  Restoring Infrahub is also hard: we need to restore each of those components, orchestrate services stop and start during the restore, validate the backup files, etc
+- Data within Infrahub spans across its Neo4j database, PostgreSQL database for its task manager, and artifact storage; without reliable backups your entire infrastructure state is at risk.
+  Whether you deploy with Docker, Kubernetes, or a custom stack, the Operations Tool normalizes the workflow—coordinating consistent snapshots across services, validating the results, orchestrating full restores, and exercising test restores so you know backups actually work when you need them.
 
-- Doing routing, maintenance task is also sometimes required (cleaning old task logs or stale tasks). The Operations tool is here to make it easier to do this housekeeping.
+- Routine maintenance tasks—like cleaning old log entries or pruning stale jobs—also add up. The Operations Tool automates that housekeeping so your environment stays healthy.
 
 ## Getting Started
 
