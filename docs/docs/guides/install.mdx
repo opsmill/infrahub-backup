@@ -57,17 +57,16 @@ If you need a specific version or architecture, manually select the appropriate 
    ```
 
 2. Download the matching binary:
-   - **Linux AMD64**: `curl -L https://infrahub.opsmill.io/ops/Linux/x86_64 -o infrahubops`
-   - **Linux ARM64**: `curl -L https://infrahub.opsmill.io/ops/Linux/aarch64 -o infrahubops`
-   - **macOS AMD64**: `curl -L https://infrahub.opsmill.io/ops/Darwin/x86_64 -o infrahubops`
-   - **macOS ARM64**: `curl -L https://infrahub.opsmill.io/ops/Darwin/arm64 -o infrahubops`
+   - **Linux AMD64**: `curl -L https://infrahub.opsmill.io/ops/Linux/x86_64/infrahub-backup -o infrahub-backup`
+   - **Linux ARM64**: `curl -L https://infrahub.opsmill.io/ops/Linux/aarch64/infrahub-backup -o infrahub-backup`
+   - **macOS AMD64**: `curl -L https://infrahub.opsmill.io/ops/Darwin/x86_64/infrahub-backup -o infrahub-backup`
+   - **macOS ARM64**: `curl -L https://infrahub.opsmill.io/ops/Darwin/arm64/infrahub-backup -o infrahub-backup`
 
 3. Make executable and optionally install system-wide:
 
    ```bash
-   chmod +x infrahubops
-   sudo mv infrahubops /usr/local/bin/  # Optional
-   ```
+   chmod +x infrahub-backup
+   sudo mv infrahub-backup /usr/local/bin/  # Optional
 
 </TabItem>
 <TabItem value="source" label="Build from Source">
