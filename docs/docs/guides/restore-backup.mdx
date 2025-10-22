@@ -121,7 +121,7 @@ curl -I http://localhost:8080
 # Check GraphQL endpoint
 curl -X POST http://localhost:8080/graphql \
   -H "Content-Type: application/json" \
-  -d '{"query": "{ InfrahubStatus { version } }"}'
+  -d '{"query": "{ InfrahubInfo { version } }"}'
 ```
 
 ### Validate data integrity
