@@ -28,15 +28,12 @@ Before starting this tutorial, ensure you have:
 
 ## Step 1: Install infrahub-backup
 
-First, install the infrahub-backup tool. The recommended method is to build from source:
+First, install the infrahub-backup tool. The recommended method is to download binaries:
 
 ```bash
-# Clone the repository
-git clone https://github.com/opsmill/infrahub-ops-cli.git
-cd infrahub-ops-cli
+curl https://infrahub.opsmill.io/ops/$(uname -s)/$(uname -m)/infrahub-backup -o infrahub-backup
 
-# Build the binaries
-make build
+chmod +x infrahub-backup
 
 # Verify installation
 ./infrahub-backup version
