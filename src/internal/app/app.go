@@ -1,15 +1,17 @@
 package app
 
 import (
-	"bufio"
+	"bytes"
 	"embed"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/sirupsen/logrus"
@@ -71,6 +73,42 @@ func NewCommandExecutor() *CommandExecutor {
 	return &CommandExecutor{}
 }
 
+type lineLogger struct {
+	buf     bytes.Buffer
+	logFunc func(string)
+}
+
+func newLineLogger(logFunc func(string)) *lineLogger {
+	return &lineLogger{logFunc: logFunc}
+}
+
+func (l *lineLogger) Write(p []byte) (int, error) {
+	total := len(p)
+	for len(p) > 0 {
+		if idx := bytes.IndexByte(p, '\n'); idx >= 0 {
+			l.buf.Write(p[:idx])
+			l.flush()
+			p = p[idx+1:]
+			continue
+		}
+		l.buf.Write(p)
+		break
+	}
+	return total, nil
+}
+
+func (l *lineLogger) flush() {
+	if l.buf.Len() == 0 {
+		return
+	}
+	l.logFunc(l.buf.String())
+	l.buf.Reset()
+}
+
+func (l *lineLogger) Flush() {
+	l.flush()
+}
+
 func (ce *CommandExecutor) runCommand(name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
 	output, err := cmd.CombinedOutput()
@@ -84,42 +122,52 @@ func (ce *CommandExecutor) runCommandQuiet(name string, args ...string) error {
 
 func (ce *CommandExecutor) runCommandWithStream(name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
-	stdout, _ := cmd.StdoutPipe()
-	stderr, _ := cmd.StderrPipe()
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", err
+	}
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return "", err
+	}
 
 	if err := cmd.Start(); err != nil {
 		return "", err
 	}
 
-	var output string
-	outScanner := bufio.NewScanner(stdout)
-	errScanner := bufio.NewScanner(stderr)
+	var stdoutBuf bytes.Buffer
+	stdoutLogger := newLineLogger(func(line string) {
+		logrus.Info(line)
+	})
+	stderrLogger := newLineLogger(func(line string) {
+		logrus.Info(line)
+	})
 
-	done := make(chan struct{}, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
 
 	go func() {
-		for outScanner.Scan() {
-			line := outScanner.Text()
-			logrus.Info(line)
-			output += line + "\n"
+		defer wg.Done()
+		if _, copyErr := io.Copy(io.MultiWriter(&stdoutBuf, stdoutLogger), stdout); copyErr != nil {
+			logrus.WithError(copyErr).Warn("failed reading command stdout")
 		}
-		done <- struct{}{}
+		stdoutLogger.Flush()
 	}()
 
 	go func() {
-		for errScanner.Scan() {
-			line := errScanner.Text()
-			logrus.Info(line)
-			output += line + "\n"
+		defer wg.Done()
+		if _, copyErr := io.Copy(stderrLogger, stderr); copyErr != nil {
+			logrus.WithError(copyErr).Warn("failed reading command stderr")
 		}
-		done <- struct{}{}
+		stderrLogger.Flush()
 	}()
 
-	<-done
-	<-done
+	wg.Wait()
 
-	err := cmd.Wait()
-	return output, err
+	err = cmd.Wait()
+	return stdoutBuf.String(), err
 }
 
 func (iops *InfrahubOps) getDockerBackend() *DockerBackend {
