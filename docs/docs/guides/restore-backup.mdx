@@ -23,26 +23,6 @@ Restoration replaces all existing data. Always verify you have a current backup 
 
 ## Step 1: Prepare for restoration
 
-### Verify backup file
-
-First, validate the backup file you plan to restore:
-
-```bash
-# Check file exists and is readable
-ls -lh infrahub_backups/infrahub_backup_20250929_143022.tar.gz
-
-# Verify archive integrity
-tar -tzf infrahub_backups/infrahub_backup_20250929_143022.tar.gz > /dev/null
-if [ $? -eq 0 ]; then
-    echo "Backup archive is valid"
-else
-    echo "ERROR: Backup archive is corrupted"
-    exit 1
-fi
-
-# Examine backup metadata
-tar -xzOf infrahub_backups/infrahub_backup_20250929_143022.tar.gz metadata.json | jq '.'
-```
 
 ### Create safety backup
 
