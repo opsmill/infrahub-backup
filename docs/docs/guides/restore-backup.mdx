@@ -136,26 +136,6 @@ Verify your data was restored correctly:
 
 ## Step 5: Post-restoration tasks
 
-### Clear caches
-
-After restoration, clear application caches:
-
-```bash
-# Clear Redis cache if using external cache
-docker compose exec cache redis-cli FLUSHALL
-
-# Restart application containers to clear memory caches
-docker compose restart infrahub-server task-worker
-```
-
-### Update DNS and load balancers
-
-If restoring to new infrastructure:
-
-1. Update DNS records to point to new instance
-2. Reconfigure load balancers
-3. Update monitoring and alerting endpoints
-4. Notify team members of the change
 
 ### Verify integrations
 
