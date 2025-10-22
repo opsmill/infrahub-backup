@@ -227,38 +227,6 @@ To run scheduled backups, install as a systemd service:
    sudo systemctl start infrahub-backup.timer
    ```
 
-### CI/CD integration
-
-For GitLab CI/CD:
-
-```yaml
-backup-infrahub:
-  image: golang:1.21
-  before_script:
-    - git clone https://github.com/opsmill/infrahub-ops-cli.git
-    - cd infrahub-ops-cli
-    - make build
-  script:
-    - ./bin/infrahub-backup create
-  only:
-    - schedules
-```
-
-For GitHub Actions:
-
-```yaml
-- name: Build Infrahub Backup Tool
-  run: |
-    git clone https://github.com/opsmill/infrahub-ops-cli.git
-    cd infrahub-ops-cli
-    make build
-
-- name: Backup Infrahub
-  run: |
-    cd infrahub-ops-cli
-    ./bin/infrahub-backup create
-```
-
 ## Related resources
 
 - [Getting started tutorial](../tutorials/getting-started.mdx)
