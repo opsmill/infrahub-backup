@@ -10,7 +10,8 @@ from prefect.client.schemas.filters import (
     FlowRunFilterStateType,
     FlowRunFilterStartTime,
 )
-from prefect.client.schemas.objects import State, StateType
+from prefect.client.schemas.objects import StateType
+from prefect import State
 
 
 async def delete_stale_flow_runs(days_to_keep: int = 2, batch_size: int = 100):
