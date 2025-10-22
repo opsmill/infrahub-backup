@@ -36,7 +36,7 @@ curl https://infrahub.opsmill.io/ops/$(uname -s)/$(uname -m)/infrahub-backup -o 
 curl https://infrahub.opsmill.io/ops/$(uname -s)/$(uname -m)/infrahub-taskmanager -o infrahub-taskmanager
 
 # Make it executable
-chmod +x infrahubops
+chmod +x infrahub-backup infrahub-taskmanager
 
 # Move to a directory in your PATH (optional)
 sudo mv infrahubops /usr/local/bin/
