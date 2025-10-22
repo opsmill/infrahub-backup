@@ -25,17 +25,20 @@ func main() {
 
 	var force bool
 	var neo4jMetadata string
+	var excludeTaskManagerDB bool
+	var restoreExcludeTaskManagerDB bool
 
 	createCmd := &cobra.Command{
 		Use:          "create",
 		Short:        "Create a backup of the current Infrahub instance",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return iops.CreateBackup(force, neo4jMetadata)
+			return iops.CreateBackup(force, neo4jMetadata, excludeTaskManagerDB)
 		},
 	}
 	createCmd.Flags().BoolVar(&force, "force", false, "Force backup creation even if there are running tasks")
 	createCmd.Flags().StringVar(&neo4jMetadata, "neo4jmetadata", "all", "Whether to backup neo4j metadata or not (all, none, users, roles)")
+	createCmd.Flags().BoolVar(&excludeTaskManagerDB, "exclude-taskmanager", false, "Exclude task manager database from the backup")
 
 	restoreCmd := &cobra.Command{
 		Use:          "restore <backup-file>",
@@ -43,9 +46,10 @@ func main() {
 		Args:         cobra.ExactArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return iops.RestoreBackup(args[0])
+			return iops.RestoreBackup(args[0], restoreExcludeTaskManagerDB)
 		},
 	}
+	restoreCmd.Flags().BoolVar(&restoreExcludeTaskManagerDB, "exclude-taskmanager", false, "Skip restoring the task manager database even if present in the archive")
 
 	rootCmd.AddCommand(createCmd)
 	rootCmd.AddCommand(restoreCmd)

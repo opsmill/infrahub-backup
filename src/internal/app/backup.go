@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,7 +12,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-const metadataVersion = 2025092500
+const metadataVersion = 2025102200
 
 // BackupMetadata represents the backup metadata structure
 type BackupMetadata struct {
@@ -25,7 +26,7 @@ type BackupMetadata struct {
 }
 
 // CreateBackup creates a full backup of the Infrahub deployment
-func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string) error {
+func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeTaskManager bool) error {
 	if err := iops.checkPrerequisites(); err != nil {
 		return err
 	}
@@ -64,15 +65,19 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string) error {
 
 	// Create metadata
 	backupID := strings.TrimSuffix(backupFilename, ".tar.gz")
-	metadata := iops.createBackupMetadata(backupID)
+	metadata := iops.createBackupMetadata(backupID, !excludeTaskManager)
 
 	// Backup databases
 	if err := iops.backupDatabase(backupDir, neo4jMetadata); err != nil {
 		return err
 	}
 
-	if err := iops.backupTaskManagerDB(backupDir); err != nil {
-		return err
+	if !excludeTaskManager {
+		if err := iops.backupTaskManagerDB(backupDir); err != nil {
+			return err
+		}
+	} else {
+		logrus.Info("Skipping task manager database backup as requested")
 	}
 
 	// Calculate checksums for backup files
@@ -98,11 +103,21 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string) error {
 	}
 
 	// Calculate checksum for Prefect DB dump
-	if sum, err := calculateSHA256(prefectPath); err == nil {
-		checksums["prefect.dump"] = sum
+	if !excludeTaskManager {
+		if _, err := os.Stat(prefectPath); err == nil {
+			if sum, err := calculateSHA256(prefectPath); err == nil {
+				checksums["prefect.dump"] = sum
+			} else {
+				return fmt.Errorf("failed to calculate Prefect DB checksum: %w", err)
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("could not access Prefect DB dump: %w", err)
+		}
 	}
 
-	metadata.Checksums = checksums
+	if len(checksums) > 0 {
+		metadata.Checksums = checksums
+	}
 
 	metadataBytes, err := json.MarshalIndent(metadata, "", "    ")
 	if err != nil {
@@ -208,7 +223,7 @@ func (iops *InfrahubOps) waitForRunningTasks() error {
 }
 
 // RestoreBackup restores an Infrahub deployment from a backup archive
-func (iops *InfrahubOps) RestoreBackup(backupFile string) error {
+func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager bool) error {
 	if _, err := os.Stat(backupFile); os.IsNotExist(err) {
 		return fmt.Errorf("backup file not found: %s", backupFile)
 	}
@@ -254,6 +269,20 @@ func (iops *InfrahubOps) RestoreBackup(backupFile string) error {
 	logrus.Info("Backup metadata:")
 	fmt.Println(string(metadataBytes))
 
+	// Determine task manager database availability
+	taskManagerIncluded := false
+	for _, component := range metadata.Components {
+		if component == "task-manager-db" {
+			taskManagerIncluded = true
+			break
+		}
+	}
+	if !taskManagerIncluded {
+		if _, ok := metadata.Checksums["prefect.dump"]; ok {
+			taskManagerIncluded = true
+		}
+	}
+
 	// Validate checksums for Neo4j backup files
 	for relPath, expectedSum := range metadata.Checksums {
 		if relPath == "prefect.dump" {
@@ -272,11 +301,34 @@ func (iops *InfrahubOps) RestoreBackup(backupFile string) error {
 		}
 	}
 
-	// Validate checksum for Prefect DB dump
+	// Validate checksum for Prefect DB dump when applicable
 	prefectPath := filepath.Join(workDir, "backup", "prefect.dump")
-	if expectedSum, ok := metadata.Checksums["prefect.dump"]; ok {
-		if _, err := os.Stat(prefectPath); err != nil {
-			return fmt.Errorf("missing backup file: prefect.dump")
+	prefectExists := false
+	if _, err := os.Stat(prefectPath); err == nil {
+		prefectExists = true
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("failed to access prefect.dump: %w", err)
+	}
+
+	shouldRestoreTaskManager := taskManagerIncluded && !excludeTaskManager
+	validatePrefect := shouldRestoreTaskManager && prefectExists
+
+	if taskManagerIncluded && !prefectExists && !excludeTaskManager {
+		return fmt.Errorf("backup metadata includes task manager database but prefect.dump is missing")
+	}
+
+	if taskManagerIncluded && excludeTaskManager {
+		logrus.Info("Skipping task manager database restore as requested")
+	} else if !taskManagerIncluded {
+		logrus.Info("Backup does not include task manager database; skipping restore")
+	} else if prefectExists {
+		logrus.Info("Task manager database dump detected; will restore")
+	}
+
+	if validatePrefect {
+		expectedSum, ok := metadata.Checksums["prefect.dump"]
+		if !ok {
+			return fmt.Errorf("missing checksum for prefect.dump in metadata")
 		}
 		sum, err := calculateSHA256(prefectPath)
 		if err != nil {
@@ -295,9 +347,13 @@ func (iops *InfrahubOps) RestoreBackup(backupFile string) error {
 		return err
 	}
 
-	// Restore PostgreSQL
-	if err := iops.restorePostgreSQL(workDir); err != nil {
-		return err
+	// Restore PostgreSQL when available
+	if validatePrefect {
+		if err := iops.restorePostgreSQL(workDir); err != nil {
+			return err
+		}
+	} else {
+		logrus.Info("Skipping task manager database restore step")
 	}
 
 	// Restart dependencies
@@ -327,14 +383,19 @@ func (iops *InfrahubOps) generateBackupFilename() string {
 	return fmt.Sprintf("infrahub_backup_%s.tar.gz", timestamp)
 }
 
-func (iops *InfrahubOps) createBackupMetadata(backupID string) *BackupMetadata {
+func (iops *InfrahubOps) createBackupMetadata(backupID string, includeTaskManager bool) *BackupMetadata {
+	components := []string{"database"}
+	if includeTaskManager {
+		components = append(components, "task-manager-db")
+	}
+
 	return &BackupMetadata{
 		MetadataVersion: metadataVersion,
 		BackupID:        backupID,
 		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
 		ToolVersion:     BuildRevision(),
 		InfrahubVersion: iops.getInfrahubVersion(),
-		Components:      []string{"database", "task-manager-db", "artifacts"},
+		Components:      components,
 	}
 }
 

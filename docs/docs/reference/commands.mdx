@@ -41,6 +41,7 @@ infrahub-backup create [flags]
 |------|-------------|---------|
 | `--force` | Force backup even if tasks are running | `false` |
 | `--neo4jmetadata <type>` | Neo4j metadata to include | `all` |
+| `--exclude-taskmanager`  | Exclude the task manager (Prefect) database from the backup archive | `false` |
 
 **Neo4j metadata options:**
 
@@ -76,11 +77,20 @@ infrahub-backup restore <backup-file>
 
 - `<backup-file>` - Path to backup archive (required)
 
+**Flags:**
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--exclude-taskmanager` | Skip restoring the task manager database even if the dump is present | `false` |
+
 **Examples:**
 
 ```bash
 # Basic restore
 infrahub-backup restore infrahub_backup_20250929_143022.tar.gz
+
+# Restore when the task manager database was excluded from the backup
+infrahub-backup restore infrahub_backup_20251022_120000.tar.gz --exclude-taskmanager-db
 ```
 
 ### Environment commands
