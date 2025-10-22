@@ -127,7 +127,7 @@ ls -lh infrahub_backups/
 tar -tzf infrahub_backups/infrahub_backup_20250929_143022.tar.gz > /dev/null && echo "Archive is valid"
 
 # View backup metadata
-tar -xzOf infrahub_backups/infrahub_backup_20250929_143022.tar.gz metadata.json | jq '.'
+tar -xzOf infrahub_backups/infrahub_backup_20250929_143022.tar.gz backup_information.json | jq '.'
 ```
 
 ### Validate backup contents
