@@ -154,13 +154,24 @@ Example metadata structure:
 }
 ```
 
-## Step 5: Test restore capability
+## Step 5: Backup artifact storage
+
+Capture any artifact storage (object stores, shared volumes, artifact registries) that Infrahub references during task execution. Align the snapshot timing with the database backup so the two stay consistent.
+
+- Identify the storage location configured for your task manager (bucket, container, or filesystem path).
+- Copy or synchronize the artifacts into a dated folder or snapshot using the native tooling for your storage provider.
+- Record the snapshot path or version ID alongside your database backup metadata so operators can retrieve the artifacts during a restore.
+
+If your storage tier already offers automatic versioning or replication, confirm the retention window meets your recovery objectives and document how to retrieve the relevant versions during a disaster scenario.
+
+## Step 6: Test restore capability
 
 Periodically test restoration to ensure backups are valid:
 
 ```bash
 # Review what would be restored
 infrahub-backup restore infrahub_backups/infrahub_backup_20250929_143022.tar.gz
+```
 
 ## Advanced usage
 

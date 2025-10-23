@@ -15,6 +15,7 @@ In this tutorial, you'll:
 - Detect your Infrahub deployment environment
 - Create your first backup
 - Verify the backup was successful
+- Capture a snapshot of artifact storage alongside database backups
 - Restore from the backup you created
 
 ## Prerequisites
@@ -121,7 +122,18 @@ You should see:
 - A `.tar.gz` file with today's timestamp
 - Inside the archive: `backup_information.json`, database files, and other components
 
-## Step 5: Restore from backup
+## Step 5: Capture artifact storage
+
+If your Infrahub workflows produce artifacts stored outside the databases, take a moment to snapshot that storage so the backup remains consistent. Identify the bucket, container, or volume where artifacts live and copy the contents into a dated folder or version. Use your provider’s native tooling (for example, `aws s3 sync`, `az storage blob download`, or `rsync` for shared volumes) and note where you stored the snapshot so you can pair it with the database backup when restoring.
+
+If using standard docker compose deployment:
+
+```bash
+# Copy artifacts directory to backup location
+docker compose cp -r infrahub-server:/opt/infrahub/storage /backup/artifacts/
+```
+
+## Step 6: Restore from backup
 
 To complete the learning cycle, let's restore from the backup you just created. This simulates recovering from a disaster or rolling back changes.
 
@@ -157,7 +169,7 @@ INFO[0018] Starting all containers...
 INFO[0025] Restore completed successfully
 ```
 
-## Step 6: Verify the restore
+## Step 7: Verify the restore
 
 Confirm your Infrahub instance is running correctly:
 
@@ -178,6 +190,7 @@ Congratulations! You've completed your first backup and restore cycle with the I
 - Install and verify infrahub-backup
 - Detect your deployment environment
 - Create comprehensive backups of your Infrahub instance
+- Capture artifact storage snapshots to keep backups complete
 - Restore from a backup file
 - Verify successful operations
 
