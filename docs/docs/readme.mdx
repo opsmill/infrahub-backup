@@ -4,9 +4,33 @@ title: Infrahub Backup & Restore Tool
 
 ## Overview
 
-Data within Infrahub spans across its Neo4j database, PostgreSQL database for its task manager, and artifact storage; without reliable backups your entire infrastructure state is at risk.
+### Why reliable backups matter
 
-Whether you deploy with Docker, Kubernetes, or a custom stack, the Infrahub Backup & Restore Tool normalizes the workflow—coordinating consistent snapshots across services, validating the results, orchestrating full restores, and exercising test restores so you know backups actually work when you need them.
+Infrahub stores critical state for your infrastructure in multiple systems: the Neo4j graph database, the PostgreSQL database that powers the task manager, and external artifact storage. If any piece is lost or corrupted, you can end up with drifted configurations, orphaned tasks, or a completely unusable deployment. Regulatory requirements and business continuity plans often demand auditable recovery procedures, so "having some dumps around" is rarely enough—you need consistent, verifiable recovery points.
+
+### How the tool keeps environments recoverable
+
+The Infrahub Backup & Restore Tool orchestrates backup and restore workflows across deployment targets. It coordinates quiescing and snapshotting services, pulls data out with the right credentials, and packages everything so restores are deterministic. During restore, the tool brings services back in dependency order, reapplies data, and captures logs so you can prove the operation succeeded. Whether you install with Docker Compose, Kubernetes, or a bespoke stack, the CLI abstracts away provider-specific commands and ensures each step runs in a supported sequence.
+
+### Best Practices
+
+#### Schedule regular backups
+
+- Automate backups via cron, CI workflows, or your preferred scheduler; daily is a good baseline, with more frequent snapshots for high-change environments.
+- Rotate backup artifacts with a retention policy that matches your recovery point objectives, and replicate critical backups to an off-site location.
+- Monitor backup jobs and alert on failures—silent Backup gaps often surface only when it is too late.
+
+#### Run regular restore tests
+
+- Practice restores in a disposable environment at least monthly to confirm that credentials, network access, and storage quotas are still correct.
+- Track the time required to restore and compare it to your recovery time objectives; tune the schedule or resource sizing if the gap widens.
+- Document each drill, including any manual steps uncovered, and fold the lessons back into your runbooks so production incidents are predictable.
+
+#### Validate backups after major Infrahub upgrades
+
+- Every time you perform a major Infrahub version upgrade, capture a fresh backup immediately afterward and run a full restore rehearsal.
+- Watch for schema migrations or new services introduced by the upgrade that might require additional credentials, storage buckets, or hooks in your automation.
+- Keep the validation artifacts—logs, checksums, and timelines—so you can prove post-upgrade recoverability during audits.
 
 ## Getting Started
 
