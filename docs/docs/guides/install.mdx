@@ -1,15 +1,15 @@
 ---
-title: How to install Infrahub Operations Tools
+title: How to install Infrahub Backup & Restore Tool
 ---
 
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 
-This guide shows you how to install the Infrahub Operations Tools on your system. The tools are split into two specialized binaries: `infrahub-backup` for backup and restore operations, and `infrahub-taskmanager` for task manager maintenance. If you need to deploy these tools across multiple servers or integrate them into your CI/CD pipeline, these instructions provide the necessary steps for each scenario.
+This guide shows you how to install the Infrahub Backup & Restore Tool on your system.
 
 ## Prerequisites
 
-Before installing the Infrahub Operations Tools, ensure you have:
+Before installing the Infrahub Backup & Restore Tool, ensure you have:
 
 - Administrative or sudo access on your system
 - One of the following deployment environments:
@@ -33,13 +33,12 @@ If you want the fastest installation, download the pre-built binary directly:
 ```bash
 # Download the appropriate binary for your system
 curl https://infrahub.opsmill.io/ops/$(uname -s)/$(uname -m)/infrahub-backup -o infrahub-backup
-curl https://infrahub.opsmill.io/ops/$(uname -s)/$(uname -m)/infrahub-taskmanager -o infrahub-taskmanager
 
 # Make it executable
-chmod +x infrahub-backup infrahub-taskmanager
+chmod +x infrahub-backup
 
 # Move to a directory in your PATH (optional)
-sudo mv infrahub-backup infrahub-taskmanager /usr/local/bin/
+sudo mv infrahub-backup /usr/local/bin/
 ```
 
 </TabItem>
@@ -73,7 +72,7 @@ If you need a specific version or architecture, manually select the appropriate 
 
 ### Build from source code
 
-To install the Infrahub Operations Tools, build from source:
+To install the Infrahub Backup & Restore Tool, build from source:
 
 1. Install Go 1.21 or later:
 
@@ -98,7 +97,7 @@ To install the Infrahub Operations Tools, build from source:
 4. Install to your PATH:
 
    ```bash
-   sudo cp bin/infrahub-backup bin/infrahub-taskmanager /usr/local/bin/
+   sudo cp bin/infrahub-backup /usr/local/bin/
    ```
 </TabItem>
 </Tabs>
@@ -110,25 +109,23 @@ After installation, verify the tools are working correctly:
 ```bash
 # Check versions
 infrahub-backup version
-infrahub-taskmanager version
 
 # Verify environment detection
 infrahub-backup environment detect
 
 # Display help
 infrahub-backup --help
-infrahub-taskmanager --help
 ```
 
 Expected output:
 
 ```bash
-Version: 1.0.0
+Version: [git ref]
 ```
 
 ## Configure environment
 
-The Infrahub Operations Tools use environment variables for configuration. Set these based on your deployment:
+The Infrahub Backup & Restore Tool use environment variables for configuration. Set these based on your deployment:
 
 ### Docker Compose deployments
 
@@ -173,7 +170,7 @@ Confirm the tools can connect to your Infrahub instance:
 infrahub-backup environment list
 
 # Test environment detection
-infrahub-taskmanager environment detect
+infrahub-backup environment detect
 ```
 
 If these commands succeed, installation is complete.

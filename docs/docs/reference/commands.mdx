@@ -2,7 +2,7 @@
 title: CLI command reference
 ---
 
-Complete reference for all Infrahub Operations Tools commands, flags, and options. The tools are split into two specialized binaries: `infrahub-backup` for backup/restore operations and `infrahub-taskmanager` for task manager maintenance.
+Complete reference for the Infrahub Backup & Restore Tool commands, flags, and options.
 
 ## infrahub-backup
 
@@ -138,121 +138,6 @@ infrahub-backup version
 ```bash
 Version: 1.0.0
 ```
-
-## infrahub-taskmanager
-
-### Command structure
-
-```bash
-infrahub-taskmanager [global-flags] <command> <subcommand> [flags] [arguments]
-```
-
-### Global flags
-
-These flags apply to all infrahub-taskmanager commands:
-
-| Flag | Description | Default | Environment Variable |
-|------|-------------|---------|---------------------|
-| `--project <name>` | Target specific Docker Compose project | Auto-detect | `INFRAHUB_PROJECT` |
-| `--log-format <text\|json>` | Output format for logs | `text` | `INFRAHUB_LOG_FORMAT` |
-| `--help, -h` | Show help for any command | - | - |
-
-### Task manager commands
-
-#### flush
-
-Cleans up old task records.
-
-**Syntax:**
-
-```bash
-infrahub-taskmanager flush <type> [days] [batch-size]
-```
-
-**Subcommands:**
-
-- `flow-runs [days] [batch-size]` - Delete completed/failed/cancelled flow runs older than retention period
-- `stale-runs [days] [batch-size]` - Cancel flow runs still RUNNING and older than retention period
-
-**Arguments:**
-
-- `[days]` - Age threshold in days (optional)
-- `[batch-size]` - Records per batch (optional)
-
-**Defaults:**
-
-- `flow-runs`: 30 days, batch size 200
-- `stale-runs`: 2 days, batch size 200
-
-**Examples:**
-
-```bash
-# Clean flows older than 30 days
-infrahub-taskmanager flush flow-runs
-
-# Clean flows older than 7 days
-infrahub-taskmanager flush flow-runs 7
-
-# Cancel stale runs older than 1 day
-infrahub-taskmanager flush stale-runs 1
-
-# Custom batch size
-infrahub-taskmanager flush flow-runs 30 500
-```
-
-### Environment commands
-
-#### environment detect
-
-Detects and displays the current deployment environment.
-
-**Syntax:**
-
-```bash
-infrahub-taskmanager environment detect
-```
-
-#### environment list
-
-Lists all available Infrahub Docker Compose projects.
-
-**Syntax:**
-
-```bash
-infrahub-taskmanager environment list
-```
-
-### Utility commands
-
-#### version
-
-Displays version information.
-
-**Syntax:**
-
-```bash
-infrahub-taskmanager version
-```
-
-**Example output:**
-
-```bash
-Version: 1.0.0
-```
-
-## Common environment variables
-
-Environment variables that affect the Infrahub Operations Tools:
-
-| Variable | Description | Default | Used By |
-|----------|-------------|---------|---------|
-| `INFRAHUB_BACKUP_DIR` | Default backup directory | `./infrahub_backups` | infrahub-backup |
-| `INFRAHUB_PROJECT` | Docker Compose project name | Auto-detect | Both tools |
-| `INFRAHUB_DB_DATABASE` | Neo4j database name | `neo4j` | infrahub-backup |
-| `INFRAHUB_DB_USERNAME` | Neo4j username | `neo4j` | infrahub-backup |
-| `INFRAHUB_DB_PASSWORD` | Neo4j password | `admin` | infrahub-backup |
-| `PREFECT_API_DATABASE_CONNECTION_URL` | PostgreSQL connection string | Auto-detect | Both tools |
-| `INFRAHUB_LOG_FORMAT` | Log format (text/json) | `text` | Both tools |
 
 ## Configuration precedence
 

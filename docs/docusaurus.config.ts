@@ -3,8 +3,8 @@ import type {Config} from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
 
 const config: Config = {
-  title: 'infrahubops',
-  tagline: 'Infrahub Operations Tool',
+  title: 'Infrahub Backup & Restore Tool',
+  tagline: 'Infrahub Backup & Restore Tool',
   favicon: 'img/favicon.ico',
 
   // Set the production url of your site here
@@ -14,7 +14,7 @@ const config: Config = {
   baseUrl: '/',
 
   organizationName: 'opsmill',
-  projectName: 'infrahubops',
+  projectName: 'Infrahub Backup & Restore Tool',
 
   onBrokenLinks: 'throw',
   onBrokenMarkdownLinks: 'warn',
@@ -57,7 +57,7 @@ const config: Config = {
           type: "docSidebar",
           sidebarId: "infrahubOpsSidebar",
           position: "left",
-          label: "infrahubops",
+          label: "Infrahub Backup & Restore Tool",
         },
         {
           href: "https://github.com/opsmill/infrahub-ops-cli",
