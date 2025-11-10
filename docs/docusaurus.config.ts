@@ -3,18 +3,18 @@ import type {Config} from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
 
 const config: Config = {
-  title: 'Infrahub Backup & Restore Tool',
-  tagline: 'Infrahub Backup & Restore Tool',
+  title: 'Infrahub Backup',
+  tagline: 'Infrahub Backup',
   favicon: 'img/favicon.ico',
 
   // Set the production url of your site here
-  url: 'https://your-docusaurus-site.example.com',
+  url: 'https://docs.infrahub.app',
   // Set the /<baseUrl>/ pathname under which your site is served
   // For GitHub pages deployment, it is often '/<projectName>/'
   baseUrl: '/',
 
   organizationName: 'opsmill',
-  projectName: 'Infrahub Backup & Restore Tool',
+  projectName: 'Infrahub Backup',
 
   onBrokenLinks: 'throw',
   onBrokenMarkdownLinks: 'warn',
@@ -32,7 +32,7 @@ const config: Config = {
       "classic",
       {
         docs: {
-          editUrl: "https://github.com/opsmill/infrahub-ops-cli/tree/main/docs",
+          editUrl: "https://github.com/opsmill/infrahub-backup/tree/main/docs",
           routeBasePath: "/",
           sidebarCollapsed: true,
           sidebarPath: "./sidebars.ts",
@@ -57,10 +57,10 @@ const config: Config = {
           type: "docSidebar",
           sidebarId: "infrahubOpsSidebar",
           position: "left",
-          label: "Infrahub Backup & Restore Tool",
+          label: "Infrahub Backup",
         },
         {
-          href: "https://github.com/opsmill/infrahub-ops-cli",
+          href: "https://github.com/opsmill/infrahub-backup",
           position: "right",
           className: "header-github-link",
           "aria-label": "GitHub repository",
