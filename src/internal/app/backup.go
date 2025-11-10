@@ -14,6 +14,37 @@ import (
 
 const metadataVersion = 2025102200
 
+const (
+	neo4jEditionEnterprise = "enterprise"
+	neo4jEditionCommunity  = "community"
+)
+
+func (iops *InfrahubOps) detectNeo4jEdition() (string, error) {
+	output, err := iops.Exec("database", []string{
+		"cypher-shell",
+		"-u", iops.config.Neo4jUsername,
+		"-p" + iops.config.Neo4jPassword,
+		"-d", "system",
+		"--format", "plain",
+		"CALL dbms.components() YIELD edition",
+	}, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to query neo4j edition: %w", err)
+	}
+
+	edition := extractNeo4jEdition(output)
+	if edition == "" {
+		return "", fmt.Errorf("unable to parse neo4j edition from output: %s", strings.TrimSpace(output))
+	}
+
+	return edition, nil
+}
+
+func extractNeo4jEdition(output string) string {
+	results := strings.Split(output, "\n")
+	return strings.ToLower(strings.TrimSpace(strings.Trim(results[len(results)-1], "\"")))
+}
+
 // BackupMetadata represents the backup metadata structure
 type BackupMetadata struct {
 	MetadataVersion int               `json:"metadata_version"`
@@ -23,10 +54,11 @@ type BackupMetadata struct {
 	InfrahubVersion string            `json:"infrahub_version"`
 	Components      []string          `json:"components"`
 	Checksums       map[string]string `json:"checksums,omitempty"`
+	Neo4jEdition    string            `json:"neo4j_edition,omitempty"`
 }
 
 // CreateBackup creates a full backup of the Infrahub deployment
-func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeTaskManager bool) error {
+func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeTaskManager bool) (retErr error) {
 	if err := iops.checkPrerequisites(); err != nil {
 		return err
 	}
@@ -35,12 +67,51 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 		return err
 	}
 
+	edition, editionErr := iops.detectNeo4jEdition()
+	if editionErr != nil {
+		logrus.Warnf("Could not determine Neo4j edition: %v", editionErr)
+	} else {
+		logrus.Infof("Detected Neo4j %s edition", edition)
+	}
+
+	isCommunityEdition := strings.EqualFold(edition, neo4jEditionCommunity)
+	if isCommunityEdition {
+		logrus.Warn("Neo4j Community Edition detected; Infrahub services will be stopped and restarted before the backup begins.")
+	}
+
+	version := iops.getInfrahubVersion()
+
 	// Check for running tasks unless --force is set
 	if !force {
 		logrus.Info("Checking for running tasks before backup...")
 		if err := iops.waitForRunningTasks(); err != nil {
 			return err
 		}
+	}
+
+	var servicesToRestart []string
+	if isCommunityEdition {
+		stoppedServices, stopErr := iops.stopAppContainers()
+		if stopErr != nil {
+			if len(stoppedServices) > 0 {
+				if startErr := iops.startAppContainers(stoppedServices); startErr != nil {
+					logrus.Warnf("Failed to restart services after stop error: %v", startErr)
+				}
+			}
+			return fmt.Errorf("failed to stop services for Neo4j Community backup: %w", stopErr)
+		}
+		servicesToRestart = append([]string(nil), stoppedServices...)
+		defer func() {
+			if len(servicesToRestart) == 0 {
+				return
+			}
+			if startErr := iops.startAppContainers(servicesToRestart); startErr != nil {
+				logrus.Errorf("Failed to restart services after backup: %v", startErr)
+				if retErr == nil {
+					retErr = fmt.Errorf("failed to restart services after backup: %w", startErr)
+				}
+			}
+		}()
 	}
 
 	backupFilename := iops.generateBackupFilename()
@@ -65,10 +136,10 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 
 	// Create metadata
 	backupID := strings.TrimSuffix(backupFilename, ".tar.gz")
-	metadata := iops.createBackupMetadata(backupID, !excludeTaskManager)
+	metadata := iops.createBackupMetadata(backupID, !excludeTaskManager, version, edition)
 
 	// Backup databases
-	if err := iops.backupDatabase(backupDir, neo4jMetadata); err != nil {
+	if err := iops.backupDatabase(backupDir, neo4jMetadata, edition); err != nil {
 		return err
 	}
 
@@ -144,7 +215,7 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 		logrus.Infof("Backup size: %s", formatBytes(stat.Size()))
 	}
 
-	return nil
+	return retErr
 }
 
 func (iops *InfrahubOps) waitForRunningTasks() error {
@@ -343,7 +414,7 @@ func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager boo
 	iops.wipeTransientData()
 
 	// Stop application containers
-	if err := iops.stopAppContainers(); err != nil {
+	if _, err := iops.stopAppContainers(); err != nil {
 		return err
 	}
 
@@ -361,8 +432,20 @@ func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager boo
 		return err
 	}
 
+	neo4jEdition := strings.ToLower(metadata.Neo4jEdition)
+	if neo4jEdition == "" {
+		if detectedEdition, err := iops.detectNeo4jEdition(); err != nil {
+			logrus.Warnf("Could not detect Neo4j edition during restore; defaulting to enterprise workflow: %v", err)
+		} else {
+			neo4jEdition = strings.ToLower(detectedEdition)
+			logrus.Infof("Detected Neo4j %s edition for restore", neo4jEdition)
+		}
+	} else {
+		logrus.Infof("Backup captured from Neo4j %s edition", neo4jEdition)
+	}
+
 	// Restore Neo4j
-	if err := iops.restoreNeo4j(workDir); err != nil {
+	if err := iops.restoreNeo4j(workDir, neo4jEdition); err != nil {
 		return err
 	}
 
@@ -383,7 +466,7 @@ func (iops *InfrahubOps) generateBackupFilename() string {
 	return fmt.Sprintf("infrahub_backup_%s.tar.gz", timestamp)
 }
 
-func (iops *InfrahubOps) createBackupMetadata(backupID string, includeTaskManager bool) *BackupMetadata {
+func (iops *InfrahubOps) createBackupMetadata(backupID string, includeTaskManager bool, infrahubVersion string, neo4jEdition string) *BackupMetadata {
 	components := []string{"database"}
 	if includeTaskManager {
 		components = append(components, "task-manager-db")
@@ -394,18 +477,21 @@ func (iops *InfrahubOps) createBackupMetadata(backupID string, includeTaskManage
 		BackupID:        backupID,
 		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
 		ToolVersion:     BuildRevision(),
-		InfrahubVersion: iops.getInfrahubVersion(),
+		InfrahubVersion: infrahubVersion,
 		Components:      components,
+		Neo4jEdition:    strings.ToLower(neo4jEdition),
 	}
 }
 
-func (iops *InfrahubOps) stopAppContainers() error {
+func (iops *InfrahubOps) stopAppContainers() ([]string, error) {
 	logrus.Info("Stopping Infrahub application services...")
 
 	services := []string{
 		"infrahub-server", "task-worker", "task-manager",
 		"task-manager-background-svc", "cache", "message-queue",
 	}
+
+	stopped := []string{}
 
 	for _, service := range services {
 		running, err := iops.IsServiceRunning(service)
@@ -417,19 +503,77 @@ func (iops *InfrahubOps) stopAppContainers() error {
 		if running {
 			logrus.Infof("Stopping %s...", service)
 			if err := iops.StopServices(service); err != nil {
-				return fmt.Errorf("failed to stop %s: %w", service, err)
+				return stopped, fmt.Errorf("failed to stop %s: %w", service, err)
 			}
+			stopped = append(stopped, service)
 		}
 	}
 
-	logrus.Info("Application services stopped")
+	if len(stopped) == 0 {
+		logrus.Info("No application services were running")
+	} else {
+		logrus.Info("Application services stopped")
+	}
+
+	return stopped, nil
+}
+
+func (iops *InfrahubOps) startAppContainers(services []string) error {
+	if len(services) == 0 {
+		return nil
+	}
+
+	logrus.Info("Starting Infrahub application services...")
+
+	preferredOrder := []string{
+		"cache",
+		"message-queue",
+		"task-manager",
+		"task-manager-background-svc",
+		"infrahub-server",
+		"task-worker",
+	}
+
+	serviceSet := make(map[string]struct{}, len(services))
+	for _, svc := range services {
+		serviceSet[svc] = struct{}{}
+	}
+
+	ordered := make([]string, 0, len(serviceSet))
+	for _, svc := range preferredOrder {
+		if _, ok := serviceSet[svc]; ok {
+			ordered = append(ordered, svc)
+			delete(serviceSet, svc)
+		}
+	}
+	for svc := range serviceSet {
+		ordered = append(ordered, svc)
+	}
+
+	for _, svc := range ordered {
+		logrus.Infof("Starting %s...", svc)
+		if err := iops.StartServices(svc); err != nil {
+			return fmt.Errorf("failed to start %s: %w", svc, err)
+		}
+	}
+
+	logrus.Info("Application services started")
 	return nil
 }
 
-func (iops *InfrahubOps) backupDatabase(backupDir string, backupMetadata string) error {
-	logrus.Info("Backing up Neo4j database...")
+func (iops *InfrahubOps) backupDatabase(backupDir string, backupMetadata string, neo4jEdition string) error {
+	edition := strings.ToLower(neo4jEdition)
+	switch edition {
+	case neo4jEditionCommunity:
+		return iops.backupNeo4jCommunity(backupDir)
+	default:
+		return iops.backupNeo4jEnterprise(backupDir, backupMetadata)
+	}
+}
 
-	// Create backup directory in container
+func (iops *InfrahubOps) backupNeo4jEnterprise(backupDir string, backupMetadata string) error {
+	logrus.Info("Backing up Neo4j database (Enterprise Edition online backup)...")
+
 	if _, err := iops.Exec("database", []string{"mkdir", "-p", "/tmp/infrahubops"}, nil); err != nil {
 		return fmt.Errorf("failed to create backup directory: %w", err)
 	}
@@ -439,7 +583,6 @@ func (iops *InfrahubOps) backupDatabase(backupDir string, backupMetadata string)
 		}
 	}()
 
-	// Create backup using neo4j-admin
 	if output, err := iops.Exec(
 		"database",
 		[]string{"neo4j-admin", "database", "backup", "--include-metadata=" + backupMetadata, "--to-path=/tmp/infrahubops", iops.config.Neo4jDatabase},
@@ -448,13 +591,75 @@ func (iops *InfrahubOps) backupDatabase(backupDir string, backupMetadata string)
 		return fmt.Errorf("failed to backup neo4j: %w\nOutput: %v", err, output)
 	}
 
-	// Copy backup
 	if err := iops.CopyFrom("database", "/tmp/infrahubops", filepath.Join(backupDir, "database")); err != nil {
 		return fmt.Errorf("failed to copy database backup: %w", err)
 	}
 
 	logrus.Info("Neo4j backup completed")
 	return nil
+}
+
+func (iops *InfrahubOps) backupNeo4jCommunity(backupDir string) (err error) {
+	logrus.Info("Backing up Neo4j database (Community Edition offline dump)...")
+
+	if _, err := iops.Exec("database", []string{"mkdir", "-p", "/tmp/infrahubops"}, nil); err != nil {
+		return fmt.Errorf("failed to create backup directory: %w", err)
+	}
+	defer func() {
+		if _, cleanupErr := iops.Exec("database", []string{"rm", "-rf", "/tmp/infrahubops"}, nil); cleanupErr != nil {
+			logrus.Warnf("Failed to remove temporary Neo4j dump directory: %v", cleanupErr)
+		}
+	}()
+
+	stopCmd := []string{
+		"cypher-shell",
+		"-u", iops.config.Neo4jUsername,
+		"-p" + iops.config.Neo4jPassword,
+		"-d", "system",
+		"stop database " + iops.config.Neo4jDatabase,
+	}
+	if _, err := iops.Exec("database", stopCmd, nil); err != nil {
+		return fmt.Errorf("failed to stop neo4j database before dump: %w", err)
+	}
+	defer func() {
+		startCmd := []string{
+			"cypher-shell",
+			"-u", iops.config.Neo4jUsername,
+			"-p" + iops.config.Neo4jPassword,
+			"-d", "system",
+			"start database " + iops.config.Neo4jDatabase,
+		}
+		if _, startErr := iops.Exec("database", startCmd, nil); startErr != nil {
+			logrus.Errorf("Failed to restart neo4j database after dump: %v", startErr)
+			if err == nil {
+				err = fmt.Errorf("failed to restart neo4j database after dump: %w", startErr)
+			}
+		}
+	}()
+
+	dumpCmd := []string{
+		"neo4j-admin", "database", "dump",
+		"--overwrite-destination=true",
+		"--to-path=/tmp/infrahubops",
+		iops.config.Neo4jDatabase,
+	}
+	if output, dumpErr := iops.Exec("database", dumpCmd, nil); dumpErr != nil {
+		return fmt.Errorf("failed to dump neo4j database: %w\nOutput: %v", dumpErr, output)
+	}
+
+	databaseDir := filepath.Join(backupDir, "database")
+	if err := os.MkdirAll(databaseDir, 0755); err != nil {
+		return fmt.Errorf("failed to prepare local dump directory: %w", err)
+	}
+
+	dumpFilename := fmt.Sprintf("%s.dump", iops.config.Neo4jDatabase)
+	if err := iops.CopyFrom("database", "/tmp/infrahubops/"+dumpFilename, filepath.Join(databaseDir, dumpFilename)); err != nil {
+		return fmt.Errorf("failed to copy neo4j dump: %w", err)
+	}
+
+	logrus.Info("Neo4j dump completed")
+	return nil
+
 }
 
 func (iops *InfrahubOps) backupTaskManagerDB(backupDir string) error {
@@ -539,10 +744,19 @@ func (iops *InfrahubOps) restorePostgreSQL(workDir string) error {
 	return nil
 }
 
-func (iops *InfrahubOps) restoreNeo4j(workDir string) error {
-	logrus.Info("Restoring Neo4j database...")
+func (iops *InfrahubOps) restoreNeo4j(workDir, neo4jEdition string) error {
+	edition := strings.ToLower(neo4jEdition)
+	switch edition {
+	case neo4jEditionCommunity:
+		return iops.restoreNeo4jCommunity(workDir)
+	default:
+		return iops.restoreNeo4jEnterprise(workDir)
+	}
+}
 
-	// Copy backup to container
+func (iops *InfrahubOps) restoreNeo4jEnterprise(workDir string) error {
+	logrus.Info("Restoring Neo4j database (Enterprise Edition)...")
+
 	backupPath := filepath.Join(workDir, "backup", "database")
 	if err := iops.CopyTo("database", backupPath, "/tmp/infrahubops"); err != nil {
 		return fmt.Errorf("failed to copy backup to container: %w", err)
@@ -553,12 +767,10 @@ func (iops *InfrahubOps) restoreNeo4j(workDir string) error {
 		}
 	}()
 
-	// Change ownership
 	if _, err := iops.Exec("database", []string{"chown", "-R", "neo4j:neo4j", "/tmp/infrahubops"}, nil); err != nil {
 		return fmt.Errorf("failed to change backup ownership: %w", err)
 	}
 
-	// Stop neo4j database
 	if _, err := iops.Exec(
 		"database",
 		[]string{"cypher-shell", "-u", iops.config.Neo4jUsername, "-p" + iops.config.Neo4jPassword, "-d", "system", "stop database " + iops.config.Neo4jDatabase},
@@ -567,7 +779,6 @@ func (iops *InfrahubOps) restoreNeo4j(workDir string) error {
 		return fmt.Errorf("failed to stop neo4j database: %w", err)
 	}
 
-	// Restore database
 	opts := &ExecOptions{User: "neo4j"}
 	if output, err := iops.Exec(
 		"database",
@@ -577,7 +788,6 @@ func (iops *InfrahubOps) restoreNeo4j(workDir string) error {
 		return fmt.Errorf("failed to restore neo4j: %w\nOutput: %v", err, output)
 	}
 
-	// Restore metadata
 	if output, err := iops.Exec(
 		"database",
 		[]string{"sh", "-c", "cat /data/scripts/neo4j/restore_metadata.cypher | cypher-shell -u " + iops.config.Neo4jUsername + " -p" + iops.config.Neo4jPassword + " -d system --param \"database => '" + iops.config.Neo4jDatabase + "'\""},
@@ -586,7 +796,6 @@ func (iops *InfrahubOps) restoreNeo4j(workDir string) error {
 		return fmt.Errorf("failed to restore neo4j metadata: %w\nOutput: %v", err, output)
 	}
 
-	// Start neo4j database
 	if _, err := iops.Exec(
 		"database",
 		[]string{"cypher-shell", "-u", iops.config.Neo4jUsername, "-p" + iops.config.Neo4jPassword, "-d", "system", "start database " + iops.config.Neo4jDatabase},
@@ -595,5 +804,57 @@ func (iops *InfrahubOps) restoreNeo4j(workDir string) error {
 		return fmt.Errorf("failed to start neo4j database: %w", err)
 	}
 
+	return nil
+}
+
+func (iops *InfrahubOps) restoreNeo4jCommunity(workDir string) error {
+	logrus.Info("Restoring Neo4j database (Community Edition dump)...")
+
+	dumpFilename := fmt.Sprintf("%s.dump", iops.config.Neo4jDatabase)
+	sourceDump := filepath.Join(workDir, "backup", "database", dumpFilename)
+	if _, err := os.Stat(sourceDump); err != nil {
+		return fmt.Errorf("neo4j dump not found in backup: %w", err)
+	}
+
+	if _, err := iops.Exec("database", []string{"mkdir", "-p", "/tmp/infrahubops"}, nil); err != nil {
+		return fmt.Errorf("failed to prepare target directory: %w", err)
+	}
+
+	targetDump := "/tmp/infrahubops/" + dumpFilename
+	if err := iops.CopyTo("database", sourceDump, targetDump); err != nil {
+		return fmt.Errorf("failed to copy dump into container: %w", err)
+	}
+	defer func() {
+		if _, err := iops.Exec("database", []string{"rm", "-f", targetDump}, nil); err != nil {
+			logrus.Warnf("Failed to remove temporary neo4j dump: %v", err)
+		}
+	}()
+
+	if _, err := iops.Exec(
+		"database",
+		[]string{"cypher-shell", "-u", iops.config.Neo4jUsername, "-p" + iops.config.Neo4jPassword, "-d", "system", "stop database " + iops.config.Neo4jDatabase},
+		nil,
+	); err != nil {
+		return fmt.Errorf("failed to stop neo4j database before load: %w", err)
+	}
+
+	opts := &ExecOptions{User: "neo4j"}
+	if output, err := iops.Exec(
+		"database",
+		[]string{"neo4j-admin", "database", "load", "--overwrite-destination=true", "--from-path=/tmp/infrahubops", iops.config.Neo4jDatabase},
+		opts,
+	); err != nil {
+		return fmt.Errorf("failed to load neo4j dump: %w\nOutput: %v", err, output)
+	}
+
+	if _, err := iops.Exec(
+		"database",
+		[]string{"cypher-shell", "-u", iops.config.Neo4jUsername, "-p" + iops.config.Neo4jPassword, "-d", "system", "start database " + iops.config.Neo4jDatabase},
+		nil,
+	); err != nil {
+		return fmt.Errorf("failed to start neo4j database after load: %w", err)
+	}
+
+	logrus.Info("Neo4j dump restored successfully")
 	return nil
 }
