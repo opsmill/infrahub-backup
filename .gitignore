@@ -1,2 +1,3 @@
 bin/
 infrahub_backups/
+src/internal/app/embedded/neo4jwatchdog/*watchdog*

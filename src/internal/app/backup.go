@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +18,12 @@ const metadataVersion = 2025102200
 const (
 	neo4jEditionEnterprise = "enterprise"
 	neo4jEditionCommunity  = "community"
+
+	neo4jPIDFile              = "/var/lib/neo4j/run/neo4j.pid"
+	neo4jRemoteWorkDir        = "/tmp/infrahubops"
+	neo4jRemoteWatchdogBinary = neo4jRemoteWorkDir + "/neo4j_watchdog"
+	neo4jRemoteWatchdogReady  = neo4jRemoteWorkDir + "/neo4j_watchdog.ready"
+	neo4jRemoteWatchdogLog    = neo4jRemoteWorkDir + "/neo4j_watchdog.log"
 )
 
 func (iops *InfrahubOps) detectNeo4jEdition() (string, error) {
@@ -41,8 +48,14 @@ func (iops *InfrahubOps) detectNeo4jEdition() (string, error) {
 }
 
 func extractNeo4jEdition(output string) string {
-	results := strings.Split(output, "\n")
-	return strings.ToLower(strings.TrimSpace(strings.Trim(results[len(results)-1], "\"")))
+	lines := strings.Split(output, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		trimmed := strings.TrimSpace(strings.Trim(lines[i], "\""))
+		if trimmed != "" {
+			return strings.ToLower(trimmed)
+		}
+	}
+	return ""
 }
 
 // BackupMetadata represents the backup metadata structure
@@ -599,52 +612,87 @@ func (iops *InfrahubOps) backupNeo4jEnterprise(backupDir string, backupMetadata 
 	return nil
 }
 
-func (iops *InfrahubOps) backupNeo4jCommunity(backupDir string) (err error) {
+func (iops *InfrahubOps) stopNeo4jCommunity(pidStr string) error {
+	if _, err := iops.Exec("database", []string{"mkdir", "-p", neo4jRemoteWorkDir}, nil); err != nil {
+		return fmt.Errorf("failed to prepare remote work directory: %w", err)
+	}
+
+	arch, err := iops.detectNeo4jArchitecture()
+	if err != nil {
+		return err
+	}
+
+	watchdogBytes, err := selectWatchdogBinary(arch)
+	if err != nil {
+		return err
+	}
+
+	localWatchdog, cleanup, err := writeEmbeddedWatchdog(watchdogBytes)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	if err := iops.CopyTo("database", localWatchdog, neo4jRemoteWatchdogBinary); err != nil {
+		return fmt.Errorf("failed to deploy watchdog binary: %w", err)
+	}
+
+	if _, err := iops.Exec("database", []string{"chmod", "+x", neo4jRemoteWatchdogBinary}, nil); err != nil {
+		return fmt.Errorf("failed to mark watchdog executable: %w", err)
+	}
+
+	if _, err := iops.Exec("database", []string{"rm", "-f", neo4jRemoteWatchdogReady, neo4jRemoteWatchdogLog}, nil); err != nil {
+		logrus.Debugf("Could not clear watchdog markers: %v", err)
+	}
+
+	watchdogCmd := fmt.Sprintf("nohup %s --ready-file %s >%s 2>&1 &", neo4jRemoteWatchdogBinary, neo4jRemoteWatchdogReady, neo4jRemoteWatchdogLog)
+	if _, err := iops.Exec("database", []string{"sh", "-c", watchdogCmd}, nil); err != nil {
+		return fmt.Errorf("failed to start watchdog: %w", err)
+	}
+
+	if err := iops.waitForRemoteFile(neo4jRemoteWatchdogReady, 5*time.Second); err != nil {
+		return fmt.Errorf("watchdog failed to initialize: %w", err)
+	}
+
+	if _, err := iops.Exec("database", []string{"kill", pidStr}, nil); err != nil {
+		return fmt.Errorf("failed to stop neo4j: %w", err)
+	}
+
+	logrus.Info("Waiting for Neo4j process to stop...")
+	if err := iops.waitForProcessStopped(pidStr, 120*time.Second); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (iops *InfrahubOps) backupNeo4jCommunity(backupDir string) (retErr error) {
 	logrus.Info("Backing up Neo4j database (Community Edition offline dump)...")
 
-	if _, err := iops.Exec("database", []string{"mkdir", "-p", "/tmp/infrahubops"}, nil); err != nil {
-		return fmt.Errorf("failed to create backup directory: %w", err)
+	pidStr, err := iops.readNeo4jPID()
+	if err != nil {
+		return err
 	}
-	defer func() {
-		if _, cleanupErr := iops.Exec("database", []string{"rm", "-rf", "/tmp/infrahubops"}, nil); cleanupErr != nil {
-			logrus.Warnf("Failed to remove temporary Neo4j dump directory: %v", cleanupErr)
-		}
-	}()
 
-	stopCmd := []string{
-		"cypher-shell",
-		"-u", iops.config.Neo4jUsername,
-		"-p" + iops.config.Neo4jPassword,
-		"-d", "system",
-		"stop database " + iops.config.Neo4jDatabase,
+	err = iops.stopNeo4jCommunity(pidStr)
+	if err != nil {
+		return err
 	}
-	if _, err := iops.Exec("database", stopCmd, nil); err != nil {
-		return fmt.Errorf("failed to stop neo4j database before dump: %w", err)
-	}
+
 	defer func() {
-		startCmd := []string{
-			"cypher-shell",
-			"-u", iops.config.Neo4jUsername,
-			"-p" + iops.config.Neo4jPassword,
-			"-d", "system",
-			"start database " + iops.config.Neo4jDatabase,
+		if _, err := iops.Exec("database", []string{"rm", "-f", neo4jRemoteWatchdogBinary, neo4jRemoteWatchdogReady, neo4jRemoteWatchdogLog}, nil); err != nil {
+			logrus.Debugf("Failed to remove watchdog artifacts: %v", err)
 		}
-		if _, startErr := iops.Exec("database", startCmd, nil); startErr != nil {
-			logrus.Errorf("Failed to restart neo4j database after dump: %v", startErr)
-			if err == nil {
-				err = fmt.Errorf("failed to restart neo4j database after dump: %w", startErr)
+		if _, err := iops.Exec("database", []string{"kill", "-CONT", pidStr}, nil); err != nil {
+			logrus.Errorf("Failed to send SIGCONT to neo4j (pid %s): %v", pidStr, err)
+			if retErr == nil {
+				retErr = fmt.Errorf("failed to resume neo4j process: %w", err)
 			}
 		}
 	}()
 
-	dumpCmd := []string{
-		"neo4j-admin", "database", "dump",
-		"--overwrite-destination=true",
-		"--to-path=/tmp/infrahubops",
-		iops.config.Neo4jDatabase,
-	}
-	if output, dumpErr := iops.Exec("database", dumpCmd, nil); dumpErr != nil {
-		return fmt.Errorf("failed to dump neo4j database: %w\nOutput: %v", dumpErr, output)
+	if _, err := iops.Exec("database", []string{"mkdir", "-p", neo4jRemoteWorkDir}, nil); err != nil {
+		return fmt.Errorf("failed to prepare remote dump directory: %w", err)
 	}
 
 	databaseDir := filepath.Join(backupDir, "database")
@@ -652,14 +700,121 @@ func (iops *InfrahubOps) backupNeo4jCommunity(backupDir string) (err error) {
 		return fmt.Errorf("failed to prepare local dump directory: %w", err)
 	}
 
+	dumpCmd := []string{
+		"neo4j-admin", "database", "dump",
+		"--overwrite-destination=true",
+		"--to-path=" + neo4jRemoteWorkDir,
+		iops.config.Neo4jDatabase,
+	}
+	if output, dumpErr := iops.Exec("database", dumpCmd, nil); dumpErr != nil {
+		return fmt.Errorf("failed to dump neo4j database: %w\nOutput: %v", dumpErr, output)
+	}
+
 	dumpFilename := fmt.Sprintf("%s.dump", iops.config.Neo4jDatabase)
-	if err := iops.CopyFrom("database", "/tmp/infrahubops/"+dumpFilename, filepath.Join(databaseDir, dumpFilename)); err != nil {
+	if err := iops.CopyFrom("database", neo4jRemoteWorkDir+"/"+dumpFilename, filepath.Join(databaseDir, dumpFilename)); err != nil {
 		return fmt.Errorf("failed to copy neo4j dump: %w", err)
 	}
 
 	logrus.Info("Neo4j dump completed")
 	return nil
+}
 
+func (iops *InfrahubOps) readNeo4jPID() (string, error) {
+	output, err := iops.Exec("database", []string{"cat", neo4jPIDFile}, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to read neo4j pid file: %w", err)
+	}
+	pid := strings.TrimSpace(output)
+	if pid == "" {
+		return "", fmt.Errorf("neo4j pid file is empty")
+	}
+	if _, err := strconv.Atoi(pid); err != nil {
+		return "", fmt.Errorf("invalid pid %q: %w", pid, err)
+	}
+	return pid, nil
+}
+
+func (iops *InfrahubOps) detectNeo4jArchitecture() (string, error) {
+	output, err := iops.Exec("database", []string{"uname", "-m"}, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to detect neo4j architecture: %w", err)
+	}
+	arch := strings.TrimSpace(output)
+	if arch == "" {
+		return "", fmt.Errorf("empty architecture string")
+	}
+	return arch, nil
+}
+
+func selectWatchdogBinary(arch string) ([]byte, error) {
+	switch strings.ToLower(arch) {
+	case "x86_64", "amd64":
+		return neo4jWatchdogLinuxAMD64, nil
+	case "aarch64", "arm64":
+		return neo4jWatchdogLinuxARM64, nil
+	default:
+		return nil, fmt.Errorf("unsupported architecture for watchdog: %s", arch)
+	}
+}
+
+func writeEmbeddedWatchdog(content []byte) (string, func(), error) {
+	file, err := os.CreateTemp("", "neo4j_watchdog_*")
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to create temp watchdog binary: %w", err)
+	}
+
+	if _, err := file.Write(content); err != nil {
+		file.Close()
+		os.Remove(file.Name())
+		return "", nil, fmt.Errorf("failed to write watchdog binary: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		os.Remove(file.Name())
+		return "", nil, fmt.Errorf("failed to close watchdog binary: %w", err)
+	}
+
+	if err := os.Chmod(file.Name(), 0755); err != nil {
+		os.Remove(file.Name())
+		return "", nil, fmt.Errorf("failed to set watchdog permissions: %w", err)
+	}
+
+	cleanup := func() {
+		_ = os.Remove(file.Name())
+	}
+	return file.Name(), cleanup, nil
+}
+
+func (iops *InfrahubOps) waitForRemoteFile(path string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, err := iops.Exec("database", []string{"test", "-f", path}, nil); err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return fmt.Errorf("timeout waiting for remote file %s", path)
+}
+
+func (iops *InfrahubOps) waitForProcessStopped(pid string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		stateCmd := fmt.Sprintf("sed -n 's/^State:\t//p' /proc/%s/status", pid)
+		state, err := iops.Exec("database", []string{"sh", "-c", stateCmd}, nil)
+		if err == nil {
+			trimmed := strings.TrimSpace(state)
+			if strings.HasPrefix(trimmed, "T") {
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+	return fmt.Errorf("timed out waiting for neo4j process %s to stop", pid)
 }
 
 func (iops *InfrahubOps) backupTaskManagerDB(backupDir string) error {
@@ -771,6 +926,8 @@ func (iops *InfrahubOps) restoreNeo4jEnterprise(workDir string) error {
 		return fmt.Errorf("failed to change backup ownership: %w", err)
 	}
 
+	opts := &ExecOptions{User: "neo4j"}
+
 	if _, err := iops.Exec(
 		"database",
 		[]string{"cypher-shell", "-u", iops.config.Neo4jUsername, "-p" + iops.config.Neo4jPassword, "-d", "system", "stop database " + iops.config.Neo4jDatabase},
@@ -779,7 +936,6 @@ func (iops *InfrahubOps) restoreNeo4jEnterprise(workDir string) error {
 		return fmt.Errorf("failed to stop neo4j database: %w", err)
 	}
 
-	opts := &ExecOptions{User: "neo4j"}
 	if output, err := iops.Exec(
 		"database",
 		[]string{"neo4j-admin", "database", "restore", "--overwrite-destination=true", "--from-path=/tmp/infrahubops", iops.config.Neo4jDatabase},
@@ -807,7 +963,7 @@ func (iops *InfrahubOps) restoreNeo4jEnterprise(workDir string) error {
 	return nil
 }
 
-func (iops *InfrahubOps) restoreNeo4jCommunity(workDir string) error {
+func (iops *InfrahubOps) restoreNeo4jCommunity(workDir string) (retErr error) {
 	logrus.Info("Restoring Neo4j database (Community Edition dump)...")
 
 	dumpFilename := fmt.Sprintf("%s.dump", iops.config.Neo4jDatabase)
@@ -824,19 +980,31 @@ func (iops *InfrahubOps) restoreNeo4jCommunity(workDir string) error {
 	if err := iops.CopyTo("database", sourceDump, targetDump); err != nil {
 		return fmt.Errorf("failed to copy dump into container: %w", err)
 	}
+
+	pidStr, err := iops.readNeo4jPID()
+	if err != nil {
+		return err
+	}
+
+	err = iops.stopNeo4jCommunity(pidStr)
+	if err != nil {
+		return err
+	}
+
 	defer func() {
 		if _, err := iops.Exec("database", []string{"rm", "-f", targetDump}, nil); err != nil {
 			logrus.Warnf("Failed to remove temporary neo4j dump: %v", err)
 		}
+		if _, err := iops.Exec("database", []string{"rm", "-f", neo4jRemoteWatchdogBinary, neo4jRemoteWatchdogReady, neo4jRemoteWatchdogLog}, nil); err != nil {
+			logrus.Debugf("Failed to remove watchdog artifacts: %v", err)
+		}
+		if _, err := iops.Exec("database", []string{"kill", "-CONT", pidStr}, nil); err != nil {
+			logrus.Errorf("Failed to send SIGCONT to neo4j (pid %s): %v", pidStr, err)
+			if retErr == nil {
+				retErr = fmt.Errorf("failed to resume neo4j process: %w", err)
+			}
+		}
 	}()
-
-	if _, err := iops.Exec(
-		"database",
-		[]string{"cypher-shell", "-u", iops.config.Neo4jUsername, "-p" + iops.config.Neo4jPassword, "-d", "system", "stop database " + iops.config.Neo4jDatabase},
-		nil,
-	); err != nil {
-		return fmt.Errorf("failed to stop neo4j database before load: %w", err)
-	}
 
 	opts := &ExecOptions{User: "neo4j"}
 	if output, err := iops.Exec(
@@ -845,14 +1013,6 @@ func (iops *InfrahubOps) restoreNeo4jCommunity(workDir string) error {
 		opts,
 	); err != nil {
 		return fmt.Errorf("failed to load neo4j dump: %w\nOutput: %v", err, output)
-	}
-
-	if _, err := iops.Exec(
-		"database",
-		[]string{"cypher-shell", "-u", iops.config.Neo4jUsername, "-p" + iops.config.Neo4jPassword, "-d", "system", "start database " + iops.config.Neo4jDatabase},
-		nil,
-	); err != nil {
-		return fmt.Errorf("failed to start neo4j database after load: %w", err)
 	}
 
 	logrus.Info("Neo4j dump restored successfully")
