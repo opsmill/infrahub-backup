@@ -15,7 +15,7 @@ help: ## Display this help message
 	@echo "Available targets:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-15s %s\n", $$1, $$2}'
 
-build: ## Build all CLI binaries for the current platform
+build: build-watchdog ## Build all CLI binaries for the current platform
 	@echo "Building Infrahub CLI binaries..."
 	@mkdir -p $(BUILD_DIR)
 	@for bin in $(BINARIES); do \
@@ -24,7 +24,12 @@ build: ## Build all CLI binaries for the current platform
 	done
 	@echo "Binaries available in $(BUILD_DIR)"
 
-build-all: ## Build for multiple platforms
+build-watchdog:
+	@echo "Building neo4jwatchdog binaries..."
+	@CGO_ENABLED=$(CGO_ENABLED) GOOS=linux GOARCH=arm64 go build -ldflags "-s -w" -o $(SRC_ROOT)/internal/app/embedded/neo4jwatchdog/neo4j_watchdog_linux_arm64 ./tools/neo4jwatchdog
+	@CGO_ENABLED=$(CGO_ENABLED) GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o $(SRC_ROOT)/internal/app/embedded/neo4jwatchdog/neo4j_watchdog_linux_amd64 ./tools/neo4jwatchdog
+
+build-all: build-watchdog ## Build for multiple platforms
 	@echo "Building multi-platform binaries..."
 	@mkdir -p $(BUILD_DIR)
 	@for bin in $(BINARIES); do \
