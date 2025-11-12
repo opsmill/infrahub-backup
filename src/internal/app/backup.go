@@ -13,7 +13,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-const metadataVersion = 2025102200
+const metadataVersion = 2025111200
 
 const (
 	neo4jEditionEnterprise = "enterprise"
@@ -90,6 +90,8 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 	isCommunityEdition := strings.EqualFold(edition, neo4jEditionCommunity)
 	if isCommunityEdition {
 		logrus.Warn("Neo4j Community Edition detected; Infrahub services will be stopped and restarted before the backup begins.")
+		logrus.Warn("Waiting 10 seconds to allow the user to abort... CTRL+C to cancel.")
+		time.Sleep(10 * time.Second)
 	}
 
 	version := iops.getInfrahubVersion()
@@ -353,6 +355,22 @@ func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager boo
 	logrus.Info("Backup metadata:")
 	fmt.Println(string(metadataBytes))
 
+	neo4jEdition := strings.ToLower(metadata.Neo4jEdition)
+	if detectedEdition, err := iops.detectNeo4jEdition(); err != nil {
+		logrus.Warnf("Could not detect Neo4j edition during restore; defaulting to community workflow: %v", err)
+		neo4jEdition = neo4jEditionCommunity
+	} else {
+		if neo4jEdition == neo4jEditionCommunity && strings.ToLower(detectedEdition) == neo4jEditionEnterprise {
+			// if the backup artifact is a community one, always use the community method to restore
+			neo4jEdition = neo4jEditionCommunity
+		} else if neo4jEdition == neo4jEditionEnterprise && strings.ToLower(detectedEdition) == neo4jEditionCommunity {
+			return fmt.Errorf("cannot restore Enterprise backup on Community edition Neo4j")
+		} else {
+			neo4jEdition = strings.ToLower(detectedEdition)
+		}
+		logrus.Infof("Detected Neo4j %s edition for restore", neo4jEdition)
+	}
+
 	// Determine task manager database availability
 	taskManagerIncluded := false
 	for _, component := range metadata.Components {
@@ -443,18 +461,6 @@ func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager boo
 	// Restart dependencies
 	if err := iops.restartDependencies(); err != nil {
 		return err
-	}
-
-	neo4jEdition := strings.ToLower(metadata.Neo4jEdition)
-	if neo4jEdition == "" {
-		if detectedEdition, err := iops.detectNeo4jEdition(); err != nil {
-			logrus.Warnf("Could not detect Neo4j edition during restore; defaulting to enterprise workflow: %v", err)
-		} else {
-			neo4jEdition = strings.ToLower(detectedEdition)
-			logrus.Infof("Detected Neo4j %s edition for restore", neo4jEdition)
-		}
-	} else {
-		logrus.Infof("Backup captured from Neo4j %s edition", neo4jEdition)
 	}
 
 	// Restore Neo4j
@@ -900,18 +906,6 @@ func (iops *InfrahubOps) restorePostgreSQL(workDir string) error {
 }
 
 func (iops *InfrahubOps) restoreNeo4j(workDir, neo4jEdition string) error {
-	edition := strings.ToLower(neo4jEdition)
-	switch edition {
-	case neo4jEditionCommunity:
-		return iops.restoreNeo4jCommunity(workDir)
-	default:
-		return iops.restoreNeo4jEnterprise(workDir)
-	}
-}
-
-func (iops *InfrahubOps) restoreNeo4jEnterprise(workDir string) error {
-	logrus.Info("Restoring Neo4j database (Enterprise Edition)...")
-
 	backupPath := filepath.Join(workDir, "backup", "database")
 	if err := iops.CopyTo("database", backupPath, "/tmp/infrahubops"); err != nil {
 		return fmt.Errorf("failed to copy backup to container: %w", err)
@@ -925,6 +919,18 @@ func (iops *InfrahubOps) restoreNeo4jEnterprise(workDir string) error {
 	if _, err := iops.Exec("database", []string{"chown", "-R", "neo4j:neo4j", "/tmp/infrahubops"}, nil); err != nil {
 		return fmt.Errorf("failed to change backup ownership: %w", err)
 	}
+
+	edition := strings.ToLower(neo4jEdition)
+	switch edition {
+	case neo4jEditionCommunity:
+		return iops.restoreNeo4jCommunity()
+	default:
+		return iops.restoreNeo4jEnterprise()
+	}
+}
+
+func (iops *InfrahubOps) restoreNeo4jEnterprise() error {
+	logrus.Info("Restoring Neo4j database (Enterprise Edition)...")
 
 	opts := &ExecOptions{User: "neo4j"}
 
@@ -963,23 +969,8 @@ func (iops *InfrahubOps) restoreNeo4jEnterprise(workDir string) error {
 	return nil
 }
 
-func (iops *InfrahubOps) restoreNeo4jCommunity(workDir string) (retErr error) {
+func (iops *InfrahubOps) restoreNeo4jCommunity() (retErr error) {
 	logrus.Info("Restoring Neo4j database (Community Edition dump)...")
-
-	dumpFilename := fmt.Sprintf("%s.dump", iops.config.Neo4jDatabase)
-	sourceDump := filepath.Join(workDir, "backup", "database", dumpFilename)
-	if _, err := os.Stat(sourceDump); err != nil {
-		return fmt.Errorf("neo4j dump not found in backup: %w", err)
-	}
-
-	if _, err := iops.Exec("database", []string{"mkdir", "-p", "/tmp/infrahubops"}, nil); err != nil {
-		return fmt.Errorf("failed to prepare target directory: %w", err)
-	}
-
-	targetDump := "/tmp/infrahubops/" + dumpFilename
-	if err := iops.CopyTo("database", sourceDump, targetDump); err != nil {
-		return fmt.Errorf("failed to copy dump into container: %w", err)
-	}
 
 	pidStr, err := iops.readNeo4jPID()
 	if err != nil {
@@ -992,9 +983,6 @@ func (iops *InfrahubOps) restoreNeo4jCommunity(workDir string) (retErr error) {
 	}
 
 	defer func() {
-		if _, err := iops.Exec("database", []string{"rm", "-f", targetDump}, nil); err != nil {
-			logrus.Warnf("Failed to remove temporary neo4j dump: %v", err)
-		}
 		if _, err := iops.Exec("database", []string{"rm", "-f", neo4jRemoteWatchdogBinary, neo4jRemoteWatchdogReady, neo4jRemoteWatchdogLog}, nil); err != nil {
 			logrus.Debugf("Failed to remove watchdog artifacts: %v", err)
 		}
