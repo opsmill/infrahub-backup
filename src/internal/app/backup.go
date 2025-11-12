@@ -309,7 +309,7 @@ func (iops *InfrahubOps) waitForRunningTasks() error {
 }
 
 // RestoreBackup restores an Infrahub deployment from a backup archive
-func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager bool) error {
+func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager bool, restoreMigrateFormat bool) error {
 	if _, err := os.Stat(backupFile); os.IsNotExist(err) {
 		return fmt.Errorf("backup file not found: %s", backupFile)
 	}
@@ -464,7 +464,7 @@ func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager boo
 	}
 
 	// Restore Neo4j
-	if err := iops.restoreNeo4j(workDir, neo4jEdition); err != nil {
+	if err := iops.restoreNeo4j(workDir, neo4jEdition, restoreMigrateFormat); err != nil {
 		return err
 	}
 
@@ -905,14 +905,14 @@ func (iops *InfrahubOps) restorePostgreSQL(workDir string) error {
 	return nil
 }
 
-func (iops *InfrahubOps) restoreNeo4j(workDir, neo4jEdition string) error {
+func (iops *InfrahubOps) restoreNeo4j(workDir, neo4jEdition string, restoreMigrateFormat bool) error {
 	backupPath := filepath.Join(workDir, "backup", "database")
 	if err := iops.CopyTo("database", backupPath, "/tmp/infrahubops"); err != nil {
 		return fmt.Errorf("failed to copy backup to container: %w", err)
 	}
 	defer func() {
 		if _, err := iops.Exec("database", []string{"rm", "-rf", "/tmp/infrahubops"}, nil); err != nil {
-			logrus.Warnf("Failed to cleanup temporary Neo4j backup data: %v", err)
+			logrus.Warnf("Failed to cleanup temporary Neo4j backup data (this is expected for community restore method): %v", err)
 		}
 	}()
 
@@ -923,13 +923,13 @@ func (iops *InfrahubOps) restoreNeo4j(workDir, neo4jEdition string) error {
 	edition := strings.ToLower(neo4jEdition)
 	switch edition {
 	case neo4jEditionCommunity:
-		return iops.restoreNeo4jCommunity()
+		return iops.restoreNeo4jCommunity(restoreMigrateFormat)
 	default:
-		return iops.restoreNeo4jEnterprise()
+		return iops.restoreNeo4jEnterprise(restoreMigrateFormat)
 	}
 }
 
-func (iops *InfrahubOps) restoreNeo4jEnterprise() error {
+func (iops *InfrahubOps) restoreNeo4jEnterprise(restoreMigrateFormat bool) error {
 	logrus.Info("Restoring Neo4j database (Enterprise Edition)...")
 
 	opts := &ExecOptions{User: "neo4j"}
@@ -948,6 +948,16 @@ func (iops *InfrahubOps) restoreNeo4jEnterprise() error {
 		opts,
 	); err != nil {
 		return fmt.Errorf("failed to restore neo4j: %w\nOutput: %v", err, output)
+	}
+
+	if restoreMigrateFormat {
+		if output, err := iops.Exec(
+			"database",
+			[]string{"neo4j-admin", "database", "migrate", "--to-format=block", iops.config.Neo4jDatabase},
+			opts,
+		); err != nil {
+			return fmt.Errorf("failed to migrate neo4j to block format: %w\nOutput: %v", err, output)
+		}
 	}
 
 	if output, err := iops.Exec(
@@ -969,7 +979,7 @@ func (iops *InfrahubOps) restoreNeo4jEnterprise() error {
 	return nil
 }
 
-func (iops *InfrahubOps) restoreNeo4jCommunity() (retErr error) {
+func (iops *InfrahubOps) restoreNeo4jCommunity(restoreMigrateFormat bool) (retErr error) {
 	logrus.Info("Restoring Neo4j database (Community Edition dump)...")
 
 	pidStr, err := iops.readNeo4jPID()
@@ -983,6 +993,9 @@ func (iops *InfrahubOps) restoreNeo4jCommunity() (retErr error) {
 	}
 
 	defer func() {
+		if _, err := iops.Exec("database", []string{"rm", "-rf", "/tmp/infrahubops"}, nil); err != nil {
+			logrus.Warnf("Failed to cleanup temporary Neo4j backup data: %v", err)
+		}
 		if _, err := iops.Exec("database", []string{"rm", "-f", neo4jRemoteWatchdogBinary, neo4jRemoteWatchdogReady, neo4jRemoteWatchdogLog}, nil); err != nil {
 			logrus.Debugf("Failed to remove watchdog artifacts: %v", err)
 		}
@@ -1001,6 +1014,16 @@ func (iops *InfrahubOps) restoreNeo4jCommunity() (retErr error) {
 		opts,
 	); err != nil {
 		return fmt.Errorf("failed to load neo4j dump: %w\nOutput: %v", err, output)
+	}
+
+	if restoreMigrateFormat {
+		if output, err := iops.Exec(
+			"database",
+			[]string{"neo4j-admin", "database", "migrate", "--to-format=block", iops.config.Neo4jDatabase},
+			opts,
+		); err != nil {
+			return fmt.Errorf("failed to migrate neo4j to block format: %w\nOutput: %v", err, output)
+		}
 	}
 
 	logrus.Info("Neo4j dump restored successfully")
