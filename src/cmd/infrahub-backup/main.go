@@ -27,6 +27,7 @@ func main() {
 	var neo4jMetadata string
 	var excludeTaskManagerDB bool
 	var restoreExcludeTaskManagerDB bool
+	var restoreMigrateFormat bool
 
 	createCmd := &cobra.Command{
 		Use:          "create",
@@ -46,10 +47,11 @@ func main() {
 		Args:         cobra.ExactArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return iops.RestoreBackup(args[0], restoreExcludeTaskManagerDB)
+			return iops.RestoreBackup(args[0], restoreExcludeTaskManagerDB, restoreMigrateFormat)
 		},
 	}
 	restoreCmd.Flags().BoolVar(&restoreExcludeTaskManagerDB, "exclude-taskmanager", false, "Skip restoring the task manager database even if present in the archive")
+	restoreCmd.Flags().BoolVar(&restoreMigrateFormat, "migrate-format", false, "Run neo4j-admin database migrate --to-format=block after the restore completes")
 
 	rootCmd.AddCommand(createCmd)
 	rootCmd.AddCommand(restoreCmd)
