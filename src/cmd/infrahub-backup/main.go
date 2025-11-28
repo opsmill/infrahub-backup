@@ -33,6 +33,12 @@ func main() {
 	var restoreExcludeTaskManagerDB bool
 	var restoreMigrateFormat bool
 
+	// Variables for from-files subcommand
+	var neo4jPath string
+	var postgresPath string
+	var neo4jEdition string
+	var infrahubVersion string
+
 	createCmd := &cobra.Command{
 		Use:          "create",
 		Short:        "Create a backup of the current Infrahub instance",
@@ -44,6 +50,24 @@ func main() {
 	createCmd.Flags().BoolVar(&force, "force", false, "Force backup creation even if there are running tasks")
 	createCmd.Flags().StringVar(&neo4jMetadata, "neo4jmetadata", "all", "Whether to backup neo4j metadata or not (all, none, users, roles)")
 	createCmd.Flags().BoolVar(&excludeTaskManagerDB, "exclude-taskmanager", false, "Exclude task manager database from the backup")
+
+	// Undocumented subcommand: create from-files
+	fromFilesCmd := &cobra.Command{
+		Use:          "from-files",
+		Short:        "Create a backup archive from local database dump files",
+		Hidden:       true,
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return iops.CreateBackupFromFiles(neo4jPath, postgresPath, neo4jEdition, infrahubVersion)
+		},
+	}
+	fromFilesCmd.Flags().StringVar(&neo4jPath, "neo4j-path", "", "Path to Neo4j backup directory or dump file (required)")
+	fromFilesCmd.Flags().StringVar(&postgresPath, "postgres-path", "", "Path to PostgreSQL dump file (optional)")
+	fromFilesCmd.Flags().StringVar(&neo4jEdition, "neo4j-edition", "", "Neo4j edition (enterprise or community, auto-detected if not specified)")
+	fromFilesCmd.Flags().StringVar(&infrahubVersion, "infrahub-version", "", "Infrahub version to record in backup metadata")
+	fromFilesCmd.MarkFlagRequired("neo4j-path")
+
+	createCmd.AddCommand(fromFilesCmd)
 
 	restoreCmd := &cobra.Command{
 		Use:          "restore <backup-file>",
