@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -974,6 +975,204 @@ func (iops *InfrahubOps) restoreNeo4jEnterprise(restoreMigrateFormat bool) error
 		nil,
 	); err != nil {
 		return fmt.Errorf("failed to start neo4j database: %w", err)
+	}
+
+	return nil
+}
+
+// CreateBackupFromFiles creates a backup archive from local Neo4j backup files and PostgreSQL dump.
+// This is useful when you already have database dumps on the local filesystem and want to
+// create a compatible backup archive without connecting to a running Infrahub instance.
+func (iops *InfrahubOps) CreateBackupFromFiles(neo4jPath string, postgresPath string, neo4jEdition string, infrahubVersion string) error {
+	// Validate input paths
+	if neo4jPath == "" {
+		return fmt.Errorf("neo4j backup path is required")
+	}
+
+	neo4jInfo, err := os.Stat(neo4jPath)
+	if err != nil {
+		return fmt.Errorf("neo4j backup path not accessible: %w", err)
+	}
+
+	var postgresIncluded bool
+	if postgresPath != "" {
+		if _, err := os.Stat(postgresPath); err != nil {
+			return fmt.Errorf("postgres dump file not accessible: %w", err)
+		}
+		postgresIncluded = true
+	}
+
+	// Create work directory
+	workDir, err := os.MkdirTemp("", "infrahub_backup_*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp directory: %w", err)
+	}
+	defer os.RemoveAll(workDir)
+
+	// Create backup directory structure
+	backupDir := filepath.Join(workDir, "backup")
+	databaseDir := filepath.Join(backupDir, "database")
+	if err := os.MkdirAll(databaseDir, 0755); err != nil {
+		return fmt.Errorf("failed to create backup directory: %w", err)
+	}
+
+	// Ensure output directory exists
+	if err := os.MkdirAll(iops.config.BackupDir, 0755); err != nil {
+		return fmt.Errorf("failed to create backup parent directory: %w", err)
+	}
+
+	logrus.Info("Copying Neo4j backup files...")
+
+	// Copy Neo4j backup files
+	if neo4jInfo.IsDir() {
+		// Copy directory contents
+		if err := copyDir(neo4jPath, databaseDir); err != nil {
+			return fmt.Errorf("failed to copy neo4j backup directory: %w", err)
+		}
+	} else {
+		// Copy single file (e.g., .dump file for community edition)
+		destPath := filepath.Join(databaseDir, filepath.Base(neo4jPath))
+		if err := copyFile(neo4jPath, destPath); err != nil {
+			return fmt.Errorf("failed to copy neo4j backup file: %w", err)
+		}
+	}
+
+	// Copy PostgreSQL dump if provided
+	if postgresIncluded {
+		logrus.Info("Copying PostgreSQL dump file...")
+		destPath := filepath.Join(backupDir, "prefect.dump")
+		if err := copyFile(postgresPath, destPath); err != nil {
+			return fmt.Errorf("failed to copy postgres dump: %w", err)
+		}
+	}
+
+	// Calculate checksums
+	checksums := make(map[string]string)
+
+	err = filepath.Walk(databaseDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			rel, _ := filepath.Rel(backupDir, path)
+			if sum, err := calculateSHA256(path); err == nil {
+				checksums[rel] = sum
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to calculate Neo4j backup checksums: %w", err)
+	}
+
+	if postgresIncluded {
+		prefectPath := filepath.Join(backupDir, "prefect.dump")
+		if sum, err := calculateSHA256(prefectPath); err == nil {
+			checksums["prefect.dump"] = sum
+		} else {
+			return fmt.Errorf("failed to calculate Prefect DB checksum: %w", err)
+		}
+	}
+
+	// Generate backup filename and ID
+	backupFilename := iops.generateBackupFilename()
+	backupPath := filepath.Join(iops.config.BackupDir, backupFilename)
+	backupID := strings.TrimSuffix(backupFilename, ".tar.gz")
+
+	// Normalize neo4j edition
+	edition := strings.ToLower(neo4jEdition)
+	if edition == "" {
+		// Try to detect from file structure
+		// If it's a .dump file, likely community edition
+		if !neo4jInfo.IsDir() && strings.HasSuffix(neo4jPath, ".dump") {
+			edition = neo4jEditionCommunity
+		} else {
+			edition = neo4jEditionEnterprise
+		}
+		logrus.Infof("Auto-detected Neo4j edition: %s", edition)
+	}
+
+	// Create metadata
+	metadata := iops.createBackupMetadata(backupID, postgresIncluded, infrahubVersion, edition)
+	metadata.Checksums = checksums
+
+	metadataBytes, err := json.MarshalIndent(metadata, "", "    ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal metadata: %w", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(backupDir, "backup_information.json"), metadataBytes, 0644); err != nil {
+		return fmt.Errorf("failed to write metadata: %w", err)
+	}
+
+	// Create tarball
+	logrus.Info("Creating backup archive...")
+	if err := createTarball(backupPath, workDir, "backup/"); err != nil {
+		return fmt.Errorf("failed to create archive: %w", err)
+	}
+
+	logrus.Infof("Backup created: %s", backupPath)
+
+	// Show backup size
+	if stat, err := os.Stat(backupPath); err == nil {
+		logrus.Infof("Backup size: %s", formatBytes(stat.Size()))
+	}
+
+	return nil
+}
+
+// copyFile copies a single file from src to dst
+func copyFile(src, dst string) error {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
+
+	srcInfo, err := srcFile.Stat()
+	if err != nil {
+		return err
+	}
+
+	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, srcInfo.Mode())
+	if err != nil {
+		return err
+	}
+	defer dstFile.Close()
+
+	_, err = io.Copy(dstFile, srcFile)
+	return err
+}
+
+// copyDir recursively copies a directory from src to dst
+func copyDir(src, dst string) error {
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(dst, srcInfo.Mode()); err != nil {
+		return err
+	}
+
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		srcPath := filepath.Join(src, entry.Name())
+		dstPath := filepath.Join(dst, entry.Name())
+
+		if entry.IsDir() {
+			if err := copyDir(srcPath, dstPath); err != nil {
+				return err
+			}
+		} else {
+			if err := copyFile(srcPath, dstPath); err != nil {
+				return err
+			}
+		}
 	}
 
 	return nil
