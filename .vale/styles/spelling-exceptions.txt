@@ -243,6 +243,8 @@ query_graphql
 query_peers
 quiescing
 rebase
+recoverability
+runbooks
 rebased
 rebasing
 Rebasing

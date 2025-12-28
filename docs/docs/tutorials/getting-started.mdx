@@ -126,7 +126,7 @@ You should see:
 
 If your Infrahub workflows produce artifacts stored outside the databases, take a moment to snapshot that storage so the backup remains consistent. Identify the bucket, container, or volume where artifacts live and copy the contents into a dated folder or version. Use your provider’s native tooling (for example, `aws s3 sync`, `az storage blob download`, or `rsync` for shared volumes) and note where you stored the snapshot so you can pair it with the database backup when restoring.
 
-If using standard docker compose deployment:
+If using standard Docker Compose deployment:
 
 ```bash
 # Copy artifacts directory to backup location
