@@ -1,0 +1,34 @@
+---
+# Pull Request Labeler Configuration
+# https://github.com/actions/labeler
+
+documentation:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "docs/**"
+          - "**/*.md"
+          - "**/*.mdx"
+
+go:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "**/*.go"
+          - "go.mod"
+          - "go.sum"
+
+ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".github/**"
+
+backup:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/cmd/infrahub-backup/**"
+          - "src/internal/app/backup.go"
+
+taskmanager:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "src/cmd/infrahub-taskmanager/**"
+          - "src/internal/app/taskmanager.go"
