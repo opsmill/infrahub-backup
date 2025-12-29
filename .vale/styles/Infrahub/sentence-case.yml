@@ -11,75 +11,270 @@ scope:
   - heading.h6
 match: $sentence
 exceptions:
+  - "Method 1: Direct in Settings (Not Recommended)"
+  - "Method 2: Environment Variables (Recommended)"
+  - "Method 3: VSCode Secrets (Future)"
+  - Activation Events
+  - Adding Custom Shortcuts
+  - Advanced Validation Concepts
+  - AI
+  - Allocate VLAN ID
   - Alpha
   - Ansible
   - API
+  - API Token Management
+  - Arista AVD
+  - Attribute Validation
   - Attributes
+  - Auto-Completion
+  - Available Commands
   - AWS S3
   - Beta
   - BGP
   - CA certificates
   - CI
+  - CI/CD
+  - Circular Dependencies
+  - CLI
   - Codespaces
+  - Command Execution
+  - Common Issues and Solutions
+  - Common Tasks
+  - Common Validation Errors
   - Computed Attribute
   - Computed Attributes
+  - Configuration Properties
+  - Configure Infrahub
+  - Containerlab
+  - Context Menu Integration
+  - Context Menus
   - CoreArtifactTarget
-  - CoreRepository
   - CoreGroup
+  - CoreRepository
+  - create
+  - Create an application in Entra ID
+  - Cross-File Validation
+  - CSS-like cascading
+  - Customizing Validation
+  - DC
+  - DC-2
+  - DC-3
+  - Debug Output
+  - Definition Provider
+  - Determine your redirect URI
+  - Direct in Settings
+  - Disabling Validation
   - Docker Compose
+  - Document Symbol Provider
+  - Document Symbols
   - E2E
+  - Emma
+  - environment detect
+  - environment list
+  - Environment Variable Substitution
+  - Environment Variables
+  - Error Categories
+  - Example
+  - Example Configuration
+  - Extension Dependencies
+  - Extension Metadata
+  - Extension Settings
+  - External Resources
+  - False Positives
+  - File Associations
+  - First Time Setup
+  - From Command Palette
+  - From Context Menus
+  - Further Information
+  - Further Reading
+  - Gallery Banner
   - Generics
+  - Getting Help
   - Git
   - GitHub
   - GitHub Codespaces
   - GitLab
   - GitPod
+  - Go-to-Definition
   - GraphQL
   - GraphQLQuery
-  - include_in_menu & menu_placement
+  - HAProxy
   - Helm
   - High Availability
+  - How Schema Validation Works
+  - How-to guides
+  - How-to Guides
   - Human Friendly Identifier
+  - IDE
+  - include_in_menu & menu_placement
+  - Incremental Validation
   - Infrahub
   - Infrahub Enterprise
+  - Infrahub Server Version
+  - Infrahub Servers Tree View
+  - Infrahub YAML Tree View
+  - infrahub-backup
   - infrahubctl
-  - IPHost
+  - Integration with Other Tools
+  - Intelligent Yaml editing
+  - Intelligent YAML editing
+  - Intelligent YAML Editing
+  - Invalid Attribute Kind
   - IP
-  - IPAM
-  - IPNetwork
   - IP Fabric
+  - IPAM
+  - IPHost
+  - IPNetwork
+  - Item Types
   - JavaScript
   - JetStream
   - Jinja
   - Jinja2
   - JWT
+  - Key features at a glance
+  - Key Features at a Glance
+  - Keyboard Shortcuts
+  - Kubernetes
+  - L2
+  - L3
+  - Language Features
+  - Large File Handling
+  - Layer 2
+  - Layer 3
+  - LibreNMS
+  - Linting Integration
+  - Message Structure
+  - Method 1
+  - Method 2
+  - Method 3
+  - Missing Required Fields
+  - Multi-server management
+  - Multi-Server Management
   - Namespace
   - NATS
+  - Nautobot
   - Neo4j
+  - Netbox
+  - NetBox
+  - Netpicker
+  - NetPicker
+  - Next steps
+  - Next Steps
+  - NGINX
   - Node
+  - Node.js Runtime
   - NumberPool
+  - OAuth 2.0
+  - OAuth 2.0 configuration example
+  - OAuth 2.0 parameters
+  - OAuth 2.0 vs OpenID Connect
   - OAuth2
+  - Observium
   - OIDC
+  - On macOS and Linux
   - Open ID Connect
+  - OpenID Connect
+  - OpenID Connect (OIDC)
   - OpsMill
+  - Option A
+  - Option B
+  - Peering Manager
+  - Performance Considerations
+  - Performance Issues
+  - Performance Settings
+  - PostgreSQL (task manager)
+  - Programmatic Execution
+  - Prometheus
+  - Publisher Information
   - Pydantic
   - Python
+  - Quick start
+  - Quick Start
   - RabbitMQ
+  - Real-time status
+  - Real-time Status
+  - Real-Time Validation
+  - Redirect URI formats
+  - Refresh Intervals
+  - Relationship Validation
+  - Required Extensions
+  - Resource Limits
   - REST
+  - restore
   - RFile
   - Schema
+  - Schema Inheritance
+  - Schema Validation Rules
   - SDK
+  - Separate proxies for HTTP and HTTPS
+  - Server Configuration Schema
   - Single sign-on
+  - Slurp'it
   - SSO
+  - Status Bar
+  - Status Bar Item
+  - Status States
+  - Structural Validation
+  - Suggested Shortcuts
+  - Syntax Highlighting
+  - Task manager PostgreSQL
   - Terraform
+  - Testing Queries
   - TLS
+  - Token Configuration Methods
+  - Token Format
+  - Token Security Best Practices
   - Tony Stark
   - TransformPython
+  - Tree Structure
+  - Tree View Components
+  - Troubleshooting Reference
+  - Troubleshooting tips
+  - Troubleshooting Tips
+  - Troubleshooting Validation Issues
   - TruffleHog
   - Trusted Root Certificate Store
   - UI
+  - Understanding how it works
+  - Understanding How It Works
+  - Understanding Validation Messages
+  - Update Interval
+  - Use cases
+  - Use Cases
+  - Using
   - Vale
+  - Validation Not Working
+  - Validation Pipeline
+  - Validation Scope
+  - Validation Settings
+  - version
+  - Version Compatibility
+  - Version information
+  - Version Information
+  - View Item Context Menus
+  - Visual tree views
+  - Visual Tree Views
   - VS Code
   - VS Code extensions
+  - VSCode
+  - VSCode extension API
+  - VSCode Extension API
+  - VSCode marketplace
+  - VSCode Secrets
+  - VSCode Version
+  - VSIX
+  - VSIX file
   - WebUI
-  - Slurp'it
+  - What you'll learn
+  - What You'll Learn
+  - Why Validation Matters
+  - Within the extension
+  - Within the Extension
+  - Working with branches
+  - Working with Branches
+  - Working with multiple environments
+  - Working with Multiple Environments
+  - YAML
+  - YAML Intelligence Features
+  - YAML Language Server
+  - YAML Validation

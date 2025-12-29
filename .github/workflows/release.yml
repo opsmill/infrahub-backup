@@ -10,17 +10,24 @@ jobs:
   publish:
     runs-on: ubuntu-24.04
     steps:
-      - name: "Check out repository code" 
+      - name: Check out repository code
         uses: actions/checkout@v5
 
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.25"
+          go-version: "1.23"
 
       - name: Build
         run: make build-all
 
       - name: Upload
+        env:
+          S3_ACCESS_KEY: ${{ secrets.S3_BUCKET_ACCESS_KEY }}
+          S3_SECRET_KEY: ${{ secrets.S3_BUCKET_SECRET_KEY }}
+          S3_ENDPOINT: ${{ secrets.S3_BUCKET_ENDPOINT }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET_NAME }}
         run: |
-          docker run -v ./bin:/build -e "MC_HOST_bucket=https://${{ secrets.S3_BUCKET_ACCESS_KEY }}:${{ secrets.S3_BUCKET_SECRET_KEY }}@${{ secrets.S3_BUCKET_ENDPOINT }}" minio/mc cp -r /build/ bucket/${{ secrets.S3_BUCKET_NAME }}/
+          docker run -v ./bin:/build \
+            -e "MC_HOST_bucket=https://${S3_ACCESS_KEY}:${S3_SECRET_KEY}@${S3_ENDPOINT}" \
+            minio/mc cp -r /build/ bucket/${S3_BUCKET}/

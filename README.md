@@ -24,4 +24,4 @@ Each operational area is exposed as its own binary:
 
 ## Using the CLI
 
-Documentation for using the Infrahub Backup is available [here](https://docs.infrahub.app/infrahubops/)
+Documentation for using the Infrahub Backup is available in the [Infrahub Ops documentation](https://docs.infrahub.app/infrahubops/)

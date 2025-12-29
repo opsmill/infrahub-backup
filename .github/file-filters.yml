@@ -1,0 +1,34 @@
+---
+go: &go
+  - "**/*.go"
+  - "go.mod"
+  - "go.sum"
+  - "Makefile"
+
+go_all:
+  - *go
+
+yaml: &yaml
+  - "**/*.yml"
+  - "**/*.yaml"
+  - "!docs/node_modules/**"
+
+yaml_all:
+  - *yaml
+
+markdown: &markdown
+  - "**/*.md"
+  - "**/*.mdx"
+  - "!docs/node_modules/**"
+
+markdown_all:
+  - *markdown
+
+documentation: &documentation
+  - "docs/**"
+  - "!docs/node_modules/**"
+  - ".vale.ini"
+  - ".vale/**"
+
+documentation_all:
+  - *documentation
