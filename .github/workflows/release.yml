@@ -31,3 +31,15 @@ jobs:
           docker run -v ./bin:/build \
             -e "MC_HOST_bucket=https://${S3_ACCESS_KEY}:${S3_SECRET_KEY}@${S3_ENDPOINT}" \
             minio/mc cp -r /build/ bucket/${S3_BUCKET}/
+  homebrew:
+    needs: publish
+    name: Bump Homebrew formula
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: mislav/bump-homebrew-formula-action@56a283fa15557e9abaa4bdb63b8212abc68e655c
+        with:
+          formula-name: infrahub-backup
+          homebrew-tap: opsmill/homebrew-tap
+          commit-message: "{{formulaName}} {{version}}"
+        env:
+          COMMITTER_TOKEN: ${{ secrets.GH_INFRAHUB_BOT_TOKEN }}
