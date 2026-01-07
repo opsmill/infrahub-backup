@@ -11,6 +11,14 @@ import (
 	"runtime/debug"
 )
 
+// Version can be set via SetVersion from main packages using ldflags
+var version string
+
+// SetVersion allows main packages to set the version from ldflags
+func SetVersion(v string) {
+	version = v
+}
+
 // Utility functions
 func getEnvOrDefault(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
@@ -156,6 +164,12 @@ func extractTarball(filename, destDir string) error {
 }
 
 func BuildRevision() string {
+	// Use ldflags-set version if available
+	if version != "" {
+		return version
+	}
+
+	// Fall back to git commit hash from build info
 	info, _ := debug.ReadBuildInfo()
 	var rev = "<none>"
 	var dirty = ""

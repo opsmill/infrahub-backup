@@ -10,7 +10,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// version is set via ldflags at build time
+var version string
+
 func main() {
+	app.SetVersion(version)
 	iops := app.NewInfrahubOps()
 	rootCmd := &cobra.Command{
 		Use:   "infrahub-taskmanager",

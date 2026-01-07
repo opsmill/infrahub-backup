@@ -4,7 +4,7 @@
 BINARIES=infrahub-backup infrahub-taskmanager
 BUILD_DIR=$(shell pwd)/bin
 SRC_ROOT=./src
-VERSION?=1.0.0
+VERSION?=
 LDFLAGS=-ldflags "-X main.version=$(VERSION) -s -w"
 CGO_ENABLED=0
 
