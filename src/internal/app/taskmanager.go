@@ -68,7 +68,8 @@ func (iops *InfrahubOps) FlushStaleRuns(daysToKeep, batchSize int) error {
 
 func (iops *InfrahubOps) runTaskCommandWithFallback(primaryCmd []string, scriptName, scriptTarget string, scriptExecArgs []string) error {
 	commandLabel := strings.Join(primaryCmd, " ")
-	output, err := iops.Exec("task-worker", primaryCmd, nil)
+	execOpts := iops.buildTaskWorkerExecOpts(nil)
+	output, err := iops.Exec("task-worker", primaryCmd, execOpts)
 	if err == nil {
 		if trimmed := strings.TrimSpace(output); trimmed != "" {
 			logrus.Info(trimmed)
@@ -94,7 +95,7 @@ func (iops *InfrahubOps) runTaskCommandWithFallback(primaryCmd []string, scriptN
 		if readErr != nil {
 			return fmt.Errorf("could not retrieve script: %w", readErr)
 		}
-		if _, execErr := iops.executeScript("task-worker", string(scriptContent), scriptTarget, scriptExecArgs...); execErr != nil {
+		if _, execErr := iops.executeScriptWithOpts("task-worker", string(scriptContent), scriptTarget, execOpts, scriptExecArgs...); execErr != nil {
 			return execErr
 		}
 		return nil
