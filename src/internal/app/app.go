@@ -42,11 +42,12 @@ type Configuration struct {
 
 // InfrahubOps is the main application struct
 type InfrahubOps struct {
-	config            *Configuration
-	backend           EnvironmentBackend
-	executor          *CommandExecutor
-	dockerBackend     *DockerBackend
-	kubernetesBackend *KubernetesBackend
+	config                  *Configuration
+	backend                 EnvironmentBackend
+	executor                *CommandExecutor
+	dockerBackend           *DockerBackend
+	kubernetesBackend       *KubernetesBackend
+	infrahubInternalAddress string // cached INFRAHUB_INTERNAL_ADDRESS from task-worker
 }
 
 // NewInfrahubOps creates a new InfrahubOps instance
@@ -245,6 +246,72 @@ func (iops *InfrahubOps) Exec(service string, command []string, opts *ExecOption
 		return "", err
 	}
 	return backend.Exec(service, command, opts)
+}
+
+// getInfrahubInternalAddress fetches and caches INFRAHUB_INTERNAL_ADDRESS from task-worker.
+// Returns empty string if the env var is not set (with a warning logged).
+func (iops *InfrahubOps) getInfrahubInternalAddress() string {
+	if iops.infrahubInternalAddress != "" {
+		return iops.infrahubInternalAddress
+	}
+
+	backend, err := iops.ensureBackend()
+	if err != nil {
+		logrus.Warnf("Could not get backend to fetch INFRAHUB_INTERNAL_ADDRESS: %v", err)
+		return ""
+	}
+
+	output, err := backend.Exec("task-worker", []string{"printenv", "INFRAHUB_INTERNAL_ADDRESS"}, nil)
+	if err != nil {
+		logrus.Debugf("INFRAHUB_INTERNAL_ADDRESS not set in task-worker container: %v", err)
+		return ""
+	}
+
+	iops.infrahubInternalAddress = strings.TrimSpace(output)
+	if iops.infrahubInternalAddress != "" {
+		logrus.Debugf("Cached INFRAHUB_INTERNAL_ADDRESS: %s", iops.infrahubInternalAddress)
+	}
+	return iops.infrahubInternalAddress
+}
+
+// buildTaskWorkerExecOpts creates ExecOptions for task-worker commands with INFRAHUB_ADDRESS
+// set to INFRAHUB_INTERNAL_ADDRESS. If existingOpts is provided, its values are preserved
+// and merged (existing Env values take precedence).
+func (iops *InfrahubOps) buildTaskWorkerExecOpts(existingOpts *ExecOptions) *ExecOptions {
+	internalAddr := iops.getInfrahubInternalAddress()
+
+	if existingOpts == nil {
+		if internalAddr == "" {
+			return nil
+		}
+		return &ExecOptions{
+			Env: map[string]string{
+				"INFRAHUB_ADDRESS": internalAddr,
+			},
+		}
+	}
+
+	// Clone existing options
+	opts := &ExecOptions{
+		User: existingOpts.User,
+		Env:  make(map[string]string),
+	}
+
+	// Set INFRAHUB_ADDRESS first (if available)
+	if internalAddr != "" {
+		opts.Env["INFRAHUB_ADDRESS"] = internalAddr
+	}
+
+	// Merge existing env vars (they take precedence)
+	for k, v := range existingOpts.Env {
+		opts.Env[k] = v
+	}
+
+	if len(opts.Env) == 0 {
+		opts.Env = nil
+	}
+
+	return opts
 }
 
 func (iops *InfrahubOps) ExecStream(service string, command []string, opts *ExecOptions) (string, error) {
@@ -454,7 +521,12 @@ func (iops *InfrahubOps) restartDependencies() error {
 	return nil
 }
 
+//lint:ignore U1000
 func (iops *InfrahubOps) executeScript(targetService string, scriptContent string, targetPath string, args ...string) (string, error) {
+	return iops.executeScriptWithOpts(targetService, scriptContent, targetPath, nil, args...)
+}
+
+func (iops *InfrahubOps) executeScriptWithOpts(targetService string, scriptContent string, targetPath string, opts *ExecOptions, args ...string) (string, error) {
 	// Write embedded script to a temporary file
 	tmpFile, err := os.CreateTemp("", "infrahubops_script_*.py")
 	if err != nil {
@@ -479,7 +551,7 @@ func (iops *InfrahubOps) executeScript(targetService string, scriptContent strin
 	// Execute script inside container
 	logrus.Info("Executing script inside container...")
 
-	output, err := iops.ExecStream(targetService, args, nil)
+	output, err := iops.ExecStream(targetService, args, opts)
 	if err != nil {
 		return output, fmt.Errorf("failed to execute script: %w", err)
 	}

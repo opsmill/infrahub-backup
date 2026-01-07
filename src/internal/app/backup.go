@@ -267,8 +267,10 @@ func (iops *InfrahubOps) waitForRunningTasks() error {
 			err    error
 		)
 
+		execOpts := iops.buildTaskWorkerExecOpts(nil)
+
 		if useInfrahubctl {
-			output, err = iops.Exec("task-worker", []string{"infrahubctl", "task", "list", "--json", "--state", "running", "--state", "pending"}, nil)
+			output, err = iops.Exec("task-worker", []string{"infrahubctl", "task", "list", "--json", "--state", "running", "--state", "pending"}, execOpts)
 			if err != nil {
 				if isCommandNotFound(err, output) {
 					logrus.Infof("infrahubctl task list command not available in task-worker, falling back to embedded script")
@@ -284,7 +286,7 @@ func (iops *InfrahubOps) waitForRunningTasks() error {
 			if err := loadScriptContent(); err != nil {
 				return err
 			}
-			output, err = iops.executeScript("task-worker", scriptContent, "/tmp/get_running_tasks.py", "python", "-u", "/tmp/get_running_tasks.py")
+			output, err = iops.executeScriptWithOpts("task-worker", scriptContent, "/tmp/get_running_tasks.py", execOpts, "python", "-u", "/tmp/get_running_tasks.py")
 			if err != nil {
 				return fmt.Errorf("failed to check running tasks: %w", err)
 			}
