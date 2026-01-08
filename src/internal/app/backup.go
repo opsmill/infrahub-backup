@@ -606,7 +606,7 @@ func (iops *InfrahubOps) backupNeo4jEnterprise(backupDir string, backupMetadata 
 
 	if output, err := iops.Exec(
 		"database",
-		[]string{"neo4j-admin", "database", "backup", "--include-metadata=" + backupMetadata, "--to-path=/tmp/infrahubops", iops.config.Neo4jDatabase},
+		[]string{"neo4j-admin", "database", "backup", "--expand-commands", "--include-metadata=" + backupMetadata, "--to-path=/tmp/infrahubops", iops.config.Neo4jDatabase},
 		nil,
 	); err != nil {
 		return fmt.Errorf("failed to backup neo4j: %w\nOutput: %v", err, output)
@@ -946,7 +946,7 @@ func (iops *InfrahubOps) restoreNeo4jEnterprise(restoreMigrateFormat bool) error
 
 	if output, err := iops.Exec(
 		"database",
-		[]string{"neo4j-admin", "database", "restore", "--overwrite-destination=true", "--from-path=/tmp/infrahubops", iops.config.Neo4jDatabase},
+		[]string{"neo4j-admin", "database", "restore", "--expand-commands", "--overwrite-destination=true", "--from-path=/tmp/infrahubops", iops.config.Neo4jDatabase},
 		opts,
 	); err != nil {
 		return fmt.Errorf("failed to restore neo4j: %w\nOutput: %v", err, output)
@@ -955,7 +955,7 @@ func (iops *InfrahubOps) restoreNeo4jEnterprise(restoreMigrateFormat bool) error
 	if restoreMigrateFormat {
 		if output, err := iops.Exec(
 			"database",
-			[]string{"neo4j-admin", "database", "migrate", "--to-format=block", iops.config.Neo4jDatabase},
+			[]string{"neo4j-admin", "database", "migrate", "--expand-commands", "--to-format=block", iops.config.Neo4jDatabase},
 			opts,
 		); err != nil {
 			return fmt.Errorf("failed to migrate neo4j to block format: %w\nOutput: %v", err, output)
