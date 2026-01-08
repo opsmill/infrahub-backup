@@ -825,8 +825,38 @@ func (iops *InfrahubOps) waitForProcessStopped(pid string, timeout time.Duration
 	return fmt.Errorf("timed out waiting for neo4j process %s to stop", pid)
 }
 
+// getWritableTempDir checks if /tmp is writable in the given container/pod.
+// If /tmp is not writable, it falls back to /run.
+func (iops *InfrahubOps) getWritableTempDir(service string) string {
+	// Try to create a test file in /tmp
+	testFile := "/tmp/.infrahubops_write_test"
+	if _, err := iops.Exec(service, []string{"touch", testFile}, nil); err == nil {
+		// Clean up test file
+		_, _ = iops.Exec(service, []string{"rm", "-f", testFile}, nil)
+		logrus.Debugf("Using /tmp as temp directory for %s", service)
+		return "/tmp"
+	}
+
+	// /tmp is not writable, try /run
+	testFile = "/run/.infrahubops_write_test"
+	if _, err := iops.Exec(service, []string{"touch", testFile}, nil); err == nil {
+		// Clean up test file
+		_, _ = iops.Exec(service, []string{"rm", "-f", testFile}, nil)
+		logrus.Infof("/tmp is not writable in %s, using /run as temp directory", service)
+		return "/run"
+	}
+
+	// Fall back to /tmp even if both failed (let the actual operation fail with a meaningful error)
+	logrus.Warnf("Neither /tmp nor /run appear writable in %s, defaulting to /tmp", service)
+	return "/tmp"
+}
+
 func (iops *InfrahubOps) backupTaskManagerDB(backupDir string) error {
 	logrus.Info("Backing up PostgreSQL database...")
+
+	// Determine writable temp directory
+	tempDir := iops.getWritableTempDir("task-manager-db")
+	dumpFile := tempDir + "/infrahubops_prefect.dump"
 
 	// Create dump
 	opts := &ExecOptions{Env: map[string]string{
@@ -834,19 +864,19 @@ func (iops *InfrahubOps) backupTaskManagerDB(backupDir string) error {
 	}}
 	if output, err := iops.Exec(
 		"task-manager-db",
-		[]string{"pg_dump", "-Fc", "-U", iops.config.PostgresUsername, "-d", iops.config.PostgresDatabase, "-f", "/tmp/infrahubops_prefect.dump"},
+		[]string{"pg_dump", "-Fc", "-U", iops.config.PostgresUsername, "-d", iops.config.PostgresDatabase, "-f", dumpFile},
 		opts,
 	); err != nil {
 		return fmt.Errorf("failed to create postgresql dump: %w\nOutput: %v", err, output)
 	}
 	defer func() {
-		if _, err := iops.Exec("task-manager-db", []string{"rm", "/tmp/infrahubops_prefect.dump"}, nil); err != nil {
+		if _, err := iops.Exec("task-manager-db", []string{"rm", dumpFile}, nil); err != nil {
 			logrus.Warnf("Failed to remove temporary postgres dump: %v", err)
 		}
 	}()
 
 	// Copy dump
-	if err := iops.CopyFrom("task-manager-db", "/tmp/infrahubops_prefect.dump", filepath.Join(backupDir, "prefect.dump")); err != nil {
+	if err := iops.CopyFrom("task-manager-db", dumpFile, filepath.Join(backupDir, "prefect.dump")); err != nil {
 		return fmt.Errorf("failed to copy postgresql dump: %w", err)
 	}
 
@@ -880,13 +910,17 @@ func (iops *InfrahubOps) restorePostgreSQL(workDir string) error {
 		return fmt.Errorf("failed to start task-manager-db: %w", err)
 	}
 
+	// Determine writable temp directory
+	tempDir := iops.getWritableTempDir("task-manager-db")
+	dumpFile := tempDir + "/infrahubops_prefect.dump"
+
 	// Copy dump to container
 	dumpPath := filepath.Join(workDir, "backup", "prefect.dump")
-	if err := iops.CopyTo("task-manager-db", dumpPath, "/tmp/infrahubops_prefect.dump"); err != nil {
+	if err := iops.CopyTo("task-manager-db", dumpPath, dumpFile); err != nil {
 		return fmt.Errorf("failed to copy dump to container: %w", err)
 	}
 	defer func() {
-		if _, err := iops.Exec("task-manager-db", []string{"rm", "/tmp/infrahubops_prefect.dump"}, nil); err != nil {
+		if _, err := iops.Exec("task-manager-db", []string{"rm", dumpFile}, nil); err != nil {
 			logrus.Warnf("Failed to remove temporary postgres dump: %v", err)
 		}
 	}()
@@ -898,7 +932,7 @@ func (iops *InfrahubOps) restorePostgreSQL(workDir string) error {
 	if output, err := iops.Exec(
 		"task-manager-db",
 		// "-x", "--no-owner" for role does not exist
-		[]string{"pg_restore", "-d", "postgres", "-U", iops.config.PostgresUsername, "--clean", "--create", "/tmp/infrahubops_prefect.dump"},
+		[]string{"pg_restore", "-d", "postgres", "-U", iops.config.PostgresUsername, "--clean", "--create", dumpFile},
 		opts,
 	); err != nil {
 		return fmt.Errorf("failed to restore postgresql: %w\nOutput: %v", err, output)
