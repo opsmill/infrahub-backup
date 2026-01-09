@@ -864,7 +864,7 @@ func (iops *InfrahubOps) backupTaskManagerDB(backupDir string) error {
 	}}
 	if output, err := iops.Exec(
 		"task-manager-db",
-		[]string{"pg_dump", "-Fc", "-U", iops.config.PostgresUsername, "-d", iops.config.PostgresDatabase, "-f", dumpFile},
+		[]string{"pg_dump", "-Fc", "-h", "localhost", "-U", iops.config.PostgresUsername, "-d", iops.config.PostgresDatabase, "-f", dumpFile},
 		opts,
 	); err != nil {
 		return fmt.Errorf("failed to create postgresql dump: %w\nOutput: %v", err, output)
@@ -932,7 +932,7 @@ func (iops *InfrahubOps) restorePostgreSQL(workDir string) error {
 	if output, err := iops.Exec(
 		"task-manager-db",
 		// "-x", "--no-owner" for role does not exist
-		[]string{"pg_restore", "-d", "postgres", "-U", iops.config.PostgresUsername, "--clean", "--create", dumpFile},
+		[]string{"pg_restore", "-h", "localhost", "-d", "postgres", "-U", iops.config.PostgresUsername, "--clean", "--create", dumpFile},
 		opts,
 	); err != nil {
 		return fmt.Errorf("failed to restore postgresql: %w\nOutput: %v", err, output)
