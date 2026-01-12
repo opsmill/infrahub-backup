@@ -1,9 +1,7 @@
 package app
 
 import (
-	"encoding/json"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -160,28 +158,6 @@ func (k *KubernetesBackend) IsRunning(service string) (bool, error) {
 	return false, nil
 }
 
-func (k *KubernetesBackend) scaleServices(services []string, replicas int) error {
-	if len(services) == 0 {
-		return nil
-	}
-	for _, service := range services {
-		kind, resource, err := k.findWorkloadResource(service)
-		if err != nil {
-			return fmt.Errorf("failed to resolve workload for %s: %w", service, err)
-		}
-		if err := k.scaleResource(kind, resource, replicas); err != nil {
-			return fmt.Errorf("failed to scale %s (%s/%s) to %d replicas: %w", service, kind, resource, replicas, err)
-		}
-	}
-	k.podCache = map[string]string{}
-	return nil
-}
-
-func (k *KubernetesBackend) scaleResource(kind, resource string, replicas int) error {
-	_, err := k.executor.runCommand("kubectl", "scale", "-n", k.namespace, fmt.Sprintf("%s/%s", kind, resource), fmt.Sprintf("--replicas=%d", replicas))
-	return err
-}
-
 // getReplicaCount returns the current replica count for a workload
 func (k *KubernetesBackend) getReplicaCount(kind, resource string) (int, error) {
 	output, err := k.executor.runCommand("kubectl", "get", kind, resource, "-n", k.namespace, "-o", "jsonpath={.spec.replicas}")
@@ -193,53 +169,6 @@ func (k *KubernetesBackend) getReplicaCount(kind, resource string) (int, error) 
 		return 0, err
 	}
 	return count, nil
-}
-
-func (k *KubernetesBackend) findWorkloadResource(service string) (string, string, error) {
-	kinds := []string{"deployment", "statefulset"}
-	selectors := k.podSelectors(service)
-
-	for _, kind := range kinds {
-		for _, selector := range selectors {
-			output, err := k.executor.runCommand("kubectl", "get", kind, "-n", k.namespace, "-l", selector, "-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}")
-			if err != nil || output == "" {
-				continue
-			}
-			names := nonEmptyLines(output)
-			if len(names) > 0 {
-				return kind, names[0], nil
-			}
-		}
-
-		if workloads, err := k.listWorkloads(kind); err == nil {
-			var candidate string
-			for _, workload := range workloads {
-				for _, selector := range selectors {
-					if selectorMatchesLabels(selector, workload.SelectorLabels) || selectorMatchesLabels(selector, workload.TemplateLabels) {
-						return kind, workload.Name, nil
-					}
-				}
-				if candidate == "" && strings.Contains(workload.Name, service) {
-					candidate = workload.Name
-				}
-			}
-			if candidate != "" {
-				return kind, candidate, nil
-			}
-		}
-
-		output, err := k.executor.runCommand("kubectl", "get", kind, "-n", k.namespace, "-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}")
-		if err != nil {
-			continue
-		}
-		for _, name := range nonEmptyLines(output) {
-			if strings.Contains(name, service) {
-				return kind, name, nil
-			}
-		}
-	}
-
-	return "", "", fmt.Errorf("no workloads found")
 }
 
 func (k *KubernetesBackend) getPodStatuses(service string) ([]string, error) {
@@ -314,33 +243,6 @@ func (k *KubernetesBackend) getPodForService(service string) (string, error) {
 	return "", fmt.Errorf("no pods found for service %s in namespace %s", service, k.namespace)
 }
 
-func (k *KubernetesBackend) podSelectors(service string) []string {
-	return []string{
-		fmt.Sprintf("app.kubernetes.io/component=%s", service),
-		fmt.Sprintf("app=%s", service),
-		fmt.Sprintf("component=%s", service),
-		fmt.Sprintf("infrahub/service=%s", service),
-	}
-}
-
-// findPrimaryPod searches for a pod with primary role label (for HA PostgreSQL clusters like CloudNativePG)
-func (k *KubernetesBackend) findPrimaryPod(pods []string) string {
-	for _, pod := range pods {
-		output, err := k.executor.runCommand("kubectl", "get", "pod", pod, "-n", k.namespace, "-o", "jsonpath={.metadata.labels.cnpg\\.io/instanceRole}")
-		if err == nil && output == "primary" {
-			logrus.Debugf("Found primary pod via cnpg.io/instanceRole: %s", pod)
-			return pod
-		}
-		// Fallback to legacy role label
-		output, err = k.executor.runCommand("kubectl", "get", "pod", pod, "-n", k.namespace, "-o", "jsonpath={.metadata.labels.role}")
-		if err == nil && output == "primary" {
-			logrus.Debugf("Found primary pod via role label: %s", pod)
-			return pod
-		}
-	}
-	return ""
-}
-
 // GetAllPods returns all pod names for a given service
 func (k *KubernetesBackend) GetAllPods(service string) ([]string, error) {
 	selectors := k.podSelectors(service)
@@ -355,138 +257,4 @@ func (k *KubernetesBackend) GetAllPods(service string) ([]string, error) {
 		}
 	}
 	return nil, fmt.Errorf("no pods found for service %s", service)
-}
-
-type kubernetesWorkload struct {
-	Name           string
-	SelectorLabels map[string]string
-	TemplateLabels map[string]string
-}
-
-func (k *KubernetesBackend) listWorkloads(kind string) ([]kubernetesWorkload, error) {
-	output, err := k.executor.runCommand("kubectl", "get", kind, "-n", k.namespace, "-o", "json")
-	if err != nil {
-		return nil, err
-	}
-
-	var parsed struct {
-		Items []struct {
-			Metadata struct {
-				Name string `json:"name"`
-			} `json:"metadata"`
-			Spec struct {
-				Selector struct {
-					MatchLabels map[string]string `json:"matchLabels"`
-				} `json:"selector"`
-				Template struct {
-					Metadata struct {
-						Labels map[string]string `json:"labels"`
-					} `json:"metadata"`
-				} `json:"template"`
-			} `json:"spec"`
-		} `json:"items"`
-	}
-
-	if err := json.Unmarshal([]byte(output), &parsed); err != nil {
-		return nil, err
-	}
-
-	workloads := make([]kubernetesWorkload, 0, len(parsed.Items))
-	for _, item := range parsed.Items {
-		workloads = append(workloads, kubernetesWorkload{
-			Name:           item.Metadata.Name,
-			SelectorLabels: item.Spec.Selector.MatchLabels,
-			TemplateLabels: item.Spec.Template.Metadata.Labels,
-		})
-	}
-
-	return workloads, nil
-}
-
-func ListKubernetesNamespaces(executor *CommandExecutor) ([]string, error) {
-	output, err := executor.runCommand("kubectl", "get", "pods", "-A", "-l", "app.kubernetes.io/name=infrahub", "-o", "jsonpath={range .items[*]}{.metadata.namespace}{\"\\n\"}{end}")
-	if err != nil {
-		return nil, err
-	}
-	namespaces := unique(nonEmptyLines(output))
-	return namespaces, nil
-}
-
-func (k *KubernetesBackend) prepareCommand(command []string, opts *ExecOptions) []string {
-	if opts == nil {
-		return command
-	}
-
-	result := make([]string, len(command))
-	copy(result, command)
-
-	if len(opts.Env) > 0 {
-		keys := make([]string, 0, len(opts.Env))
-		for key := range opts.Env {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		envArgs := []string{"env"}
-		for _, key := range keys {
-			envArgs = append(envArgs, fmt.Sprintf("%s=%s", key, opts.Env[key]))
-		}
-		result = append(envArgs, result...)
-	}
-
-	if opts.User != "" {
-		commandString := shellQuoteCommand(result)
-		result = []string{"su", "-", opts.User, "-s", "/bin/sh", "-c", commandString}
-	}
-
-	return result
-}
-
-func selectorMatchesLabels(selector string, labels map[string]string) bool {
-	if len(labels) == 0 {
-		return false
-	}
-	selector = strings.TrimSpace(selector)
-	if selector == "" {
-		return false
-	}
-
-	conditions := strings.Split(selector, ",")
-	for _, condition := range conditions {
-		condition = strings.TrimSpace(condition)
-		if condition == "" {
-			continue
-		}
-		kv := strings.SplitN(condition, "=", 2)
-		if len(kv) != 2 {
-			if _, ok := labels[condition]; !ok {
-				return false
-			}
-			continue
-		}
-		key := strings.TrimSpace(kv[0])
-		value := strings.TrimSpace(kv[1])
-		if v, ok := labels[key]; !ok || v != value {
-			return false
-		}
-	}
-
-	return true
-}
-
-func shellQuoteCommand(parts []string) string {
-	quoted := make([]string, len(parts))
-	for i, part := range parts {
-		quoted[i] = shellQuote(part)
-	}
-	return strings.Join(quoted, " ")
-}
-
-func shellQuote(value string) string {
-	if value == "" {
-		return "''"
-	}
-	if !strings.ContainsAny(value, " ' \"$`!#&()*;<>?|{}[]~") {
-		return value
-	}
-	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
