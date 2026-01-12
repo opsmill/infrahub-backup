@@ -1,16 +1,12 @@
 package app
 
 import (
-	"bytes"
 	"embed"
 	"errors"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/sirupsen/logrus"
 )
@@ -63,110 +59,6 @@ func NewInfrahubOps() *InfrahubOps {
 
 func (iops *InfrahubOps) Config() *Configuration {
 	return iops.config
-}
-
-// CommandExecutor handles command execution
-type CommandExecutor struct{}
-
-func NewCommandExecutor() *CommandExecutor {
-	return &CommandExecutor{}
-}
-
-type lineLogger struct {
-	buf     bytes.Buffer
-	logFunc func(string)
-}
-
-func newLineLogger(logFunc func(string)) *lineLogger {
-	return &lineLogger{logFunc: logFunc}
-}
-
-func (l *lineLogger) Write(p []byte) (int, error) {
-	total := len(p)
-	for len(p) > 0 {
-		if idx := bytes.IndexByte(p, '\n'); idx >= 0 {
-			l.buf.Write(p[:idx])
-			l.flush()
-			p = p[idx+1:]
-			continue
-		}
-		l.buf.Write(p)
-		break
-	}
-	return total, nil
-}
-
-func (l *lineLogger) flush() {
-	if l.buf.Len() == 0 {
-		return
-	}
-	l.logFunc(l.buf.String())
-	l.buf.Reset()
-}
-
-func (l *lineLogger) Flush() {
-	l.flush()
-}
-
-func (ce *CommandExecutor) runCommand(name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
-	output, err := cmd.CombinedOutput()
-	return strings.TrimSpace(string(output)), err
-}
-
-func (ce *CommandExecutor) runCommandQuiet(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	return cmd.Run()
-}
-
-func (ce *CommandExecutor) runCommandWithStream(name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return "", err
-	}
-
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return "", err
-	}
-
-	if err := cmd.Start(); err != nil {
-		return "", err
-	}
-
-	var stdoutBuf bytes.Buffer
-	stdoutLogger := newLineLogger(func(line string) {
-		logrus.Info(line)
-	})
-	stderrLogger := newLineLogger(func(line string) {
-		logrus.Info(line)
-	})
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	go func() {
-		defer wg.Done()
-		if _, copyErr := io.Copy(io.MultiWriter(&stdoutBuf, stdoutLogger), stdout); copyErr != nil {
-			logrus.WithError(copyErr).Warn("failed reading command stdout")
-		}
-		stdoutLogger.Flush()
-	}()
-
-	go func() {
-		defer wg.Done()
-		if _, copyErr := io.Copy(stderrLogger, stderr); copyErr != nil {
-			logrus.WithError(copyErr).Warn("failed reading command stderr")
-		}
-		stderrLogger.Flush()
-	}()
-
-	wg.Wait()
-
-	err = cmd.Wait()
-	return stdoutBuf.String(), err
 }
 
 func (iops *InfrahubOps) getDockerBackend() *DockerBackend {
@@ -273,42 +165,31 @@ func (iops *InfrahubOps) getInfrahubInternalAddress() string {
 }
 
 // buildTaskWorkerExecOpts creates ExecOptions for task-worker commands with INFRAHUB_ADDRESS
-// set to INFRAHUB_INTERNAL_ADDRESS. If existingOpts is provided, its values are preserved
-// and merged (existing Env values take precedence).
+// set to INFRAHUB_INTERNAL_ADDRESS. Existing options are merged with precedence to user values.
 func (iops *InfrahubOps) buildTaskWorkerExecOpts(existingOpts *ExecOptions) *ExecOptions {
 	internalAddr := iops.getInfrahubInternalAddress()
-
-	if existingOpts == nil {
-		if internalAddr == "" {
-			return nil
-		}
-		return &ExecOptions{
-			Env: map[string]string{
-				"INFRAHUB_ADDRESS": internalAddr,
-			},
-		}
+	if internalAddr == "" && existingOpts == nil {
+		return nil
 	}
 
-	// Clone existing options
-	opts := &ExecOptions{
-		User: existingOpts.User,
-		Env:  make(map[string]string),
+	opts := &ExecOptions{Env: make(map[string]string)}
+	if existingOpts != nil {
+		opts.User = existingOpts.User
 	}
 
-	// Set INFRAHUB_ADDRESS first (if available)
+	// Set INFRAHUB_ADDRESS if available, then merge user env vars (user values override)
 	if internalAddr != "" {
 		opts.Env["INFRAHUB_ADDRESS"] = internalAddr
 	}
-
-	// Merge existing env vars (they take precedence)
-	for k, v := range existingOpts.Env {
-		opts.Env[k] = v
+	if existingOpts != nil {
+		for k, v := range existingOpts.Env {
+			opts.Env[k] = v
+		}
 	}
 
 	if len(opts.Env) == 0 {
 		opts.Env = nil
 	}
-
 	return opts
 }
 
@@ -432,42 +313,4 @@ func (iops *InfrahubOps) restartDependencies() error {
 	}
 
 	return nil
-}
-
-//lint:ignore U1000
-func (iops *InfrahubOps) executeScript(targetService string, scriptContent string, targetPath string, args ...string) (string, error) {
-	return iops.executeScriptWithOpts(targetService, scriptContent, targetPath, nil, args...)
-}
-
-func (iops *InfrahubOps) executeScriptWithOpts(targetService string, scriptContent string, targetPath string, opts *ExecOptions, args ...string) (string, error) {
-	// Write embedded script to a temporary file
-	tmpFile, err := os.CreateTemp("", "infrahubops_script_*.py")
-	if err != nil {
-		return "", fmt.Errorf("failed to create temp file: %w", err)
-	}
-	defer os.Remove(tmpFile.Name())
-	if _, err := tmpFile.WriteString(scriptContent); err != nil {
-		tmpFile.Close()
-		return "", fmt.Errorf("failed to write script: %w", err)
-	}
-	tmpFile.Close()
-
-	if err := iops.CopyTo(targetService, tmpFile.Name(), targetPath); err != nil {
-		return "", fmt.Errorf("failed to copy script to target: %w", err)
-	}
-	defer func() {
-		if _, err := iops.Exec(targetService, []string{"rm", "-f", targetPath}, nil); err != nil {
-			logrus.Warnf("Failed to clean up script %s on %s: %v", targetPath, targetService, err)
-		}
-	}()
-
-	// Execute script inside container
-	logrus.Info("Executing script inside container...")
-
-	output, err := iops.ExecStream(targetService, args, opts)
-	if err != nil {
-		return output, fmt.Errorf("failed to execute script: %w", err)
-	}
-
-	return output, nil
 }
