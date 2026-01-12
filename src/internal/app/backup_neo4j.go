@@ -11,6 +11,13 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+const (
+	neo4jTempBackupDir       = "/tmp/infrahubops"
+	neo4jWatchdogInitTimeout = 5 * time.Second
+	neo4jProcessStopTimeout  = 120 * time.Second
+	neo4jMetadataScriptPath  = "/data/scripts/neo4j/restore_metadata.cypher"
+)
+
 func (iops *InfrahubOps) backupDatabase(backupDir string, backupMetadata string, neo4jEdition string) error {
 	edition := strings.ToLower(neo4jEdition)
 	switch edition {
@@ -24,11 +31,11 @@ func (iops *InfrahubOps) backupDatabase(backupDir string, backupMetadata string,
 func (iops *InfrahubOps) backupNeo4jEnterprise(backupDir string, backupMetadata string) error {
 	logrus.Info("Backing up Neo4j database (Enterprise Edition online backup)...")
 
-	if _, err := iops.Exec("database", []string{"mkdir", "-p", "/tmp/infrahubops"}, nil); err != nil {
+	if _, err := iops.Exec("database", []string{"mkdir", "-p", neo4jTempBackupDir}, nil); err != nil {
 		return fmt.Errorf("failed to create backup directory: %w", err)
 	}
 	defer func() {
-		if _, err := iops.Exec("database", []string{"rm", "-rf", "/tmp/infrahubops"}, nil); err != nil {
+		if _, err := iops.Exec("database", []string{"rm", "-rf", neo4jTempBackupDir}, nil); err != nil {
 			logrus.Warnf("Failed to remove temporary Neo4j backup directory: %v", err)
 		}
 	}()
@@ -41,7 +48,7 @@ func (iops *InfrahubOps) backupNeo4jEnterprise(backupDir string, backupMetadata 
 		return fmt.Errorf("failed to backup neo4j: %w\nOutput: %v", err, output)
 	}
 
-	if err := iops.CopyFrom("database", "/tmp/infrahubops", filepath.Join(backupDir, "database")); err != nil {
+	if err := iops.CopyFrom("database", neo4jTempBackupDir, filepath.Join(backupDir, "database")); err != nil {
 		return fmt.Errorf("failed to copy database backup: %w", err)
 	}
 
@@ -87,7 +94,7 @@ func (iops *InfrahubOps) stopNeo4jCommunity(pidStr string) error {
 		return fmt.Errorf("failed to start watchdog: %w", err)
 	}
 
-	if err := iops.waitForRemoteFile(neo4jRemoteWatchdogReady, 5*time.Second); err != nil {
+	if err := iops.waitForRemoteFile(neo4jRemoteWatchdogReady, neo4jWatchdogInitTimeout); err != nil {
 		return fmt.Errorf("watchdog failed to initialize: %w", err)
 	}
 
@@ -96,7 +103,7 @@ func (iops *InfrahubOps) stopNeo4jCommunity(pidStr string) error {
 	}
 
 	logrus.Info("Waiting for Neo4j process to stop...")
-	if err := iops.waitForProcessStopped(pidStr, 120*time.Second); err != nil {
+	if err := iops.waitForProcessStopped(pidStr, neo4jProcessStopTimeout); err != nil {
 		return err
 	}
 
@@ -159,16 +166,16 @@ func (iops *InfrahubOps) backupNeo4jCommunity(backupDir string) (retErr error) {
 func (iops *InfrahubOps) restoreNeo4j(workDir, neo4jEdition string, restoreMigrateFormat bool) error {
 	backupPath := filepath.Join(workDir, "backup", "database")
 
-	if err := iops.CopyTo("database", backupPath, "/tmp/infrahubops"); err != nil {
+	if err := iops.CopyTo("database", backupPath, neo4jTempBackupDir); err != nil {
 		return fmt.Errorf("failed to copy backup to container: %w", err)
 	}
 	defer func() {
-		if _, err := iops.Exec("database", []string{"rm", "-rf", "/tmp/infrahubops"}, nil); err != nil {
+		if _, err := iops.Exec("database", []string{"rm", "-rf", neo4jTempBackupDir}, nil); err != nil {
 			logrus.Warnf("Failed to cleanup temporary Neo4j backup data (this is expected for community restore method): %v", err)
 		}
 	}()
 
-	if _, err := iops.Exec("database", []string{"chown", "-R", "neo4j:neo4j", "/tmp/infrahubops"}, nil); err != nil {
+	if _, err := iops.Exec("database", []string{"chown", "-R", "neo4j:neo4j", neo4jTempBackupDir}, nil); err != nil {
 		return fmt.Errorf("failed to change backup ownership: %w", err)
 	}
 
@@ -201,7 +208,7 @@ func (iops *InfrahubOps) restoreNeo4jEnterprise(restoreMigrateFormat bool) error
 
 	if output, err := iops.Exec(
 		"database",
-		[]string{"neo4j-admin", "database", "restore", "--expand-commands", "--overwrite-destination=true", "--from-path=/tmp/infrahubops", iops.config.Neo4jDatabase},
+		[]string{"neo4j-admin", "database", "restore", "--expand-commands", "--overwrite-destination=true", "--from-path=" + neo4jTempBackupDir, iops.config.Neo4jDatabase},
 		opts,
 	); err != nil {
 		return fmt.Errorf("failed to restore neo4j: %w\nOutput: %v", err, output)
@@ -219,7 +226,7 @@ func (iops *InfrahubOps) restoreNeo4jEnterprise(restoreMigrateFormat bool) error
 
 	if output, err := iops.Exec(
 		"database",
-		[]string{"sh", "-c", "cat /data/scripts/neo4j/restore_metadata.cypher | cypher-shell -u " + iops.config.Neo4jUsername + " -p" + iops.config.Neo4jPassword + " -d system --param \"database => '" + iops.config.Neo4jDatabase + "'\""},
+		[]string{"sh", "-c", "cat " + neo4jMetadataScriptPath + " | cypher-shell -u " + iops.config.Neo4jUsername + " -p" + iops.config.Neo4jPassword + " -d system --param \"database => '" + iops.config.Neo4jDatabase + "'\""},
 		opts,
 	); err != nil {
 		return fmt.Errorf("failed to restore neo4j metadata: %w\nOutput: %v", err, output)
@@ -263,7 +270,7 @@ func (iops *InfrahubOps) restoreNeo4jCluster(opts *ExecOptions) error {
 	if output, err := iops.Exec("database", []string{
 		"neo4j-admin", "database", "restore",
 		"--expand-commands", "--overwrite-destination=true",
-		"--from-path=/tmp/infrahubops",
+		"--from-path=" + neo4jTempBackupDir,
 		iops.config.Neo4jDatabase,
 	}, opts); err != nil {
 		return fmt.Errorf("failed to restore neo4j: %w\nOutput: %v", err, output)
@@ -356,7 +363,7 @@ func (iops *InfrahubOps) restoreNeo4jCommunity(restoreMigrateFormat bool) (retEr
 	}
 
 	defer func() {
-		if _, err := iops.Exec("database", []string{"rm", "-rf", "/tmp/infrahubops"}, nil); err != nil {
+		if _, err := iops.Exec("database", []string{"rm", "-rf", neo4jTempBackupDir}, nil); err != nil {
 			logrus.Warnf("Failed to cleanup temporary Neo4j backup data: %v", err)
 		}
 		if _, err := iops.Exec("database", []string{"rm", "-f", neo4jRemoteWatchdogBinary, neo4jRemoteWatchdogReady, neo4jRemoteWatchdogLog}, nil); err != nil {
@@ -373,7 +380,7 @@ func (iops *InfrahubOps) restoreNeo4jCommunity(restoreMigrateFormat bool) (retEr
 	opts := iops.getNeo4jExecOptions()
 	if output, err := iops.Exec(
 		"database",
-		[]string{"neo4j-admin", "database", "load", "--overwrite-destination=true", "--from-path=/tmp/infrahubops", iops.config.Neo4jDatabase},
+		[]string{"neo4j-admin", "database", "load", "--overwrite-destination=true", "--from-path=" + neo4jTempBackupDir, iops.config.Neo4jDatabase},
 		opts,
 	); err != nil {
 		return fmt.Errorf("failed to load neo4j dump: %w\nOutput: %v", err, output)
