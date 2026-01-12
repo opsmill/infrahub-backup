@@ -48,6 +48,15 @@ func formatBytes(bytes int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
+// fileExists checks if a file exists and is not a directory
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return !info.IsDir()
+}
+
 // calculateSHA256 calculates the SHA256 checksum of a file
 func calculateSHA256(filePath string) (string, error) {
 	file, err := os.Open(filePath)

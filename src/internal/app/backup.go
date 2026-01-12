@@ -2,7 +2,6 @@ package app
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -110,43 +109,11 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 	}
 
 	// Calculate checksums for backup files
-	checksums := make(map[string]string)
-	neo4jDir := filepath.Join(backupDir, "database")
-	prefectPath := filepath.Join(backupDir, "prefect.dump")
-
-	// Calculate checksum for each file in Neo4j backup directory
-	err = filepath.Walk(neo4jDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if !info.IsDir() {
-			rel, _ := filepath.Rel(backupDir, path)
-			if sum, err := calculateSHA256(path); err == nil {
-				checksums[rel] = sum
-			}
-		}
-		return nil
-	})
+	checksums, err := calculateBackupChecksums(backupDir, excludeTaskManager)
 	if err != nil {
-		return fmt.Errorf("failed to calculate Neo4j backup checksums: %w", err)
+		return err
 	}
-
-	// Calculate checksum for Prefect DB dump
-	if !excludeTaskManager {
-		if _, err := os.Stat(prefectPath); err == nil {
-			if sum, err := calculateSHA256(prefectPath); err == nil {
-				checksums["prefect.dump"] = sum
-			} else {
-				return fmt.Errorf("failed to calculate Prefect DB checksum: %w", err)
-			}
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("could not access Prefect DB dump: %w", err)
-		}
-	}
-
-	if len(checksums) > 0 {
-		metadata.Checksums = checksums
-	}
+	metadata.Checksums = checksums
 
 	metadataBytes, err := json.MarshalIndent(metadata, "", "    ")
 	if err != nil {
@@ -253,60 +220,29 @@ func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager boo
 		}
 	}
 
-	// Validate checksums for Neo4j backup files
-	for relPath, expectedSum := range metadata.Checksums {
-		if relPath == "prefect.dump" {
-			continue
-		}
-		filePath := filepath.Join(workDir, "backup", relPath)
-		if _, err := os.Stat(filePath); err != nil {
-			return fmt.Errorf("missing backup file: %s", relPath)
-		}
-		sum, err := calculateSHA256(filePath)
-		if err != nil {
-			return fmt.Errorf("failed to calculate checksum for %s: %w", relPath, err)
-		}
-		if sum != expectedSum {
-			return fmt.Errorf("checksum mismatch for %s: expected %s, got %s", relPath, expectedSum, sum)
-		}
+	// Validate checksums for all backup files
+	if err := validateBackupChecksums(workDir, &metadata, excludeTaskManager); err != nil {
+		return err
 	}
 
-	// Validate checksum for Prefect DB dump when applicable
-	prefectPath := filepath.Join(workDir, "backup", "prefect.dump")
-	prefectExists := false
-	if _, err := os.Stat(prefectPath); err == nil {
-		prefectExists = true
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("failed to access prefect.dump: %w", err)
-	}
-
+	// Determine if we should restore task manager database
 	shouldRestoreTaskManager := taskManagerIncluded && !excludeTaskManager
+	prefectPath := filepath.Join(workDir, "backup", prefectDumpFilename)
+	prefectExists := fileExists(prefectPath)
 	validatePrefect := shouldRestoreTaskManager && prefectExists
 
+	// Validate task manager restore requirements
 	if taskManagerIncluded && !prefectExists && !excludeTaskManager {
-		return fmt.Errorf("backup metadata includes task manager database but prefect.dump is missing")
+		return fmt.Errorf("backup metadata includes task manager database but %s is missing", prefectDumpFilename)
 	}
 
+	// Log task manager restore status
 	if taskManagerIncluded && excludeTaskManager {
 		logrus.Info("Skipping task manager database restore as requested")
 	} else if !taskManagerIncluded {
 		logrus.Info("Backup does not include task manager database; skipping restore")
 	} else if prefectExists {
 		logrus.Info("Task manager database dump detected; will restore")
-	}
-
-	if validatePrefect {
-		expectedSum, ok := metadata.Checksums["prefect.dump"]
-		if !ok {
-			return fmt.Errorf("missing checksum for prefect.dump in metadata")
-		}
-		sum, err := calculateSHA256(prefectPath)
-		if err != nil {
-			return fmt.Errorf("failed to calculate checksum for prefect.dump: %w", err)
-		}
-		if sum != expectedSum {
-			return fmt.Errorf("checksum mismatch for prefect.dump: expected %s, got %s", expectedSum, sum)
-		}
 	}
 
 	// Wipe transient data
