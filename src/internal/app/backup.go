@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -22,15 +23,9 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 		return err
 	}
 
-	edition, editionErr := iops.detectNeo4jEdition()
-	if editionErr != nil {
-		logrus.Warnf("Could not determine Neo4j edition: %v", editionErr)
-	} else {
-		logrus.Infof("Detected Neo4j %s edition", edition)
-	}
-
-	isCommunityEdition := strings.EqualFold(edition, neo4jEditionCommunity)
-	if isCommunityEdition {
+	// Detect Neo4j edition
+	editionInfo := iops.detectNeo4jEditionInfo("backup")
+	if editionInfo.IsCommunity {
 		logrus.Warn("Neo4j Community Edition detected; Infrahub services will be stopped and restarted before the backup begins.")
 		logrus.Warn("Waiting 10 seconds to allow the user to abort... CTRL+C to cancel.")
 		time.Sleep(10 * time.Second)
@@ -47,7 +42,7 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 	}
 
 	var servicesToRestart []string
-	if isCommunityEdition {
+	if editionInfo.IsCommunity {
 		stoppedServices, stopErr := iops.stopAppContainers()
 		if stopErr != nil {
 			if len(stoppedServices) > 0 {
@@ -93,10 +88,10 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 
 	// Create metadata
 	backupID := strings.TrimSuffix(backupFilename, ".tar.gz")
-	metadata := iops.createBackupMetadata(backupID, !excludeTaskManager, version, edition)
+	metadata := iops.createBackupMetadata(backupID, !excludeTaskManager, version, editionInfo.Edition)
 
 	// Backup databases
-	if err := iops.backupDatabase(backupDir, neo4jMetadata, edition); err != nil {
+	if err := iops.backupDatabase(backupDir, neo4jMetadata, editionInfo.Edition); err != nil {
 		return err
 	}
 
@@ -190,30 +185,18 @@ func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager boo
 	logrus.Info("Backup metadata:")
 	fmt.Println(string(metadataBytes))
 
-	neo4jEdition := strings.ToLower(metadata.Neo4jEdition)
-	if detectedEdition, err := iops.detectNeo4jEdition(); err != nil {
-		logrus.Warnf("Could not detect Neo4j edition during restore; defaulting to community workflow: %v", err)
-		neo4jEdition = neo4jEditionCommunity
-	} else {
-		if neo4jEdition == neo4jEditionCommunity && strings.ToLower(detectedEdition) == neo4jEditionEnterprise {
-			// if the backup artifact is a community one, always use the community method to restore
-			neo4jEdition = neo4jEditionCommunity
-		} else if neo4jEdition == neo4jEditionEnterprise && strings.ToLower(detectedEdition) == neo4jEditionCommunity {
-			return fmt.Errorf("cannot restore Enterprise backup on Community edition Neo4j")
-		} else {
-			neo4jEdition = strings.ToLower(detectedEdition)
-		}
-		logrus.Infof("Detected Neo4j %s edition for restore", neo4jEdition)
+	// Detect Neo4j edition for restore
+	detectedEdition, detectionErr := iops.detectNeo4jEdition()
+	editionInfo := NewNeo4jEditionInfo(detectedEdition, detectionErr)
+
+	neo4jEdition, err := editionInfo.ResolveRestoreEdition(metadata.Neo4jEdition)
+	if err != nil {
+		return err
 	}
+	editionInfo.LogDetection("restore")
 
 	// Determine task manager database availability
-	taskManagerIncluded := false
-	for _, component := range metadata.Components {
-		if component == "task-manager-db" {
-			taskManagerIncluded = true
-			break
-		}
-	}
+	taskManagerIncluded := slices.Contains(metadata.Components, "task-manager-db")
 	if !taskManagerIncluded {
 		if _, ok := metadata.Checksums["prefect.dump"]; ok {
 			taskManagerIncluded = true
