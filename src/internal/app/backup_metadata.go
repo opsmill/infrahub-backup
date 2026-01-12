@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
 const metadataVersion = 2025111200
@@ -23,6 +25,67 @@ type BackupMetadata struct {
 	Components      []string          `json:"components"`
 	Checksums       map[string]string `json:"checksums,omitempty"`
 	Neo4jEdition    string            `json:"neo4j_edition,omitempty"`
+}
+
+// Neo4jEditionInfo encapsulates information about the detected Neo4j edition
+type Neo4jEditionInfo struct {
+	Edition     string
+	IsCommunity bool
+	IsDetected  bool
+}
+
+// NewNeo4jEditionInfo creates a new Neo4jEditionInfo from an edition string
+func NewNeo4jEditionInfo(edition string, err error) *Neo4jEditionInfo {
+	if err != nil {
+		return &Neo4jEditionInfo{
+			Edition:     neo4jEditionCommunity, // Default fallback
+			IsCommunity: true,
+			IsDetected:  false,
+		}
+	}
+
+	normalized := strings.ToLower(edition)
+	return &Neo4jEditionInfo{
+		Edition:     normalized,
+		IsCommunity: strings.EqualFold(normalized, neo4jEditionCommunity),
+		IsDetected:  true,
+	}
+}
+
+// LogDetection logs the detection result
+func (info *Neo4jEditionInfo) LogDetection(context string) {
+	if !info.IsDetected {
+		logrus.Warnf("Could not determine Neo4j edition during %s; defaulting to community workflow", context)
+	} else {
+		logrus.Infof("Detected Neo4j %s edition for %s", info.Edition, context)
+	}
+}
+
+// ResolveRestoreEdition determines the correct edition to use for restore
+func (info *Neo4jEditionInfo) ResolveRestoreEdition(backupEdition string) (string, error) {
+	backupNormalized := strings.ToLower(backupEdition)
+
+	// If backup is community and detected is enterprise, always use community method
+	if backupNormalized == neo4jEditionCommunity && info.Edition == neo4jEditionEnterprise {
+		logrus.Info("Backup is Community edition; will use community restore method")
+		return neo4jEditionCommunity, nil
+	}
+
+	// Cannot restore Enterprise backup on Community edition
+	if backupNormalized == neo4jEditionEnterprise && info.Edition == neo4jEditionCommunity {
+		return "", fmt.Errorf("cannot restore Enterprise backup on Community edition Neo4j")
+	}
+
+	// Use detected edition
+	return info.Edition, nil
+}
+
+// detectNeo4jEditionInfo detects the Neo4j edition and returns structured information
+func (iops *InfrahubOps) detectNeo4jEditionInfo(context string) *Neo4jEditionInfo {
+	edition, err := iops.detectNeo4jEdition()
+	info := NewNeo4jEditionInfo(edition, err)
+	info.LogDetection(context)
+	return info
 }
 
 func (iops *InfrahubOps) detectNeo4jEdition() (string, error) {
