@@ -8,37 +8,45 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+const (
+	defaultFlowRunsRetention  = 30
+	defaultStaleRunsRetention = 2
+	defaultBatchSize          = 200
+)
+
+type flushConfig struct {
+	commandType       string
+	scriptName        string
+	scriptPath        string
+	defaultDaysToKeep int
+}
+
+var (
+	flowRunsConfig = flushConfig{
+		commandType:       "flow-runs",
+		scriptName:        "clean_old_tasks.py",
+		scriptPath:        "/tmp/infrahubops_clean_old_tasks.py",
+		defaultDaysToKeep: defaultFlowRunsRetention,
+	}
+	staleRunsConfig = flushConfig{
+		commandType:       "stale-runs",
+		scriptName:        "clean_stale_tasks.py",
+		scriptPath:        "/tmp/infrahubops_clean_stale_tasks.py",
+		defaultDaysToKeep: defaultStaleRunsRetention,
+	}
+)
+
 // FlushFlowRuns removes completed Prefect runs beyond the retention window.
 func (iops *InfrahubOps) FlushFlowRuns(daysToKeep, batchSize int) error {
-	if err := iops.checkPrerequisites(); err != nil {
-		return err
-	}
-	if err := iops.DetectEnvironment(); err != nil {
-		return err
-	}
-
-	if daysToKeep < 0 {
-		daysToKeep = 30
-	}
-	if batchSize <= 0 {
-		batchSize = 200
-	}
-
-	logrus.Infof("Flushing Prefect flow runs older than %d days (batch size %d)...", daysToKeep, batchSize)
-
-	primaryCmd := []string{"infrahub", "tasks", "flush", "flow-runs", "--days-to-keep", strconv.Itoa(daysToKeep), "--batch-size", strconv.Itoa(batchSize)}
-	scriptArgs := []string{"python", "-u", "/tmp/infrahubops_clean_old_tasks.py", strconv.Itoa(daysToKeep), strconv.Itoa(batchSize)}
-	if err := iops.runTaskCommandWithFallback(primaryCmd, "clean_old_tasks.py", "/tmp/infrahubops_clean_old_tasks.py", scriptArgs); err != nil {
-		return err
-	}
-
-	logrus.Info("Flow runs cleanup completed:")
-
-	return nil
+	return iops.flushTaskRuns(flowRunsConfig, daysToKeep, batchSize)
 }
 
 // FlushStaleRuns cancels running Prefect flow runs that exceeded retention.
 func (iops *InfrahubOps) FlushStaleRuns(daysToKeep, batchSize int) error {
+	return iops.flushTaskRuns(staleRunsConfig, daysToKeep, batchSize)
+}
+
+func (iops *InfrahubOps) flushTaskRuns(config flushConfig, daysToKeep, batchSize int) error {
 	if err := iops.checkPrerequisites(); err != nil {
 		return err
 	}
@@ -47,21 +55,22 @@ func (iops *InfrahubOps) FlushStaleRuns(daysToKeep, batchSize int) error {
 	}
 
 	if daysToKeep < 0 {
-		daysToKeep = 2
+		daysToKeep = config.defaultDaysToKeep
 	}
 	if batchSize <= 0 {
-		batchSize = 200
+		batchSize = defaultBatchSize
 	}
 
 	logrus.Infof("Flushing Prefect flow runs older than %d days (batch size %d)...", daysToKeep, batchSize)
 
-	primaryCmd := []string{"infrahub", "tasks", "flush", "stale-runs", "--days-to-keep", strconv.Itoa(daysToKeep), "--batch-size", strconv.Itoa(batchSize)}
-	scriptArgs := []string{"python", "-u", "/tmp/infrahubops_clean_stale_tasks.py", strconv.Itoa(daysToKeep), strconv.Itoa(batchSize)}
-	if err := iops.runTaskCommandWithFallback(primaryCmd, "clean_stale_tasks.py", "/tmp/infrahubops_clean_stale_tasks.py", scriptArgs); err != nil {
+	primaryCmd := []string{"infrahub", "tasks", "flush", config.commandType, "--days-to-keep", strconv.Itoa(daysToKeep), "--batch-size", strconv.Itoa(batchSize)}
+	scriptArgs := []string{"python", "-u", config.scriptPath, strconv.Itoa(daysToKeep), strconv.Itoa(batchSize)}
+
+	if err := iops.runTaskCommandWithFallback(primaryCmd, config.scriptName, config.scriptPath, scriptArgs); err != nil {
 		return err
 	}
 
-	logrus.Info("Stale flow runs cleanup completed:")
+	logrus.Info("Flow runs cleanup completed")
 
 	return nil
 }
