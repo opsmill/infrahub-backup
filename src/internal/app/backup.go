@@ -74,7 +74,11 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 	}
 	defer os.RemoveAll(workDir)
 
-	logrus.Infof("Creating backup: %s", backupFilename)
+	logrus.WithFields(logrus.Fields{
+		"filename":    backupFilename,
+		"backup_dir":  iops.config.BackupDir,
+		"neo4j_edition": editionInfo.Edition,
+	}).Info("Creating backup")
 
 	// Create backup directory structure
 	backupDir := filepath.Join(workDir, "backup")
@@ -128,12 +132,16 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 		return fmt.Errorf("failed to create archive: %w", err)
 	}
 
-	logrus.Infof("Backup created: %s", backupPath)
-
-	// Show backup size
-	if stat, err := os.Stat(backupPath); err == nil {
-		logrus.Infof("Backup size: %s", formatBytes(stat.Size()))
+	// Log backup creation with structured fields
+	fields := logrus.Fields{
+		"path":     backupPath,
+		"filename": backupFilename,
 	}
+	if stat, err := os.Stat(backupPath); err == nil {
+		fields["size_bytes"] = stat.Size()
+		fields["size_human"] = formatBytes(stat.Size())
+	}
+	logrus.WithFields(fields).Info("Backup created successfully")
 
 	return retErr
 }
@@ -158,7 +166,10 @@ func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager boo
 	}
 	defer os.RemoveAll(workDir)
 
-	logrus.Infof("Restoring from backup: %s", backupFile)
+	logrus.WithFields(logrus.Fields{
+		"backup_file": backupFile,
+		"work_dir":    workDir,
+	}).Info("Starting backup restore")
 
 	// Extract backup
 	logrus.Info("Extracting backup archive...")
@@ -182,8 +193,15 @@ func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager boo
 		return fmt.Errorf("failed to parse metadata: %w", err)
 	}
 
-	logrus.Info("Backup metadata:")
-	fmt.Println(string(metadataBytes))
+	// Log backup metadata with structured fields
+	logrus.WithFields(logrus.Fields{
+		"backup_id":        metadata.BackupID,
+		"created_at":       metadata.CreatedAt,
+		"tool_version":     metadata.ToolVersion,
+		"infrahub_version": metadata.InfrahubVersion,
+		"neo4j_edition":    metadata.Neo4jEdition,
+		"components":       metadata.Components,
+	}).Info("Backup metadata loaded")
 
 	// Detect Neo4j edition for restore
 	detectedEdition, detectionErr := iops.detectNeo4jEdition()
