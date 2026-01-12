@@ -148,11 +148,11 @@ func (k *KubernetesBackend) Stop(services ...string) error {
 }
 
 func (k *KubernetesBackend) IsRunning(service string) (bool, error) {
-	pods, err := k.listPods(service)
+	statuses, err := k.getPodStatuses(service)
 	if err != nil {
 		return false, err
 	}
-	for _, status := range pods {
+	for _, status := range statuses {
 		if strings.EqualFold(status, "Running") {
 			return true, nil
 		}
@@ -242,7 +242,7 @@ func (k *KubernetesBackend) findWorkloadResource(service string) (string, string
 	return "", "", fmt.Errorf("no workloads found")
 }
 
-func (k *KubernetesBackend) listPods(service string) ([]string, error) {
+func (k *KubernetesBackend) getPodStatuses(service string) ([]string, error) {
 	selectors := k.podSelectors(service)
 	for _, selector := range selectors {
 		output, err := k.executor.runCommand("kubectl", "get", "pods", "-n", k.namespace, "-l", selector, "-o", "jsonpath={range .items[*]}{.status.phase}{\"\\n\"}{end}")
