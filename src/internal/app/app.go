@@ -9,11 +9,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/sirupsen/logrus"
 )
 
@@ -379,104 +377,6 @@ func (iops *InfrahubOps) GetAllPods(service string) ([]string, error) {
 func (iops *InfrahubOps) checkPrerequisites() error {
 	// Docker and kubectl are now optional. This function always succeeds.
 	return nil
-}
-
-func (iops *InfrahubOps) fetchDatabaseCredentials() error {
-	if _, err := iops.ensureBackend(); err != nil {
-		return err
-	}
-
-	if value := os.Getenv("INFRAHUB_DB_DATABASE"); value != "" {
-		iops.config.Neo4jDatabase = value
-	}
-	if value := os.Getenv("INFRAHUB_DB_USERNAME"); value != "" {
-		iops.config.Neo4jUsername = value
-	}
-	if value := os.Getenv("INFRAHUB_DB_PASSWORD"); value != "" {
-		iops.config.Neo4jPassword = value
-	}
-
-	iops.applyPrefectConnection(os.Getenv("PREFECT_API_DATABASE_CONNECTION_URL"))
-
-	if iops.config.Neo4jDatabase == "" || iops.config.Neo4jUsername == "" || iops.config.Neo4jPassword == "" {
-		envOut, err := iops.Exec("infrahub-server", []string{"env"}, nil)
-		if err != nil {
-			logrus.Warnf("Could not get infrahub-server env, using default Neo4j credentials: %v", err)
-		} else {
-			for _, line := range strings.Split(envOut, "\n") {
-				if after, ok := strings.CutPrefix(line, "INFRAHUB_DB_DATABASE="); ok && iops.config.Neo4jDatabase == "" {
-					iops.config.Neo4jDatabase = after
-				}
-				if after, ok := strings.CutPrefix(line, "INFRAHUB_DB_USERNAME="); ok && iops.config.Neo4jUsername == "" {
-					iops.config.Neo4jUsername = after
-				}
-				if after, ok := strings.CutPrefix(line, "INFRAHUB_DB_PASSWORD="); ok && iops.config.Neo4jPassword == "" {
-					iops.config.Neo4jPassword = after
-				}
-			}
-		}
-
-		if iops.config.Neo4jDatabase == "" {
-			iops.config.Neo4jDatabase = "neo4j"
-		}
-		if iops.config.Neo4jUsername == "" {
-			iops.config.Neo4jUsername = "neo4j"
-		}
-		if iops.config.Neo4jPassword == "" {
-			iops.config.Neo4jPassword = "admin"
-		}
-	}
-
-	if iops.config.PostgresDatabase == "" || iops.config.PostgresUsername == "" || iops.config.PostgresPassword == "" {
-		envOut, err := iops.Exec("task-manager", []string{"env"}, nil)
-		if err != nil {
-			logrus.Warnf("Could not get task-manager env, using default Postgres credentials: %v", err)
-		} else {
-			for _, line := range strings.Split(envOut, "\n") {
-				if after, ok := strings.CutPrefix(line, "PREFECT_API_DATABASE_CONNECTION_URL="); ok {
-					iops.applyPrefectConnection(after)
-					break
-				}
-			}
-		}
-
-		if iops.config.PostgresDatabase == "" {
-			iops.config.PostgresDatabase = "prefect"
-		}
-		if iops.config.PostgresUsername == "" {
-			iops.config.PostgresUsername = "postgres"
-		}
-		if iops.config.PostgresPassword == "" {
-			iops.config.PostgresPassword = "prefect"
-		}
-	}
-
-	return nil
-}
-
-func (iops *InfrahubOps) applyPrefectConnection(connStr string) {
-	if connStr == "" {
-		return
-	}
-
-	re := regexp.MustCompile("postgres(.*)://(.*)")
-	normalized := re.ReplaceAllString(connStr, "postgres://$2")
-
-	connConfig, err := pgx.ParseConfig(normalized)
-	if err != nil {
-		logrus.Warnf("Could not parse PREFECT_API_DATABASE_CONNECTION_URL: %v", err)
-		return
-	}
-
-	if connConfig.Database != "" {
-		iops.config.PostgresDatabase = connConfig.Database
-	}
-	if connConfig.User != "" {
-		iops.config.PostgresUsername = connConfig.User
-	}
-	if connConfig.Password != "" {
-		iops.config.PostgresPassword = connConfig.Password
-	}
 }
 
 // Environment detection
