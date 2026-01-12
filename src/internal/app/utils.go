@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 )
 
 // Version can be set via SetVersion from main packages using ldflags
@@ -135,6 +136,12 @@ func extractTarball(filename, destDir string) error {
 
 	tr := tar.NewReader(gr)
 
+	// Ensure destination directory is absolute for security checks
+	destDir, err = filepath.Abs(destDir)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute path for destination: %w", err)
+	}
+
 	for {
 		header, err := tr.Next()
 		if err == io.EOF {
@@ -144,7 +151,12 @@ func extractTarball(filename, destDir string) error {
 			return err
 		}
 
+		// Prevent Zip Slip vulnerability: validate that the target path is within destDir
 		target := filepath.Join(destDir, header.Name)
+		target = filepath.Clean(target)
+		if !isPathWithinDirectory(target, destDir) {
+			return fmt.Errorf("illegal file path in archive: %s (attempts to escape destination directory)", header.Name)
+		}
 
 		switch header.Typeflag {
 		case tar.TypeDir:
@@ -170,6 +182,16 @@ func extractTarball(filename, destDir string) error {
 	}
 
 	return nil
+}
+
+// isPathWithinDirectory checks if path is within dir (prevents directory traversal attacks)
+func isPathWithinDirectory(path, dir string) bool {
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return false
+	}
+	// If relative path starts with "..", it's trying to escape the directory
+	return !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".."
 }
 
 func BuildRevision() string {
