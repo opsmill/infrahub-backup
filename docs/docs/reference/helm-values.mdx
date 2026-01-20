@@ -1,0 +1,319 @@
+---
+title: Helm chart values reference
+---
+
+This reference documents all available configuration values for the `infrahub-backup` Helm chart. The chart can be used as a subchart within the main Infrahub Helm chart (recommended) or installed standalone.
+
+## Chart information
+
+| Property | Value |
+|----------|-------|
+| Chart name | `infrahub-backup` |
+| Repository | `opsmill/infrahub-helm` |
+| Source | [GitHub](https://github.com/opsmill/infrahub-helm) |
+
+## Global settings
+
+### When used as subchart (Recommended)
+
+When enabled as a subchart in the Infrahub Helm chart, prefix all values with `infrahub-backup`:
+
+```yaml
+infrahub-backup:
+  enabled: true
+  # ... other values
+```
+
+### When used standalone
+
+When installed as a standalone chart, use values directly without prefix:
+
+```yaml
+backup:
+  enabled: true
+  # ... other values
+```
+
+## ServiceAccount and RBAC
+
+The chart creates a ServiceAccount with the required permissions to perform backup and restore operations.
+
+| Value | Type | Default | Description |
+|-------|------|---------|-------------|
+| `serviceAccount.create` | `bool` | `true` | Create a new ServiceAccount |
+| `serviceAccount.name` | `string` | `""` | ServiceAccount name (auto-generated if empty) |
+| `serviceAccount.annotations` | `object` | `{}` | Annotations to add to the ServiceAccount |
+| `rbac.create` | `bool` | `true` | Create Role and RoleBinding |
+
+### RBAC permissions
+
+The created Role includes these permissions:
+
+```yaml
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "get"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "patch"]
+```
+
+### Cloud provider integration examples
+
+**AWS IRSA (IAM Roles for Service Accounts):**
+
+```yaml
+serviceAccount:
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/infrahub-backup"
+```
+
+**GCP Workload Identity:**
+
+```yaml
+serviceAccount:
+  annotations:
+    iam.gke.io/gcp-service-account: "infrahub-backup@project.iam.gserviceaccount.com"
+```
+
+**Using existing ServiceAccount:**
+
+```yaml
+serviceAccount:
+  create: false
+  name: "my-existing-serviceaccount"
+rbac:
+  create: false
+```
+
+## Backup configuration
+
+| Value | Type | Default | Description |
+|-------|------|---------|-------------|
+| `backup.enabled` | `bool` | `false` | Enable backup Job or CronJob |
+| `backup.mode` | `string` | `"job"` | Backup mode: `job` (one-shot) or `cronjob` (scheduled) |
+| `backup.schedule` | `string` | `"0 2 * * *"` | Cron schedule (only for `cronjob` mode) |
+
+### Backup storage
+
+| Value | Type | Default | Description |
+|-------|------|---------|-------------|
+| `backup.storage.type` | `string` | `"local"` | Storage type: `s3` or `local` |
+
+#### S3 storage
+
+| Value | Type | Default | Description |
+|-------|------|---------|-------------|
+| `backup.storage.s3.bucket` | `string` | `""` | S3 bucket name |
+| `backup.storage.s3.endpoint` | `string` | `""` | S3 endpoint URL |
+| `backup.storage.s3.region` | `string` | `""` | S3 region |
+| `backup.storage.s3.secretName` | `string` | `""` | Kubernetes Secret containing S3 credentials |
+
+The referenced Secret must contain:
+- `AWS_ACCESS_KEY_ID`
+- `AWS_SECRET_ACCESS_KEY`
+
+#### Local storage
+
+| Value | Type | Default | Description |
+|-------|------|---------|-------------|
+| `backup.storage.local.path` | `string` | `"/backups"` | Path inside the pod for backup storage |
+
+### Backup options
+
+| Value | Type | Default | Description |
+|-------|------|---------|-------------|
+| `backup.options.force` | `bool` | `false` | Proceed with backup even if tasks are running |
+| `backup.options.excludeTaskmanager` | `bool` | `false` | Skip PostgreSQL (task manager) backup |
+| `backup.options.neo4jMetadata` | `string` | `"all"` | Neo4j metadata to include: `all`, `none`, `users`, `roles` |
+
+## Restore configuration
+
+| Value | Type | Default | Description |
+|-------|------|---------|-------------|
+| `restore.enabled` | `bool` | `false` | Enable restore Job |
+
+### Restore S3 source
+
+| Value | Type | Default | Description |
+|-------|------|---------|-------------|
+| `restore.s3.bucket` | `string` | `""` | S3 bucket containing the backup |
+| `restore.s3.key` | `string` | `""` | Backup filename in the bucket |
+| `restore.s3.endpoint` | `string` | `""` | S3 endpoint URL |
+| `restore.s3.region` | `string` | `""` | S3 region |
+| `restore.s3.secretName` | `string` | `""` | Kubernetes Secret containing S3 credentials |
+
+## Pod configuration
+
+| Value | Type | Default | Description |
+|-------|------|---------|-------------|
+| `image.repository` | `string` | `"opsmill/infrahub-backup"` | Container image repository |
+| `image.tag` | `string` | `""` | Image tag (defaults to chart `appVersion`) |
+| `image.pullPolicy` | `string` | `"IfNotPresent"` | Image pull policy |
+| `resources.requests.cpu` | `string` | `"100m"` | CPU request |
+| `resources.requests.memory` | `string` | `"256Mi"` | Memory request |
+| `resources.limits.cpu` | `string` | `"500m"` | CPU limit |
+| `resources.limits.memory` | `string` | `"512Mi"` | Memory limit |
+| `nodeSelector` | `object` | `{}` | Node selector for pod scheduling |
+| `tolerations` | `list` | `[]` | `tolerations` for pod scheduling |
+| `affinity` | `object` | `{}` | Affinity rules for pod scheduling |
+
+## Examples
+
+### Minimal scheduled backup to S3
+
+```yaml
+infrahub-backup:
+  enabled: true
+
+  backup:
+    enabled: true
+    mode: "cronjob"
+    schedule: "0 2 * * *"
+    storage:
+      type: "s3"
+      s3:
+        bucket: "my-backups"
+        endpoint: "https://s3.amazonaws.com"
+        region: "us-east-1"
+        secretName: "backup-s3-credentials"
+```
+
+### One-shot backup with custom options
+
+```yaml
+infrahub-backup:
+  enabled: true
+
+  backup:
+    enabled: true
+    mode: "job"
+    storage:
+      type: "s3"
+      s3:
+        bucket: "my-backups"
+        endpoint: "https://s3.amazonaws.com"
+        region: "us-east-1"
+        secretName: "backup-s3-credentials"
+    options:
+      force: true
+      neo4jMetadata: "users"
+```
+
+### Restore from S3
+
+```yaml
+infrahub-backup:
+  enabled: true
+
+  backup:
+    enabled: false
+
+  restore:
+    enabled: true
+    s3:
+      bucket: "my-backups"
+      key: "infrahub_backup_20250120_020000.tar.gz"
+      endpoint: "https://s3.amazonaws.com"
+      region: "us-east-1"
+      secretName: "backup-s3-credentials"
+```
+
+### Custom ServiceAccount with AWS IRSA
+
+```yaml
+infrahub-backup:
+  enabled: true
+
+  serviceAccount:
+    create: true
+    annotations:
+      eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/infrahub-backup"
+
+  backup:
+    enabled: true
+    mode: "cronjob"
+    schedule: "0 2 * * *"
+    storage:
+      type: "s3"
+      s3:
+        bucket: "my-backups"
+        endpoint: "https://s3.amazonaws.com"
+        region: "us-east-1"
+        # No secretName needed - using IRSA
+```
+
+### Local storage for testing
+
+```yaml
+infrahub-backup:
+  enabled: true
+
+  backup:
+    enabled: true
+    mode: "job"
+    storage:
+      type: "local"
+      local:
+        path: "/backups"
+```
+
+### Full production configuration
+
+```yaml
+infrahub-backup:
+  enabled: true
+
+  serviceAccount:
+    create: true
+    annotations:
+      eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/infrahub-backup"
+
+  backup:
+    enabled: true
+    mode: "cronjob"
+    schedule: "0 2 * * *"
+    storage:
+      type: "s3"
+      s3:
+        bucket: "infrahub-production-backups"
+        endpoint: "https://s3.us-west-2.amazonaws.com"
+        region: "us-west-2"
+    options:
+      force: false
+      excludeTaskmanager: false
+      neo4jMetadata: "all"
+
+  restore:
+    enabled: false
+
+  resources:
+    requests:
+      cpu: "200m"
+      memory: "512Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
+
+  nodeSelector:
+    node-type: worker
+
+  tolerations:
+    - key: "workload"
+      operator: "Equal"
+      value: "backup"
+      effect: "NoSchedule"
+```
+
+## Related resources
+
+- [How to backup Infrahub on Kubernetes](../guides/kubernetes-backup.mdx)
+- [How to restore Infrahub on Kubernetes](../guides/kubernetes-restore.mdx)
+- [Configuration reference](./configuration.mdx)
