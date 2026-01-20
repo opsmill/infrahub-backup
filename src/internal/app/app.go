@@ -32,6 +32,7 @@ type Configuration struct {
 	PostgresUsername     string
 	PostgresPassword     string
 	PostgresDatabase     string
+	S3                   *S3Config
 }
 
 // InfrahubOps is the main application struct
@@ -50,6 +51,9 @@ func NewInfrahubOps() *InfrahubOps {
 	config := &Configuration{
 		BackupDir:    getEnvOrDefault("BACKUP_DIR", filepath.Join(getCurrentDir(), "infrahub_backups")),
 		K8sNamespace: os.Getenv("INFRAHUB_K8S_NAMESPACE"),
+		S3: &S3Config{
+			Region: "us-east-1",
+		},
 	}
 	return &InfrahubOps{
 		config:   config,
