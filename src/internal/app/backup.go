@@ -14,7 +14,7 @@ import (
 )
 
 // CreateBackup creates a full backup of the Infrahub deployment
-func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeTaskManager bool) (retErr error) {
+func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeTaskManager bool, s3Upload bool, s3KeepLocal bool) (retErr error) {
 	if err := iops.checkPrerequisites(); err != nil {
 		return err
 	}
@@ -75,8 +75,8 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 	defer os.RemoveAll(workDir)
 
 	logrus.WithFields(logrus.Fields{
-		"filename":    backupFilename,
-		"backup_dir":  iops.config.BackupDir,
+		"filename":      backupFilename,
+		"backup_dir":    iops.config.BackupDir,
 		"neo4j_edition": editionInfo.Edition,
 	}).Info("Creating backup")
 
@@ -143,13 +143,42 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 	}
 	logrus.WithFields(fields).Info("Backup created successfully")
 
+	// Upload to S3 if requested
+	if s3Upload {
+		s3URI, err := iops.uploadBackupToS3(backupPath)
+		if err != nil {
+			return fmt.Errorf("backup created locally but S3 upload failed: %w", err)
+		}
+		logrus.Infof("Backup uploaded to: %s", s3URI)
+
+		if !s3KeepLocal {
+			if err := os.Remove(backupPath); err != nil {
+				logrus.Warnf("Failed to delete local backup file: %v", err)
+			} else {
+				logrus.Infof("Local backup file deleted: %s", backupPath)
+			}
+		}
+	}
+
 	return retErr
 }
 
 // RestoreBackup restores an Infrahub deployment from a backup archive
 func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager bool, restoreMigrateFormat bool) error {
-	if _, err := os.Stat(backupFile); os.IsNotExist(err) {
-		return fmt.Errorf("backup file not found: %s", backupFile)
+	actualBackupFile := backupFile
+
+	// Check if backup file is an S3 URI
+	if IsS3URI(backupFile) {
+		downloadedPath, err := iops.downloadBackupFromS3(backupFile)
+		if err != nil {
+			return err
+		}
+		actualBackupFile = downloadedPath
+		defer os.Remove(actualBackupFile) // Clean up downloaded file after restore
+	}
+
+	if _, err := os.Stat(actualBackupFile); os.IsNotExist(err) {
+		return fmt.Errorf("backup file not found: %s", actualBackupFile)
 	}
 
 	if err := iops.checkPrerequisites(); err != nil {
@@ -173,7 +202,7 @@ func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager boo
 
 	// Extract backup
 	logrus.Info("Extracting backup archive...")
-	if err := extractTarball(backupFile, workDir); err != nil {
+	if err := extractTarball(actualBackupFile, workDir); err != nil {
 		return fmt.Errorf("failed to extract backup: %w", err)
 	}
 
