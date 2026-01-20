@@ -18,6 +18,12 @@ func ConfigureRootCommand(cmd *cobra.Command, app *InfrahubOps) {
 	cmd.PersistentFlags().StringVar(&cfg.K8sNamespace, "k8s-namespace", cfg.K8sNamespace, "Target Kubernetes namespace")
 	cmd.PersistentFlags().String("log-format", "text", "Log output format: text or json (can also set INFRAHUB_LOG_FORMAT)")
 
+	// S3 configuration flags
+	cmd.PersistentFlags().StringVar(&cfg.S3.Bucket, "s3-bucket", cfg.S3.Bucket, "S3 bucket name for backup storage")
+	cmd.PersistentFlags().StringVar(&cfg.S3.Prefix, "s3-prefix", cfg.S3.Prefix, "S3 key prefix (path within bucket)")
+	cmd.PersistentFlags().StringVar(&cfg.S3.Endpoint, "s3-endpoint", cfg.S3.Endpoint, "Custom S3 endpoint URL (for MinIO or S3-compatible storage)")
+	cmd.PersistentFlags().StringVar(&cfg.S3.Region, "s3-region", cfg.S3.Region, "AWS region for S3 bucket")
+
 	bind := func(name string) {
 		if err := viper.BindPFlag(name, cmd.PersistentFlags().Lookup(name)); err != nil {
 			panic(err)
@@ -28,6 +34,10 @@ func ConfigureRootCommand(cmd *cobra.Command, app *InfrahubOps) {
 	bind("backup-dir")
 	bind("k8s-namespace")
 	bind("log-format")
+	bind("s3-bucket")
+	bind("s3-prefix")
+	bind("s3-endpoint")
+	bind("s3-region")
 
 	cobra.OnInitialize(func() {
 		viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
@@ -42,6 +52,18 @@ func ConfigureRootCommand(cmd *cobra.Command, app *InfrahubOps) {
 		}
 		if viper.IsSet("k8s-namespace") {
 			cfg.K8sNamespace = viper.GetString("k8s-namespace")
+		}
+		if viper.IsSet("s3-bucket") {
+			cfg.S3.Bucket = viper.GetString("s3-bucket")
+		}
+		if viper.IsSet("s3-prefix") {
+			cfg.S3.Prefix = viper.GetString("s3-prefix")
+		}
+		if viper.IsSet("s3-endpoint") {
+			cfg.S3.Endpoint = viper.GetString("s3-endpoint")
+		}
+		if viper.IsSet("s3-region") {
+			cfg.S3.Region = viper.GetString("s3-region")
 		}
 
 		switch viper.GetString("log-format") {

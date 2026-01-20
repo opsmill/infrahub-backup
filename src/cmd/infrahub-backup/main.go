@@ -32,18 +32,22 @@ func main() {
 	var excludeTaskManagerDB bool
 	var restoreExcludeTaskManagerDB bool
 	var restoreMigrateFormat bool
+	var s3Upload bool
+	var s3KeepLocal bool
 
 	createCmd := &cobra.Command{
 		Use:          "create",
 		Short:        "Create a backup of the current Infrahub instance",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return iops.CreateBackup(force, neo4jMetadata, excludeTaskManagerDB)
+			return iops.CreateBackup(force, neo4jMetadata, excludeTaskManagerDB, s3Upload, s3KeepLocal)
 		},
 	}
 	createCmd.Flags().BoolVar(&force, "force", false, "Force backup creation even if there are running tasks")
 	createCmd.Flags().StringVar(&neo4jMetadata, "neo4jmetadata", "all", "Whether to backup neo4j metadata or not (all, none, users, roles)")
 	createCmd.Flags().BoolVar(&excludeTaskManagerDB, "exclude-taskmanager", false, "Exclude task manager database from the backup")
+	createCmd.Flags().BoolVar(&s3Upload, "s3-upload", false, "Upload backup to S3 after creation")
+	createCmd.Flags().BoolVar(&s3KeepLocal, "s3-keep-local", false, "Keep local backup file after successful S3 upload (default: delete local file)")
 
 	restoreCmd := &cobra.Command{
 		Use:          "restore <backup-file>",
