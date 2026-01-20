@@ -61,6 +61,7 @@ debounce
 Debounce
 debounced
 Debouncing
+declaratively
 default_branch
 default_filter
 deserialized
@@ -277,6 +278,7 @@ ssl
 startup-config
 streamlit
 Streamlit
+subchart
 subcommand
 subnet
 subnets
