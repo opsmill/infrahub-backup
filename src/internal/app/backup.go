@@ -852,6 +852,37 @@ func (iops *InfrahubOps) getWritableTempDir(service string) string {
 	return "/tmp"
 }
 
+// getNeo4jExecOptions returns ExecOptions with User set to "neo4j" only if not already running as neo4j
+func (iops *InfrahubOps) getNeo4jExecOptions() *ExecOptions {
+	output, err := iops.Exec("database", []string{"whoami"}, nil)
+	if err == nil && strings.TrimSpace(output) == "neo4j" {
+		return nil
+	}
+	return &ExecOptions{User: "neo4j"}
+}
+
+// isNeo4jCluster checks if Neo4j is running in cluster mode by counting servers
+func (iops *InfrahubOps) isNeo4jCluster() bool {
+	output, err := iops.Exec("database", []string{
+		"cypher-shell",
+		"-u", iops.config.Neo4jUsername,
+		"-p" + iops.config.Neo4jPassword,
+		"-d", "system",
+		"--format", "plain",
+		"SHOW SERVERS YIELD * RETURN count(*) as serverCount",
+	}, nil)
+	if err != nil {
+		return false // Assume not clustered if query fails
+	}
+	// Parse server count - if > 1, it's a cluster
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	if len(lines) >= 2 {
+		count, _ := strconv.Atoi(strings.TrimSpace(lines[len(lines)-1]))
+		return count > 1
+	}
+	return false
+}
+
 func (iops *InfrahubOps) backupTaskManagerDB(backupDir string) error {
 	logrus.Info("Backing up PostgreSQL database...")
 
@@ -908,7 +939,12 @@ func (iops *InfrahubOps) restorePostgreSQL(workDir string) error {
 
 	// Start task-manager-db
 	if err := iops.StartServices("task-manager-db"); err != nil {
-		return fmt.Errorf("failed to start task-manager-db: %w", err)
+		backend, backendErr := iops.ensureBackend()
+		if backendErr == nil && backend.Name() == "kubernetes" {
+			logrus.Infof("Skipping task-manager-db start on Kubernetes (may be externally managed): %v", err)
+		} else {
+			return fmt.Errorf("failed to start task-manager-db: %w", err)
+		}
 	}
 
 	// Determine writable temp directory
@@ -927,13 +963,25 @@ func (iops *InfrahubOps) restorePostgreSQL(workDir string) error {
 	}()
 
 	// Restore database
-	opts := &ExecOptions{Env: map[string]string{
-		"PGPASSWORD": iops.config.PostgresPassword,
-	}}
+	// Check if we can use Unix socket (container user matches postgres username)
+	var restoreCmd []string
+	var opts *ExecOptions
+	containerUser, err := iops.Exec("task-manager-db", []string{"whoami"}, nil)
+	useUnixSocket := err == nil && !strings.Contains(strings.TrimSpace(containerUser), "cannot find name")
+	if useUnixSocket {
+		// Use Unix socket connection (no host, user, or password)
+		opts = nil
+		restoreCmd = []string{"pg_restore", "-d", "postgres", "--clean", "--create", dumpFile}
+	} else {
+		// Use TCP connection with credentials
+		opts = &ExecOptions{Env: map[string]string{
+			"PGPASSWORD": iops.config.PostgresPassword,
+		}}
+		restoreCmd = []string{"pg_restore", "-h", "localhost", "-d", "postgres", "-U", iops.config.PostgresUsername, "--clean", "--create", dumpFile}
+	}
 	if output, err := iops.Exec(
 		"task-manager-db",
-		// "-x", "--no-owner" for role does not exist
-		[]string{"pg_restore", "-h", "localhost", "-d", "postgres", "-U", iops.config.PostgresUsername, "--clean", "--create", dumpFile},
+		restoreCmd,
 		opts,
 	); err != nil {
 		return fmt.Errorf("failed to restore postgresql: %w\nOutput: %v", err, output)
@@ -944,6 +992,7 @@ func (iops *InfrahubOps) restorePostgreSQL(workDir string) error {
 
 func (iops *InfrahubOps) restoreNeo4j(workDir, neo4jEdition string, restoreMigrateFormat bool) error {
 	backupPath := filepath.Join(workDir, "backup", "database")
+
 	if err := iops.CopyTo("database", backupPath, "/tmp/infrahubops"); err != nil {
 		return fmt.Errorf("failed to copy backup to container: %w", err)
 	}
@@ -969,7 +1018,12 @@ func (iops *InfrahubOps) restoreNeo4j(workDir, neo4jEdition string, restoreMigra
 func (iops *InfrahubOps) restoreNeo4jEnterprise(restoreMigrateFormat bool) error {
 	logrus.Info("Restoring Neo4j database (Enterprise Edition)...")
 
-	opts := &ExecOptions{User: "neo4j"}
+	opts := iops.getNeo4jExecOptions()
+
+	// Check if Neo4j is running in cluster mode
+	if iops.isNeo4jCluster() {
+		return iops.restoreNeo4jCluster(opts)
+	}
 
 	if _, err := iops.Exec(
 		"database",
@@ -1013,6 +1067,163 @@ func (iops *InfrahubOps) restoreNeo4jEnterprise(restoreMigrateFormat bool) error
 		return fmt.Errorf("failed to start neo4j database: %w", err)
 	}
 
+	return nil
+}
+
+func (iops *InfrahubOps) restoreNeo4jCluster(opts *ExecOptions) error {
+	logrus.Info("Using Neo4j cluster restore flow (designated seeder method)...")
+
+	// 1. Stop and drop database
+	logrus.Info("Stopping database...")
+	if _, err := iops.Exec("database", []string{
+		"cypher-shell", "-u", iops.config.Neo4jUsername, "-p" + iops.config.Neo4jPassword,
+		"-d", "system",
+		"STOP DATABASE " + iops.config.Neo4jDatabase,
+	}, nil); err != nil {
+		logrus.Warnf("Failed to stop database (may not exist): %v", err)
+	}
+
+	logrus.Info("Dropping database...")
+	if _, err := iops.Exec("database", []string{
+		"cypher-shell", "-u", iops.config.Neo4jUsername, "-p" + iops.config.Neo4jPassword,
+		"-d", "system",
+		"DROP DATABASE " + iops.config.Neo4jDatabase + " IF EXISTS",
+	}, nil); err != nil {
+		return fmt.Errorf("failed to drop database: %w", err)
+	}
+
+	// 2. Restore backup using neo4j-admin (on current node only)
+	logrus.Info("Restoring backup with neo4j-admin...")
+	if output, err := iops.Exec("database", []string{
+		"neo4j-admin", "database", "restore",
+		"--expand-commands", "--overwrite-destination=true",
+		"--from-path=/tmp/infrahubops",
+		iops.config.Neo4jDatabase,
+	}, opts); err != nil {
+		return fmt.Errorf("failed to restore neo4j: %w\nOutput: %v", err, output)
+	}
+
+	// 3. Get current node's serverId using dbms.cluster.statusCheck()
+	logrus.Info("Getting current server ID...")
+	serverIdOutput, err := iops.Exec("database", []string{
+		"cypher-shell", "-u", iops.config.Neo4jUsername, "-p" + iops.config.Neo4jPassword,
+		"-d", "system",
+		"--format", "plain",
+		"CALL dbms.cluster.statusCheck([]) YIELD requester, serverId RETURN requester, serverId",
+	}, nil)
+	if err != nil {
+		return fmt.Errorf("failed to get server ID: %w", err)
+	}
+	// Parse output to find the row where requester = true
+	// Output format: "requester, serverId\ntrue, \"abc-123\"\nfalse, \"def-456\"\n"
+	var serverId string
+	lines := strings.Split(strings.TrimSpace(serverIdOutput), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		// Skip header line
+		if strings.HasPrefix(line, "requester") {
+			continue
+		}
+		// Check if this row has requester = true
+		if strings.HasPrefix(line, "true") || strings.HasPrefix(line, "TRUE") {
+			// Extract serverId from "true, \"abc-123\"" or "true, abc-123"
+			parts := strings.SplitN(line, ",", 2)
+			if len(parts) == 2 {
+				serverId = strings.TrimSpace(parts[1])
+				serverId = strings.Trim(serverId, "\"")
+				break
+			}
+		}
+	}
+	if serverId == "" {
+		return fmt.Errorf("failed to find current server ID (no requester=true found in output)")
+	}
+	logrus.Infof("Current server ID: %s", serverId)
+
+	// 4. Create database with designated seeder
+	logrus.Info("Creating database with designated seeder...")
+	createCmd := fmt.Sprintf(`CREATE DATABASE %s
+TOPOLOGY 3 PRIMARIES
+OPTIONS {
+  existingData: 'use',
+  existingDataSeedInstance: '%s'
+}`, iops.config.Neo4jDatabase, serverId)
+
+	if _, err := iops.Exec("database", []string{
+		"cypher-shell", "-u", iops.config.Neo4jUsername, "-p" + iops.config.Neo4jPassword,
+		"-d", "system",
+		createCmd,
+	}, nil); err != nil {
+		return fmt.Errorf("failed to create database with seeder: %w", err)
+	}
+
+	// 5. Wait for database to come online
+	logrus.Info("Waiting for database to come online...")
+	for i := 0; i < 100; i++ {
+		output, err := iops.Exec("database", []string{
+			"cypher-shell", "-u", iops.config.Neo4jUsername, "-p" + iops.config.Neo4jPassword,
+			"-d", "system", "--format", "plain",
+			"SHOW DATABASE " + iops.config.Neo4jDatabase + " YIELD currentStatus RETURN currentStatus",
+		}, nil)
+		if err == nil && strings.Contains(strings.ToLower(output), "online") {
+			logrus.Info("Database is online")
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+
+	logrus.Info("Neo4j cluster restore completed successfully")
+	return nil
+}
+
+func (iops *InfrahubOps) restoreNeo4jCommunity(restoreMigrateFormat bool) (retErr error) {
+	logrus.Info("Restoring Neo4j database (Community Edition dump)...")
+
+	pidStr, err := iops.readNeo4jPID()
+	if err != nil {
+		return err
+	}
+
+	err = iops.stopNeo4jCommunity(pidStr)
+	if err != nil {
+		return err
+	}
+
+	defer func() {
+		if _, err := iops.Exec("database", []string{"rm", "-rf", "/tmp/infrahubops"}, nil); err != nil {
+			logrus.Warnf("Failed to cleanup temporary Neo4j backup data: %v", err)
+		}
+		if _, err := iops.Exec("database", []string{"rm", "-f", neo4jRemoteWatchdogBinary, neo4jRemoteWatchdogReady, neo4jRemoteWatchdogLog}, nil); err != nil {
+			logrus.Debugf("Failed to remove watchdog artifacts: %v", err)
+		}
+		if _, err := iops.Exec("database", []string{"kill", "-CONT", pidStr}, nil); err != nil {
+			logrus.Errorf("Failed to send SIGCONT to neo4j (pid %s): %v", pidStr, err)
+			if retErr == nil {
+				retErr = fmt.Errorf("failed to resume neo4j process: %w", err)
+			}
+		}
+	}()
+
+	opts := iops.getNeo4jExecOptions()
+	if output, err := iops.Exec(
+		"database",
+		[]string{"neo4j-admin", "database", "load", "--overwrite-destination=true", "--from-path=/tmp/infrahubops", iops.config.Neo4jDatabase},
+		opts,
+	); err != nil {
+		return fmt.Errorf("failed to load neo4j dump: %w\nOutput: %v", err, output)
+	}
+
+	if restoreMigrateFormat {
+		if output, err := iops.Exec(
+			"database",
+			[]string{"neo4j-admin", "database", "migrate", "--to-format=block", iops.config.Neo4jDatabase},
+			opts,
+		); err != nil {
+			return fmt.Errorf("failed to migrate neo4j to block format: %w\nOutput: %v", err, output)
+		}
+	}
+
+	logrus.Info("Neo4j dump restored successfully")
 	return nil
 }
 
@@ -1211,56 +1422,5 @@ func copyDir(src, dst string) error {
 		}
 	}
 
-	return nil
-}
-
-func (iops *InfrahubOps) restoreNeo4jCommunity(restoreMigrateFormat bool) (retErr error) {
-	logrus.Info("Restoring Neo4j database (Community Edition dump)...")
-
-	pidStr, err := iops.readNeo4jPID()
-	if err != nil {
-		return err
-	}
-
-	err = iops.stopNeo4jCommunity(pidStr)
-	if err != nil {
-		return err
-	}
-
-	defer func() {
-		if _, err := iops.Exec("database", []string{"rm", "-rf", "/tmp/infrahubops"}, nil); err != nil {
-			logrus.Warnf("Failed to cleanup temporary Neo4j backup data: %v", err)
-		}
-		if _, err := iops.Exec("database", []string{"rm", "-f", neo4jRemoteWatchdogBinary, neo4jRemoteWatchdogReady, neo4jRemoteWatchdogLog}, nil); err != nil {
-			logrus.Debugf("Failed to remove watchdog artifacts: %v", err)
-		}
-		if _, err := iops.Exec("database", []string{"kill", "-CONT", pidStr}, nil); err != nil {
-			logrus.Errorf("Failed to send SIGCONT to neo4j (pid %s): %v", pidStr, err)
-			if retErr == nil {
-				retErr = fmt.Errorf("failed to resume neo4j process: %w", err)
-			}
-		}
-	}()
-
-	opts := &ExecOptions{User: "neo4j"}
-	if output, err := iops.Exec(
-		"database",
-		[]string{"neo4j-admin", "database", "load", "--overwrite-destination=true", "--from-path=/tmp/infrahubops", iops.config.Neo4jDatabase},
-		opts,
-	); err != nil {
-		return fmt.Errorf("failed to load neo4j dump: %w\nOutput: %v", err, output)
-	}
-
-	if restoreMigrateFormat {
-		if output, err := iops.Exec(
-			"database",
-			[]string{"neo4j-admin", "database", "migrate", "--to-format=block", iops.config.Neo4jDatabase},
-			opts,
-		); err != nil {
-			return fmt.Errorf("failed to migrate neo4j to block format: %w\nOutput: %v", err, output)
-		}
-	}
-
-	logrus.Info("Neo4j dump restored successfully")
 	return nil
 }

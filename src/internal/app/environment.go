@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
+
+	"github.com/sirupsen/logrus"
 )
 
 var ErrEnvironmentNotFound = errors.New("environment not found")
@@ -182,14 +185,20 @@ func (d *DockerBackend) IsRunning(service string) (bool, error) {
 }
 
 type KubernetesBackend struct {
-	config    *Configuration
-	executor  *CommandExecutor
-	namespace string
-	podCache  map[string]string
+	config       *Configuration
+	executor     *CommandExecutor
+	namespace    string
+	podCache     map[string]string
+	replicaCache map[string]int // stores original replica counts before stopping
 }
 
 func NewKubernetesBackend(config *Configuration, executor *CommandExecutor) *KubernetesBackend {
-	return &KubernetesBackend{config: config, executor: executor, podCache: map[string]string{}}
+	return &KubernetesBackend{
+		config:       config,
+		executor:     executor,
+		podCache:     map[string]string{},
+		replicaCache: map[string]int{},
+	}
 }
 
 func (k *KubernetesBackend) Name() string {
@@ -277,10 +286,38 @@ func (k *KubernetesBackend) CopyFrom(service, src, dest string) error {
 }
 
 func (k *KubernetesBackend) Start(services ...string) error {
-	return k.scaleServices(services, 1)
+	for _, service := range services {
+		kind, resource, err := k.findWorkloadResource(service)
+		if err != nil {
+			return fmt.Errorf("failed to resolve workload for %s: %w", service, err)
+		}
+		cacheKey := fmt.Sprintf("%s/%s", kind, resource)
+		replicas := 1 // default
+		if savedCount, ok := k.replicaCache[cacheKey]; ok && savedCount > 0 {
+			replicas = savedCount
+			logrus.Debugf("Restoring replica count for %s: %d", cacheKey, replicas)
+		}
+		if err := k.scaleResource(kind, resource, replicas); err != nil {
+			return fmt.Errorf("failed to scale %s (%s/%s) to %d replicas: %w", service, kind, resource, replicas, err)
+		}
+	}
+	k.podCache = map[string]string{}
+	return nil
 }
 
 func (k *KubernetesBackend) Stop(services ...string) error {
+	// Save current replica counts before stopping
+	for _, service := range services {
+		kind, resource, err := k.findWorkloadResource(service)
+		if err != nil {
+			continue
+		}
+		if count, err := k.getReplicaCount(kind, resource); err == nil && count > 0 {
+			cacheKey := fmt.Sprintf("%s/%s", kind, resource)
+			k.replicaCache[cacheKey] = count
+			logrus.Debugf("Saved replica count for %s: %d", cacheKey, count)
+		}
+	}
 	return k.scaleServices(services, 0)
 }
 
@@ -317,6 +354,19 @@ func (k *KubernetesBackend) scaleServices(services []string, replicas int) error
 func (k *KubernetesBackend) scaleResource(kind, resource string, replicas int) error {
 	_, err := k.executor.runCommand("kubectl", "scale", "-n", k.namespace, fmt.Sprintf("%s/%s", kind, resource), fmt.Sprintf("--replicas=%d", replicas))
 	return err
+}
+
+// getReplicaCount returns the current replica count for a workload
+func (k *KubernetesBackend) getReplicaCount(kind, resource string) (int, error) {
+	output, err := k.executor.runCommand("kubectl", "get", kind, resource, "-n", k.namespace, "-o", "jsonpath={.spec.replicas}")
+	if err != nil {
+		return 0, err
+	}
+	count, err := strconv.Atoi(strings.TrimSpace(output))
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (k *KubernetesBackend) findWorkloadResource(service string) (string, string, error) {
@@ -412,6 +462,13 @@ func (k *KubernetesBackend) getPodForService(service string) (string, error) {
 		}
 		pods := nonEmptyLines(output)
 		if len(pods) > 0 {
+			// If multiple pods found, try to find the primary (for HA clusters like CloudNativePG)
+			if len(pods) > 1 {
+				if primary := k.findPrimaryPod(pods); primary != "" {
+					k.podCache[service] = primary
+					return primary, nil
+				}
+			}
 			k.podCache[service] = pods[0]
 			return pods[0], nil
 		}
@@ -438,6 +495,40 @@ func (k *KubernetesBackend) podSelectors(service string) []string {
 		fmt.Sprintf("component=%s", service),
 		fmt.Sprintf("infrahub/service=%s", service),
 	}
+}
+
+// findPrimaryPod searches for a pod with primary role label (for HA PostgreSQL clusters like CloudNativePG)
+func (k *KubernetesBackend) findPrimaryPod(pods []string) string {
+	for _, pod := range pods {
+		output, err := k.executor.runCommand("kubectl", "get", "pod", pod, "-n", k.namespace, "-o", "jsonpath={.metadata.labels.cnpg\\.io/instanceRole}")
+		if err == nil && output == "primary" {
+			logrus.Debugf("Found primary pod via cnpg.io/instanceRole: %s", pod)
+			return pod
+		}
+		// Fallback to legacy role label
+		output, err = k.executor.runCommand("kubectl", "get", "pod", pod, "-n", k.namespace, "-o", "jsonpath={.metadata.labels.role}")
+		if err == nil && output == "primary" {
+			logrus.Debugf("Found primary pod via role label: %s", pod)
+			return pod
+		}
+	}
+	return ""
+}
+
+// GetAllPods returns all pod names for a given service
+func (k *KubernetesBackend) GetAllPods(service string) ([]string, error) {
+	selectors := k.podSelectors(service)
+	for _, selector := range selectors {
+		output, err := k.executor.runCommand("kubectl", "get", "pods", "-n", k.namespace, "-l", selector, "-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}")
+		if err != nil {
+			continue
+		}
+		pods := nonEmptyLines(output)
+		if len(pods) > 0 {
+			return pods, nil
+		}
+	}
+	return nil, fmt.Errorf("no pods found for service %s", service)
 }
 
 type kubernetesWorkload struct {

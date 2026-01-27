@@ -362,6 +362,19 @@ func (iops *InfrahubOps) IsServiceRunning(service string) (bool, error) {
 	return backend.IsRunning(service)
 }
 
+// GetAllPods returns all pod names for a service (Kubernetes only, returns nil for Docker)
+func (iops *InfrahubOps) GetAllPods(service string) ([]string, error) {
+	backend, err := iops.ensureBackend()
+	if err != nil {
+		return nil, err
+	}
+	if k8s, ok := backend.(*KubernetesBackend); ok {
+		return k8s.GetAllPods(service)
+	}
+	// For Docker, return nil (single instance)
+	return nil, nil
+}
+
 // Prerequisites checker
 func (iops *InfrahubOps) checkPrerequisites() error {
 	// Docker and kubectl are now optional. This function always succeeds.
