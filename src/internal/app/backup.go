@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -72,7 +73,7 @@ type BackupMetadata struct {
 }
 
 // CreateBackup creates a full backup of the Infrahub deployment
-func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeTaskManager bool) (retErr error) {
+func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeTaskManager bool, s3Upload bool, s3KeepLocal bool) (retErr error) {
 	if err := iops.checkPrerequisites(); err != nil {
 		return err
 	}
@@ -231,7 +232,79 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 		logrus.Infof("Backup size: %s", formatBytes(stat.Size()))
 	}
 
+	// Upload to S3 if requested
+	if s3Upload {
+		s3URI, err := iops.uploadBackupToS3(backupPath)
+		if err != nil {
+			return fmt.Errorf("backup created locally but S3 upload failed: %w", err)
+		}
+		logrus.Infof("Backup uploaded to: %s", s3URI)
+
+		if !s3KeepLocal {
+			if err := os.Remove(backupPath); err != nil {
+				logrus.Warnf("Failed to delete local backup file: %v", err)
+			} else {
+				logrus.Infof("Local backup file deleted: %s", backupPath)
+			}
+		}
+	}
+
 	return retErr
+}
+
+// uploadBackupToS3 uploads the backup file to S3
+func (iops *InfrahubOps) uploadBackupToS3(backupPath string) (string, error) {
+	if err := iops.config.S3.ValidateConfig(); err != nil {
+		return "", err
+	}
+
+	client, err := NewS3Client(iops.config.S3)
+	if err != nil {
+		return "", fmt.Errorf("failed to create S3 client: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	return client.Upload(ctx, backupPath)
+}
+
+// downloadBackupFromS3 downloads a backup from S3
+func (iops *InfrahubOps) downloadBackupFromS3(s3URI string) (string, error) {
+	bucket, key, ok := ParseS3URI(s3URI)
+	if !ok {
+		return "", fmt.Errorf("invalid S3 URI: %s", s3URI)
+	}
+
+	// Create S3 config from URI, using CLI flags for endpoint/region
+	s3Config := &S3Config{
+		Bucket:   bucket,
+		Endpoint: iops.config.S3.Endpoint,
+		Region:   iops.config.S3.Region,
+	}
+
+	client, err := NewS3Client(s3Config)
+	if err != nil {
+		return "", fmt.Errorf("failed to create S3 client: %w", err)
+	}
+
+	// Ensure backup directory exists
+	if err := os.MkdirAll(iops.config.BackupDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create backup directory: %w", err)
+	}
+
+	// Download to local backup directory
+	filename := filepath.Base(key)
+	localPath := filepath.Join(iops.config.BackupDir, filename)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	if err := client.Download(ctx, key, localPath); err != nil {
+		return "", fmt.Errorf("failed to download backup from S3: %w", err)
+	}
+
+	return localPath, nil
 }
 
 func (iops *InfrahubOps) waitForRunningTasks() error {
@@ -313,8 +386,20 @@ func (iops *InfrahubOps) waitForRunningTasks() error {
 
 // RestoreBackup restores an Infrahub deployment from a backup archive
 func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager bool, restoreMigrateFormat bool) error {
-	if _, err := os.Stat(backupFile); os.IsNotExist(err) {
-		return fmt.Errorf("backup file not found: %s", backupFile)
+	actualBackupFile := backupFile
+
+	// Check if backup file is an S3 URI
+	if IsS3URI(backupFile) {
+		downloadedPath, err := iops.downloadBackupFromS3(backupFile)
+		if err != nil {
+			return err
+		}
+		actualBackupFile = downloadedPath
+		defer os.Remove(actualBackupFile) // Clean up downloaded file after restore
+	}
+
+	if _, err := os.Stat(actualBackupFile); os.IsNotExist(err) {
+		return fmt.Errorf("backup file not found: %s", actualBackupFile)
 	}
 
 	if err := iops.checkPrerequisites(); err != nil {
@@ -331,11 +416,11 @@ func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager boo
 	}
 	defer os.RemoveAll(workDir)
 
-	logrus.Infof("Restoring from backup: %s", backupFile)
+	logrus.Infof("Restoring from backup: %s", actualBackupFile)
 
 	// Extract backup
 	logrus.Info("Extracting backup archive...")
-	if err := extractTarball(backupFile, workDir); err != nil {
+	if err := extractTarball(actualBackupFile, workDir); err != nil {
 		return fmt.Errorf("failed to extract backup: %w", err)
 	}
 
