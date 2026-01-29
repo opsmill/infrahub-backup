@@ -37,6 +37,7 @@ type Neo4jEditionInfo struct {
 // NewNeo4jEditionInfo creates a new Neo4jEditionInfo from an edition string
 func NewNeo4jEditionInfo(edition string, err error) *Neo4jEditionInfo {
 	if err != nil {
+		logrus.Infof("could not detect neo4j edition: %v", err)
 		return &Neo4jEditionInfo{
 			Edition:     neo4jEditionCommunity, // Default fallback
 			IsCommunity: true,
