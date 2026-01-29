@@ -11,12 +11,12 @@ import (
 
 // Default database credentials
 const (
-	defaultNeo4jDatabase      = "neo4j"
-	defaultNeo4jUsername      = "neo4j"
-	defaultNeo4jPassword      = "admin"
-	defaultPostgresDatabase   = "prefect"
-	defaultPostgresUsername   = "postgres"
-	defaultPostgresPassword   = "prefect"
+	defaultNeo4jDatabase    = "neo4j"
+	defaultNeo4jUsername    = "neo4j"
+	defaultNeo4jPassword    = "admin"
+	defaultPostgresDatabase = "prefect"
+	defaultPostgresUsername = "postgres"
+	defaultPostgresPassword = "prefect"
 )
 
 // fetchDatabaseCredentials retrieves database credentials from environment or containers
@@ -32,16 +32,16 @@ func (iops *InfrahubOps) fetchDatabaseCredentials() error {
 	if !iops.hasNeo4jCredentials() {
 		if err := iops.fetchNeo4jCredentials(); err != nil {
 			logrus.Warnf("Could not fetch Neo4j credentials from container: %v", err)
-			iops.applyNeo4jDefaults()
 		}
+		iops.applyNeo4jDefaults()
 	}
 
 	// Fetch PostgreSQL credentials if not fully configured
 	if !iops.hasPostgresCredentials() {
 		if err := iops.fetchPostgresCredentials(); err != nil {
 			logrus.Warnf("Could not fetch PostgreSQL credentials from container: %v", err)
-			iops.applyPostgresDefaults()
 		}
+		iops.applyPostgresDefaults()
 	}
 
 	return nil
