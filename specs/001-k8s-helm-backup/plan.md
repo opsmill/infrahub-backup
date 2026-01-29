@@ -110,9 +110,7 @@ FROM alpine:3.19
 ARG TARGETARCH
 
 # Install kubectl for target architecture
-RUN apk add --no-cache ca-certificates curl && \
-    curl -LO "https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/stable.txt)/bin/linux/${TARGETARCH}/kubectl" && \
-    chmod +x kubectl && mv kubectl /usr/local/bin/
+RUN apk add --no-cache ca-certificates curl kubectl
 
 COPY --from=builder /infrahub-backup /usr/local/bin/
 COPY --from=builder /neo4j_watchdog /usr/local/bin/
