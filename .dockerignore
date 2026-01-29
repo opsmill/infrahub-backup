@@ -1,0 +1,43 @@
+# Build artifacts
+bin/
+*.exe
+*.test
+*.out
+
+# Git
+.git/
+.gitignore
+
+# Documentation and specs
+docs/
+specs/
+.specify/
+*.md
+!go.mod
+!go.sum
+
+# IDE and editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test and coverage
+coverage.out
+coverage.html
+.pytest_cache/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local backup artifacts
+infrahub_backups/
+
+# CI/CD
+.github/
+
+# Docker
+Dockerfile*
+.dockerignore
+docker-compose*.yml
