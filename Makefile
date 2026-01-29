@@ -1,4 +1,4 @@
-.PHONY: build build-all clean install test lint fmt vet help
+.PHONY: build build-all clean install test lint fmt vet help docker-build docker-build-multi docker-push
 
 # Variables
 BINARIES=infrahub-backup infrahub-taskmanager
@@ -106,9 +106,28 @@ dev-setup: ## Set up development environment
 	@which golangci-lint > /dev/null || curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $$(go env GOPATH)/bin v1.54.2
 	@echo "Development environment ready!"
 
-docker-build: ## Build Docker image
+DOCKER_REGISTRY?=registry.opsmill.io/opsmill
+DOCKER_IMAGE=infrahub-backup
+
+docker-build: ## Build Docker image for current platform
 	@echo "Building Docker image..."
-	@docker build -t infrahub-ops:$(VERSION) -t infrahub-ops:latest .
+	@docker build --build-arg VERSION=$(VERSION) \
+		-t $(DOCKER_REGISTRY)/$(DOCKER_IMAGE):$(VERSION) \
+		-t $(DOCKER_REGISTRY)/$(DOCKER_IMAGE):latest .
+
+docker-build-multi: ## Build multi-arch Docker images (amd64 + arm64)
+	@echo "Building multi-arch Docker images..."
+	@docker buildx build --platform linux/amd64,linux/arm64 \
+		--build-arg VERSION=$(VERSION) \
+		-t $(DOCKER_REGISTRY)/$(DOCKER_IMAGE):$(VERSION) \
+		-t $(DOCKER_REGISTRY)/$(DOCKER_IMAGE):latest .
+
+docker-push: ## Build and push multi-arch images to registry
+	@echo "Building and pushing multi-arch Docker images..."
+	@docker buildx build --platform linux/amd64,linux/arm64 \
+		--build-arg VERSION=$(VERSION) \
+		-t $(DOCKER_REGISTRY)/$(DOCKER_IMAGE):$(VERSION) \
+		-t $(DOCKER_REGISTRY)/$(DOCKER_IMAGE):latest --push .
 
 release: test lint build-all ## Prepare release
 	@echo "Preparing release $(VERSION)..."
