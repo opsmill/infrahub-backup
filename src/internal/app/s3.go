@@ -52,6 +52,9 @@ func NewS3Client(cfg *S3Config) (*S3Client, error) {
 		s3Opts = append(s3Opts, func(o *s3.Options) {
 			o.BaseEndpoint = aws.String(cfg.Endpoint)
 			o.UsePathStyle = true // Required for MinIO and most S3-compatible services
+			// https://github.com/aws/aws-sdk-go-v2/discussions/2960
+			o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
+			o.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
 		})
 		logrus.Debugf("Using custom S3 endpoint: %s", cfg.Endpoint)
 	}
