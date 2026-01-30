@@ -26,7 +26,12 @@ func (d *DockerBackend) Info() string {
 
 func (d *DockerBackend) Detect() error {
 	if err := d.executor.runCommandQuiet("docker", "--version"); err != nil {
-		return fmt.Errorf("docker CLI not available: %w", err)
+		// If user explicitly specified Docker project, this is a hard error
+		if d.config.DockerComposeProject != "" {
+			return fmt.Errorf("docker CLI not available (required for --project): %w", err)
+		}
+		// Otherwise, treat as soft failure for auto-detection
+		return fmt.Errorf("docker CLI not available: %w", ErrCLIUnavailable)
 	}
 
 	projects, err := ListDockerProjects(d.executor)
