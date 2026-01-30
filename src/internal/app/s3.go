@@ -105,10 +105,7 @@ func (c *S3Client) Upload(ctx context.Context, localPath string) (string, error)
 		filename, formatBytes(stat.Size()), c.config.Bucket, s3Key)
 
 	// Use the S3 manager for multipart uploads of large files
-	uploader := manager.NewUploader(c.client, func(u *manager.Uploader) {
-		u.PartSize = 64 * 1024 * 1024 // 64MB parts
-		u.Concurrency = 4
-	})
+	uploader := manager.NewUploader(c.client)
 
 	_, err = uploader.Upload(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(c.config.Bucket),
