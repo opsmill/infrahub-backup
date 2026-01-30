@@ -193,8 +193,7 @@ infrahub-backup:
   backup:
     storage:
       type: "local"
-      local:
-        path: "/backups"
+      path: "/infrahub_backups"
 ```
 
 :::warning
@@ -208,7 +207,7 @@ With local storage, backups are stored in an `emptyDir` volume and lost when the
 kubectl get pods -n infrahub -l app.kubernetes.io/name=infrahub-backup
 
 # Copy the backup file
-kubectl cp infrahub/infrahub-backup-xxxxx:/backups/infrahub_backup_20250120_020000.tar.gz ./backup.tar.gz
+kubectl cp infrahub/infrahub-backup-xxxxx:/infrahub_backups/infrahub_backup_20250120_020000.tar.gz ./backup.tar.gz
 ```
 
 </TabItem>
@@ -377,5 +376,4 @@ Confirm your backup configuration works:
 ## Related resources
 
 - [How to restore from backup on Kubernetes](./kubernetes-restore.mdx)
-- [Helm chart values reference](../reference/helm-values.mdx)
 - [How to backup your instance (CLI)](./backup-instance.mdx)
