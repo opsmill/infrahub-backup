@@ -14,7 +14,7 @@ import (
 )
 
 // CreateBackup creates a full backup of the Infrahub deployment
-func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeTaskManager bool, s3Upload bool, s3KeepLocal bool) (retErr error) {
+func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeTaskManager bool, s3Upload bool, s3KeepLocal bool, sleepDuration time.Duration) (retErr error) {
 	if err := iops.checkPrerequisites(); err != nil {
 		return err
 	}
@@ -160,11 +160,18 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 		}
 	}
 
+	// Sleep if requested (for K8s users to transfer backup file)
+	if sleepDuration > 0 {
+		logrus.Infof("Sleeping for %v to allow backup file transfer...", sleepDuration)
+		logrus.Info("Press Ctrl+C to exit early if file transfer is complete")
+		time.Sleep(sleepDuration)
+	}
+
 	return retErr
 }
 
 // RestoreBackup restores an Infrahub deployment from a backup archive
-func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager bool, restoreMigrateFormat bool) error {
+func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager bool, restoreMigrateFormat bool, sleepDuration time.Duration) error {
 	actualBackupFile := backupFile
 
 	// Check if backup file is an S3 URI
@@ -175,6 +182,13 @@ func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager boo
 		}
 		actualBackupFile = downloadedPath
 		defer os.Remove(actualBackupFile) // Clean up downloaded file after restore
+	}
+
+	// Sleep if requested (for K8s users to transfer backup file into pod)
+	if sleepDuration > 0 {
+		logrus.Infof("Sleeping for %v to allow backup file transfer...", sleepDuration)
+		logrus.Info("Press Ctrl+C to cancel if you need more time")
+		time.Sleep(sleepDuration)
 	}
 
 	if _, err := os.Stat(actualBackupFile); os.IsNotExist(err) {
