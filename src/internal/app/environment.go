@@ -7,6 +7,7 @@ import (
 )
 
 var ErrEnvironmentNotFound = errors.New("environment not found")
+var ErrCLIUnavailable = errors.New("CLI not available")
 
 type ExecOptions struct {
 	User string

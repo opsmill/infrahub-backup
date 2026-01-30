@@ -38,7 +38,13 @@ func (k *KubernetesBackend) findPrimaryPod(pods []string) string {
 func ListKubernetesNamespaces(executor *CommandExecutor) ([]string, error) {
 	output, err := executor.runCommand("kubectl", "get", "pods", "-A", "-l", "app.kubernetes.io/name=infrahub", "-o", "jsonpath={range .items[*]}{.metadata.namespace}{\"\\n\"}{end}")
 	if err != nil {
-		return nil, err
+		// Check if this is a permission/RBAC issue
+		outputLower := strings.ToLower(output)
+		if strings.Contains(outputLower, "forbidden") || strings.Contains(outputLower, "cannot list") {
+			return nil, fmt.Errorf("insufficient permissions to list pods across namespaces; try specifying --k8s-namespace explicitly: %w", err)
+		}
+		// Generic kubectl failure during auto-detect is treated as "not found"
+		return nil, ErrEnvironmentNotFound
 	}
 	namespaces := unique(nonEmptyLines(output))
 	return namespaces, nil

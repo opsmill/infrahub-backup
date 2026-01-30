@@ -117,9 +117,13 @@ func (iops *InfrahubOps) ensureBackend() (EnvironmentBackend, error) {
 			continue
 		}
 		if err := backend.Detect(); err != nil {
-			if !errors.Is(err, ErrEnvironmentNotFound) {
-				detectionErrors = append(detectionErrors, fmt.Sprintf("%s: %v", backend.Name(), err))
+			// Soft failures: CLI not available OR environment not found during auto-detect
+			if errors.Is(err, ErrEnvironmentNotFound) || errors.Is(err, ErrCLIUnavailable) {
+				logrus.Debugf("Skipping %s backend: %v", backend.Name(), err)
+				continue
 			}
+			// Hard failures: something went wrong that should be reported
+			detectionErrors = append(detectionErrors, fmt.Sprintf("%s: %v", backend.Name(), err))
 			continue
 		}
 		iops.backend = backend

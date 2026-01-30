@@ -35,12 +35,12 @@ func (k *KubernetesBackend) Info() string {
 
 func (k *KubernetesBackend) Detect() error {
 	if err := k.executor.runCommandQuiet("kubectl", "version", "--client"); err != nil {
-		return fmt.Errorf("kubectl CLI not available: %w", err)
-	}
-
-	namespaces, err := ListKubernetesNamespaces(k.executor)
-	if err != nil {
-		return err
+		// If user explicitly specified K8s namespace, this is a hard error
+		if k.config.K8sNamespace != "" {
+			return fmt.Errorf("kubectl CLI not available (required for --k8s-namespace): %w", err)
+		}
+		// Otherwise, treat as soft failure for auto-detection
+		return fmt.Errorf("kubectl CLI not available: %w", ErrCLIUnavailable)
 	}
 
 	if k.config.K8sNamespace != "" {
@@ -49,6 +49,11 @@ func (k *KubernetesBackend) Detect() error {
 			return fmt.Errorf("failed to verify namespace %s: %w", k.namespace, err)
 		}
 		return nil
+	}
+
+	namespaces, err := ListKubernetesNamespaces(k.executor)
+	if err != nil {
+		return err
 	}
 
 	switch len(namespaces) {
