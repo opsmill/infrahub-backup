@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"time"
 
 	app "infrahub-ops/src/internal/app"
 
@@ -34,6 +35,8 @@ func main() {
 	var restoreMigrateFormat bool
 	var s3Upload bool
 	var s3KeepLocal bool
+	var sleepDuration time.Duration
+	var restoreSleepDuration time.Duration
 
 	// Variables for from-files subcommand
 	var neo4jPath string
@@ -46,7 +49,7 @@ func main() {
 		Short:        "Create a backup of the current Infrahub instance",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return iops.CreateBackup(force, neo4jMetadata, excludeTaskManagerDB, s3Upload, s3KeepLocal)
+			return iops.CreateBackup(force, neo4jMetadata, excludeTaskManagerDB, s3Upload, s3KeepLocal, sleepDuration)
 		},
 	}
 	createCmd.Flags().BoolVar(&force, "force", false, "Force backup creation even if there are running tasks")
@@ -54,6 +57,7 @@ func main() {
 	createCmd.Flags().BoolVar(&excludeTaskManagerDB, "exclude-taskmanager", false, "Exclude task manager database from the backup")
 	createCmd.Flags().BoolVar(&s3Upload, "s3-upload", false, "Upload backup to S3 after creation")
 	createCmd.Flags().BoolVar(&s3KeepLocal, "s3-keep-local", false, "Keep local backup file after successful S3 upload (default: delete local file)")
+	createCmd.Flags().DurationVar(&sleepDuration, "sleep", 0, "Sleep duration after backup creation (e.g., 5m, 300s) for manual file transfer")
 
 	// Undocumented subcommand: create from-files
 	fromFilesCmd := &cobra.Command{
@@ -79,11 +83,12 @@ func main() {
 		Args:         cobra.ExactArgs(1),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return iops.RestoreBackup(args[0], restoreExcludeTaskManagerDB, restoreMigrateFormat)
+			return iops.RestoreBackup(args[0], restoreExcludeTaskManagerDB, restoreMigrateFormat, restoreSleepDuration)
 		},
 	}
 	restoreCmd.Flags().BoolVar(&restoreExcludeTaskManagerDB, "exclude-taskmanager", false, "Skip restoring the task manager database even if present in the archive")
 	restoreCmd.Flags().BoolVar(&restoreMigrateFormat, "migrate-format", false, "Run neo4j-admin database migrate --to-format=block after the restore completes")
+	restoreCmd.Flags().DurationVar(&restoreSleepDuration, "sleep", 0, "Sleep duration before restore begins (e.g., 5m, 300s) for manual file transfer")
 
 	rootCmd.AddCommand(createCmd)
 	rootCmd.AddCommand(restoreCmd)
