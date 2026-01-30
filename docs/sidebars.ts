@@ -27,7 +27,6 @@ const sidebars: SidebarsConfig = {
       items: [
         'reference/commands',
         'reference/configuration',
-        'reference/helm-values',
       ],
     },
   ]
