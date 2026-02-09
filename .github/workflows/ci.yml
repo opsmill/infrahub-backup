@@ -22,6 +22,7 @@ jobs:
     outputs:
       documentation: ${{ steps.changes.outputs.documentation_all }}
       go: ${{ steps.changes.outputs.go_all }}
+      nix: ${{ steps.changes.outputs.nix_all }}
       yaml: ${{ steps.changes.outputs.yaml_all }}
       markdown: ${{ steps.changes.outputs.markdown_all }}
     steps:
@@ -73,6 +74,31 @@ jobs:
 
       - name: Run tests
         run: make test
+
+  nix-build:
+    if: needs.files-changed.outputs.nix == 'true'
+    needs: ["files-changed"]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Update flake.nix vendorHash
+        run: ./scripts/update-vendor-hash.sh
+      - name: Commit and push changes with github-actions-x/commit
+        uses: github-actions-x/commit@v2.9
+        with:
+          github-token: ${{ secrets.GH_UPDATE_PACKAGE_OTTO }}
+          commit-message: "chore: update flake.nix with correct vendorHash"
+          files: |
+            flake.nix
+          name: opsmill-bot
+          email: github-bot@opsmill.com
+      - name: Verify nix build succeeds
+        run: nix build --no-link
 
   yaml-lint:
     if: needs.files-changed.outputs.yaml == 'true'
