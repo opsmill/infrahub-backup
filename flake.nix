@@ -1,5 +1,5 @@
 {
-  description = "infrahub-ops-cli - Backup/restore and task management tools for Infrahub";
+  description = "infrahub-backup - Backup/restore and task management tools for Infrahub";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
