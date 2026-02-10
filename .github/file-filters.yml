@@ -32,3 +32,12 @@ documentation: &documentation
 
 documentation_all:
   - *documentation
+
+nix: &nix
+  - "flake.nix"
+  - "flake.lock"
+  - "go.mod"
+  - "go.sum"
+
+nix_all:
+  - *nix

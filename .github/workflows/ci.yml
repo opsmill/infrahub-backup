@@ -22,6 +22,7 @@ jobs:
     outputs:
       documentation: ${{ steps.changes.outputs.documentation_all }}
       go: ${{ steps.changes.outputs.go_all }}
+      nix: ${{ steps.changes.outputs.nix_all }}
       yaml: ${{ steps.changes.outputs.yaml_all }}
       markdown: ${{ steps.changes.outputs.markdown_all }}
     steps:
@@ -73,6 +74,18 @@ jobs:
 
       - name: Run tests
         run: make test
+
+  nix-build:
+    if: needs.files-changed.outputs.nix == 'true'
+    needs: ["files-changed"]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@v21
+      - uses: DeterminateSystems/magic-nix-cache-action@v13
+      - name: Verify if nix build succeeds
+        run: nix build --no-link
 
   yaml-lint:
     if: needs.files-changed.outputs.yaml == 'true'
