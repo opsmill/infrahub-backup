@@ -78,26 +78,13 @@ jobs:
   nix-build:
     if: needs.files-changed.outputs.nix == 'true'
     needs: ["files-changed"]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 15
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v6
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
-      - name: Update flake.nix vendorHash
-        run: ./scripts/update-vendor-hash.sh
-      - name: Commit and push changes with github-actions-x/commit
-        uses: github-actions-x/commit@v2.9
-        with:
-          github-token: ${{ secrets.GH_UPDATE_PACKAGE_OTTO }}
-          commit-message: "chore: update flake.nix with correct vendorHash"
-          files: |
-            flake.nix
-          name: opsmill-bot
-          email: github-bot@opsmill.com
-      - name: Verify nix build succeeds
+      - name: Verify if nix build succeeds
         run: nix build --no-link
 
   yaml-lint:
