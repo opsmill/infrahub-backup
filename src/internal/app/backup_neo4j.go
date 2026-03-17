@@ -437,6 +437,26 @@ func (iops *InfrahubOps) getNeo4jExecOptions() *ExecOptions {
 }
 
 // isNeo4jCluster checks if Neo4j is running in cluster mode by counting servers
+func (iops *InfrahubOps) redactDatabase() error {
+	logrus.Warn("Redacting attribute values in the database. This operation is destructive and irreversible!")
+
+	query := `MATCH (av:AttributeValue) WITH av.value AS av_value, collect(av) AS av_verts WITH av_value, av_verts, randomUUID() as new_value CALL (av_value, new_value, av_verts) { UNWIND av_verts AS av SET av.value = new_value } IN TRANSACTIONS`
+
+	if _, err := iops.Exec("database", []string{
+		"cypher-shell",
+		"-u", iops.config.Neo4jUsername,
+		"-p" + iops.config.Neo4jPassword,
+		"-d", iops.config.Neo4jDatabase,
+		"--format", "plain",
+		query,
+	}, nil); err != nil {
+		return fmt.Errorf("failed to redact database: %w", err)
+	}
+
+	logrus.Info("Database redaction completed")
+	return nil
+}
+
 func (iops *InfrahubOps) isNeo4jCluster() bool {
 	output, err := iops.Exec("database", []string{
 		"cypher-shell",

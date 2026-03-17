@@ -14,7 +14,7 @@ import (
 )
 
 // CreateBackup creates a full backup of the Infrahub deployment
-func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeTaskManager bool, s3Upload bool, s3KeepLocal bool, sleepDuration time.Duration) (retErr error) {
+func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeTaskManager bool, s3Upload bool, s3KeepLocal bool, sleepDuration time.Duration, redact bool) (retErr error) {
 	if err := iops.checkPrerequisites(); err != nil {
 		return err
 	}
@@ -29,6 +29,16 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 		logrus.Warn("Neo4j Community Edition detected; Infrahub services will be stopped and restarted before the backup begins.")
 		logrus.Warn("Waiting 10 seconds to allow the user to abort... CTRL+C to cancel.")
 		time.Sleep(10 * time.Second)
+	}
+
+	// Redact attribute values if requested
+	if redact {
+		if !force {
+			return fmt.Errorf("--redact is a destructive operation that replaces all attribute values in the database with random UUIDs; use --force to confirm")
+		}
+		if err := iops.redactDatabase(); err != nil {
+			return err
+		}
 	}
 
 	version := iops.getInfrahubVersion()
@@ -93,6 +103,9 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 	// Create metadata
 	backupID := strings.TrimSuffix(backupFilename, ".tar.gz")
 	metadata := iops.createBackupMetadata(backupID, !excludeTaskManager, version, editionInfo.Edition)
+	if redact {
+		metadata.Redacted = true
+	}
 
 	// Backup databases
 	if err := iops.backupDatabase(backupDir, neo4jMetadata, editionInfo.Edition); err != nil {
