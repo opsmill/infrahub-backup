@@ -8,6 +8,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 // version is set via ldflags at build time
@@ -50,7 +51,15 @@ func main() {
 		Short:        "Create a backup of the current Infrahub instance",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return iops.CreateBackup(force, neo4jMetadata, excludeTaskManagerDB, s3Upload, s3KeepLocal, sleepDuration, redact)
+			return iops.CreateBackup(
+				viper.GetBool("force"),
+				viper.GetString("neo4jmetadata"),
+				viper.GetBool("exclude-taskmanager"),
+				viper.GetBool("s3-upload"),
+				viper.GetBool("s3-keep-local"),
+				viper.GetDuration("sleep"),
+				viper.GetBool("redact"),
+			)
 		},
 	}
 	createCmd.Flags().BoolVar(&force, "force", false, "Force backup creation even if there are running tasks")
@@ -60,6 +69,15 @@ func main() {
 	createCmd.Flags().BoolVar(&s3Upload, "s3-upload", false, "Upload backup to S3 after creation")
 	createCmd.Flags().BoolVar(&s3KeepLocal, "s3-keep-local", false, "Keep local backup file after successful S3 upload (default: delete local file)")
 	createCmd.Flags().DurationVar(&sleepDuration, "sleep", 0, "Sleep duration after backup creation (e.g., 5m, 300s) for manual file transfer")
+
+	// Bind create flags to Viper for environment variable support (INFRAHUB_<FLAG_NAME>)
+	viper.BindPFlag("force", createCmd.Flags().Lookup("force"))
+	viper.BindPFlag("redact", createCmd.Flags().Lookup("redact"))
+	viper.BindPFlag("neo4jmetadata", createCmd.Flags().Lookup("neo4jmetadata"))
+	viper.BindPFlag("exclude-taskmanager", createCmd.Flags().Lookup("exclude-taskmanager"))
+	viper.BindPFlag("s3-upload", createCmd.Flags().Lookup("s3-upload"))
+	viper.BindPFlag("s3-keep-local", createCmd.Flags().Lookup("s3-keep-local"))
+	viper.BindPFlag("sleep", createCmd.Flags().Lookup("sleep"))
 
 	// Undocumented subcommand: create from-files
 	fromFilesCmd := &cobra.Command{
