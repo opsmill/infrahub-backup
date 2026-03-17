@@ -25,6 +25,7 @@ type BackupMetadata struct {
 	Components      []string          `json:"components"`
 	Checksums       map[string]string `json:"checksums,omitempty"`
 	Neo4jEdition    string            `json:"neo4j_edition,omitempty"`
+	Redacted        bool              `json:"redacted,omitempty"`
 }
 
 // Neo4jEditionInfo encapsulates information about the detected Neo4j edition
