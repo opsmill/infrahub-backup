@@ -12,6 +12,34 @@ import (
 	"github.com/spf13/viper"
 )
 
+// validateBackendFlags checks for invalid flag combinations related to the --backend flag.
+func validateBackendFlags(iops *app.InfrahubOps) error {
+	cfg := iops.Config()
+
+	// Validate backend value
+	switch cfg.Backend {
+	case app.BackendTarball, app.BackendPlakar:
+		// valid
+	default:
+		return fmt.Errorf("unknown backend: %s, expected 'tarball' or 'plakar'", cfg.Backend)
+	}
+
+	if cfg.Backend == app.BackendPlakar {
+		// --repo is required for plakar backend
+		if cfg.Plakar.RepoPath == "" {
+			return fmt.Errorf("--repo is required when using plakar backend")
+		}
+
+		// S3 flags conflict with plakar backend
+		if viper.GetBool("s3-upload") || cfg.S3.Bucket != "" || cfg.S3.Prefix != "" ||
+			cfg.S3.Endpoint != "" || (cfg.S3.Region != "" && cfg.S3.Region != "us-east-1") {
+			return fmt.Errorf("--s3-upload and related S3 flags cannot be used with plakar backend; use --repo s3://... instead")
+		}
+	}
+
+	return nil
+}
+
 // version is set via ldflags at build time
 var version string
 
@@ -57,6 +85,9 @@ func main() {
 		Short:        "Create a backup of the current Infrahub instance",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateBackendFlags(iops); err != nil {
+				return err
+			}
 			return iops.CreateBackup(
 				viper.GetBool("force"),
 				viper.GetString("neo4jmetadata"),
@@ -112,18 +143,34 @@ func main() {
 	createCmd.AddCommand(fromFilesCmd)
 
 	restoreCmd := &cobra.Command{
-		Use:          "restore <backup-file>",
+		Use:          "restore [backup-file]",
 		Short:        "Restore Infrahub from a backup archive",
-		Args:         cobra.ExactArgs(1),
 		SilenceUsage: true,
+		Args: func(cmd *cobra.Command, args []string) error {
+			if iops.Config().Backend == app.BackendPlakar {
+				return nil // positional arg not required for plakar
+			}
+			if len(args) != 1 {
+				return fmt.Errorf("requires exactly 1 arg(s), only received %d", len(args))
+			}
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return iops.RestoreBackup(args[0], restoreExcludeTaskManagerDB, restoreMigrateFormat, restoreSleepDuration, restoreDecryptKey)
+			if err := validateBackendFlags(iops); err != nil {
+				return err
+			}
+			forceRestore, _ := cmd.Flags().GetBool("force")
+			if iops.Config().Backend == app.BackendPlakar {
+				return iops.RestoreBackup("", restoreExcludeTaskManagerDB, restoreMigrateFormat, restoreSleepDuration, restoreDecryptKey, forceRestore)
+			}
+			return iops.RestoreBackup(args[0], restoreExcludeTaskManagerDB, restoreMigrateFormat, restoreSleepDuration, restoreDecryptKey, forceRestore)
 		},
 	}
 	restoreCmd.Flags().BoolVar(&restoreExcludeTaskManagerDB, "exclude-taskmanager", false, "Skip restoring the task manager database even if present in the archive")
 	restoreCmd.Flags().BoolVar(&restoreMigrateFormat, "migrate-format", false, "Run neo4j-admin database migrate --to-format=block after the restore completes")
 	restoreCmd.Flags().DurationVar(&restoreSleepDuration, "sleep", 0, "Sleep duration before restore begins (e.g., 5m, 300s) for manual file transfer")
 	restoreCmd.Flags().StringVar(&restoreDecryptKey, "decrypt-key", "", "Path to private key PEM file for decrypting an encrypted backup")
+	restoreCmd.Flags().Bool("force", false, "Force restore of incomplete backup group")
 	viper.BindPFlag("decrypt-key", restoreCmd.Flags().Lookup("decrypt-key"))
 
 	rootCmd.AddCommand(createCmd)
@@ -171,6 +218,31 @@ func main() {
 	}
 
 	rootCmd.AddCommand(versionCmd)
+
+	// Snapshots subcommand
+	snapshotsCmd := &cobra.Command{
+		Use:   "snapshots",
+		Short: "Manage Plakar backup snapshots",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return cmd.Help()
+		},
+	}
+
+	snapshotsListCmd := &cobra.Command{
+		Use:          "list",
+		Short:        "List all snapshots in a Plakar repository",
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if iops.Config().Plakar.RepoPath == "" {
+				return fmt.Errorf("--repo is required for snapshots list")
+			}
+			jsonOutput := viper.GetString("log-format") == "json"
+			return iops.ListSnapshots(jsonOutput)
+		},
+	}
+
+	snapshotsCmd.AddCommand(snapshotsListCmd)
+	rootCmd.AddCommand(snapshotsCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		logrus.Errorf("Command failed: %v", err)
