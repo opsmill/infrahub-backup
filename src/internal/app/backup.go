@@ -1,6 +1,7 @@
 package app
 
 import (
+	"crypto/ecdh"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,8 +14,17 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// loadEncryptionKey loads the public key for encryption.
+// If keyPath is empty, returns the default hardcoded key.
+func loadEncryptionKey(keyPath string) (*ecdh.PublicKey, error) {
+	if keyPath != "" {
+		return LoadPublicKeyFromFile(keyPath)
+	}
+	return DefaultPublicKey()
+}
+
 // CreateBackup creates a full backup of the Infrahub deployment
-func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeTaskManager bool, s3Upload bool, s3KeepLocal bool, sleepDuration time.Duration, redact bool) (retErr error) {
+func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeTaskManager bool, s3Upload bool, s3KeepLocal bool, sleepDuration time.Duration, redact bool, encrypt bool, encryptKey string) (retErr error) {
 	if err := iops.checkPrerequisites(); err != nil {
 		return err
 	}
@@ -106,6 +116,9 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 	if redact {
 		metadata.Redacted = true
 	}
+	if encrypt || encryptKey != "" {
+		metadata.Encrypted = true
+	}
 
 	// Backup databases
 	if err := iops.backupDatabase(backupDir, neo4jMetadata, editionInfo.Edition); err != nil {
@@ -143,6 +156,27 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 	logrus.Info("Creating backup archive...")
 	if err := createTarball(backupPath, workDir, "backup/"); err != nil {
 		return fmt.Errorf("failed to create archive: %w", err)
+	}
+
+	// Encrypt backup if requested
+	if encrypt || encryptKey != "" {
+		pubKey, loadErr := loadEncryptionKey(encryptKey)
+		if loadErr != nil {
+			return fmt.Errorf("failed to load encryption key: %w", loadErr)
+		}
+
+		encryptedPath := backupPath + ".enc"
+		logrus.Info("Encrypting backup archive...")
+		if err := EncryptFile(backupPath, encryptedPath, pubKey); err != nil {
+			return fmt.Errorf("failed to encrypt backup: %w", err)
+		}
+
+		if err := os.Remove(backupPath); err != nil {
+			logrus.Warnf("Failed to remove plaintext backup: %v", err)
+		}
+
+		backupPath = encryptedPath
+		backupFilename = filepath.Base(encryptedPath)
 	}
 
 	// Log backup creation with structured fields
@@ -184,7 +218,7 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 }
 
 // RestoreBackup restores an Infrahub deployment from a backup archive
-func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager bool, restoreMigrateFormat bool, sleepDuration time.Duration) error {
+func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager bool, restoreMigrateFormat bool, sleepDuration time.Duration, decryptKey string) error {
 	actualBackupFile := backupFile
 
 	// Check if backup file is an S3 URI
@@ -206,6 +240,43 @@ func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager boo
 
 	if _, err := os.Stat(actualBackupFile); os.IsNotExist(err) {
 		return fmt.Errorf("backup file not found: %s", actualBackupFile)
+	}
+
+	// Auto-detect and decrypt if necessary
+	encrypted, err := IsEncryptedFile(actualBackupFile)
+	if err != nil {
+		return fmt.Errorf("failed to detect file format: %w", err)
+	}
+
+	if encrypted {
+		if decryptKey == "" {
+			return fmt.Errorf("backup file is encrypted; provide --decrypt-key to decrypt")
+		}
+
+		privKey, err := LoadPrivateKeyFromFile(decryptKey)
+		if err != nil {
+			return fmt.Errorf("failed to load decryption key: %w", err)
+		}
+
+		decryptedPath := strings.TrimSuffix(actualBackupFile, ".enc")
+		if decryptedPath == actualBackupFile {
+			decryptedPath = actualBackupFile + ".decrypted.tar.gz"
+		}
+
+		logrus.Info("Decrypting backup archive...")
+		if err := DecryptFile(actualBackupFile, decryptedPath, privKey); err != nil {
+			return fmt.Errorf("failed to decrypt backup: %w", err)
+		}
+
+		// If the encrypted file was downloaded from S3 (temporary), remove it
+		if IsS3URI(backupFile) {
+			os.Remove(actualBackupFile)
+		}
+
+		actualBackupFile = decryptedPath
+		defer os.Remove(actualBackupFile)
+	} else if decryptKey != "" {
+		return fmt.Errorf("--decrypt-key provided but backup file is not encrypted")
 	}
 
 	if err := iops.checkPrerequisites(); err != nil {
@@ -344,7 +415,7 @@ func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager boo
 // CreateBackupFromFiles creates a backup archive from local Neo4j backup files and PostgreSQL dump.
 // This is useful when you already have database dumps on the local filesystem and want to
 // create a compatible backup archive without connecting to a running Infrahub instance.
-func (iops *InfrahubOps) CreateBackupFromFiles(neo4jPath string, postgresPath string, neo4jEdition string, infrahubVersion string) error {
+func (iops *InfrahubOps) CreateBackupFromFiles(neo4jPath string, postgresPath string, neo4jEdition string, infrahubVersion string, encrypt bool, encryptKey string) error {
 	// Validate input paths
 	if neo4jPath == "" {
 		return fmt.Errorf("neo4j backup path is required")
@@ -456,6 +527,9 @@ func (iops *InfrahubOps) CreateBackupFromFiles(neo4jPath string, postgresPath st
 	// Create metadata
 	metadata := iops.createBackupMetadata(backupID, postgresIncluded, infrahubVersion, edition)
 	metadata.Checksums = checksums
+	if encrypt || encryptKey != "" {
+		metadata.Encrypted = true
+	}
 
 	metadataBytes, err := json.MarshalIndent(metadata, "", "    ")
 	if err != nil {
@@ -470,6 +544,26 @@ func (iops *InfrahubOps) CreateBackupFromFiles(neo4jPath string, postgresPath st
 	logrus.Info("Creating backup archive...")
 	if err := createTarball(backupPath, workDir, "backup/"); err != nil {
 		return fmt.Errorf("failed to create archive: %w", err)
+	}
+
+	// Encrypt backup if requested
+	if encrypt || encryptKey != "" {
+		pubKey, loadErr := loadEncryptionKey(encryptKey)
+		if loadErr != nil {
+			return fmt.Errorf("failed to load encryption key: %w", loadErr)
+		}
+
+		encryptedPath := backupPath + ".enc"
+		logrus.Info("Encrypting backup archive...")
+		if err := EncryptFile(backupPath, encryptedPath, pubKey); err != nil {
+			return fmt.Errorf("failed to encrypt backup: %w", err)
+		}
+
+		if err := os.Remove(backupPath); err != nil {
+			logrus.Warnf("Failed to remove plaintext backup: %v", err)
+		}
+
+		backupPath = encryptedPath
 	}
 
 	logrus.Infof("Backup created: %s", backupPath)

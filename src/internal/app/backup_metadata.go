@@ -26,6 +26,7 @@ type BackupMetadata struct {
 	Checksums       map[string]string `json:"checksums,omitempty"`
 	Neo4jEdition    string            `json:"neo4j_edition,omitempty"`
 	Redacted        bool              `json:"redacted,omitempty"`
+	Encrypted       bool              `json:"encrypted,omitempty"`
 }
 
 // Neo4jEditionInfo encapsulates information about the detected Neo4j edition
