@@ -1,0 +1,177 @@
+package app
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/PlakarKorp/kloset/caching"
+	"github.com/PlakarKorp/kloset/caching/pebble"
+	"github.com/PlakarKorp/kloset/hashing"
+	"github.com/PlakarKorp/kloset/kcontext"
+	"github.com/PlakarKorp/kloset/logging"
+	"github.com/PlakarKorp/kloset/repository"
+	"github.com/PlakarKorp/kloset/resources"
+	"github.com/PlakarKorp/kloset/storage"
+	"github.com/PlakarKorp/kloset/versioning"
+	"github.com/sirupsen/logrus"
+
+	// Register filesystem storage backend (handles fs:// URIs)
+	_ "github.com/PlakarKorp/integration-fs/exporter"
+	_ "github.com/PlakarKorp/integration-fs/importer"
+	_ "github.com/PlakarKorp/integration-fs/storage"
+)
+
+// defaultCacheDir returns the default Plakar cache directory.
+func defaultCacheDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = os.TempDir()
+	}
+	return filepath.Join(home, ".cache", "infrahub-backup", "plakar")
+}
+
+// initPlakarContext creates and configures a KContext for Plakar operations.
+func initPlakarContext(cfg *PlakarConfig) (*kcontext.KContext, error) {
+	kctx := kcontext.NewKContext()
+
+	hostname, err := os.Hostname()
+	if err != nil {
+		hostname = "unknown"
+	}
+	kctx.Hostname = hostname
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = "/"
+	}
+	kctx.CWD = cwd
+	kctx.MaxConcurrency = 4
+	kctx.Client = "infrahub-backup"
+
+	// Set up logging — route kloset logs through logrus
+	logger := logging.NewLogger(os.Stdout, os.Stderr)
+	kctx.SetLogger(logger)
+
+	// Set up caching with pebble backend
+	cacheDir := cfg.CacheDir
+	if cacheDir == "" {
+		cacheDir = defaultCacheDir()
+	}
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create cache directory %s: %w", cacheDir, err)
+	}
+
+	cacheMgr := caching.NewManager(pebble.Constructor(cacheDir))
+	kctx.SetCache(cacheMgr)
+
+	logrus.Debugf("Initialized Plakar context (cache: %s)", cacheDir)
+	return kctx, nil
+}
+
+// storeConfig builds the storage configuration map for a given repo path.
+// Local paths are prefixed with fs:// for the integration-fs backend.
+func storeConfig(repoPath string) map[string]string {
+	location := repoPath
+	if !strings.Contains(repoPath, "://") {
+		absPath, err := filepath.Abs(repoPath)
+		if err == nil {
+			location = absPath
+		}
+		location = "fs://" + location
+	}
+	return map[string]string{"location": location}
+}
+
+// openOrCreateRepo opens an existing Plakar repository, or creates a new one if it doesn't exist.
+func openOrCreateRepo(kctx *kcontext.KContext, cfg *PlakarConfig) (*repository.Repository, error) {
+	sc := storeConfig(cfg.RepoPath)
+
+	// Try to open existing repository
+	store, configBytes, err := storage.Open(kctx, sc)
+	if err == nil {
+		// Existing repo — open it
+		var secret []byte // plaintext
+		repo, err := repository.New(kctx, secret, store, configBytes)
+		if err != nil {
+			store.Close(kctx.Context)
+			return nil, fmt.Errorf("failed to open plakar repository: %w", err)
+		}
+		logrus.Debugf("Opened existing Plakar repository: %s", cfg.RepoPath)
+		return repo, nil
+	}
+
+	// Repository doesn't exist — create a new one
+	logrus.Infof("Creating new Plakar repository: %s", cfg.RepoPath)
+
+	storageConfig := storage.NewConfiguration()
+	// Plaintext by default — no encryption
+	storageConfig.Encryption = nil
+
+	rawConfigBytes, err := storageConfig.ToBytes()
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize storage configuration: %w", err)
+	}
+
+	// Wrap config bytes with kloset serialization header (magic + version + HMAC)
+	hasher := hashing.GetHasher(hashing.DEFAULT_HASHING_ALGORITHM)
+	wrappedConfigRd, err := storage.Serialize(hasher, resources.RT_CONFIG,
+		versioning.GetCurrentVersion(resources.RT_CONFIG), bytes.NewReader(rawConfigBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to wrap storage configuration: %w", err)
+	}
+	wrappedConfig, err := io.ReadAll(wrappedConfigRd)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read wrapped configuration: %w", err)
+	}
+
+	createdStore, err := storage.Create(kctx, sc, wrappedConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create plakar repository: %w", err)
+	}
+	createdStore.Close(kctx.Context)
+
+	// Re-open to get config bytes for repository.New()
+	sc2 := storeConfig(cfg.RepoPath)
+	store, configBytes, err = storage.Open(kctx, sc2)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open newly created plakar repository: %w", err)
+	}
+
+	var secret []byte // plaintext
+	repo, err := repository.New(kctx, secret, store, configBytes)
+	if err != nil {
+		store.Close(kctx.Context)
+		return nil, fmt.Errorf("failed to initialize plakar repository: %w", err)
+	}
+
+	logrus.Infof("Plakar repository created: %s", cfg.RepoPath)
+	return repo, nil
+}
+
+// closeRepo closes a Plakar repository, logging any errors.
+func closeRepo(repo *repository.Repository) {
+	if repo == nil {
+		return
+	}
+	if err := repo.Close(); err != nil {
+		logrus.Warnf("Failed to close Plakar repository: %v", err)
+	}
+}
+
+// closePlakarContext cleans up a Plakar context (cache manager, cancel).
+func closePlakarContext(kctx *kcontext.KContext) {
+	if kctx == nil {
+		return
+	}
+	cache := kctx.GetCache()
+	if cache != nil {
+		if err := cache.Close(); err != nil {
+			logrus.Warnf("Failed to close Plakar cache: %v", err)
+		}
+	}
+	kctx.Close()
+}

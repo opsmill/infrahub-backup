@@ -15,6 +15,10 @@ import (
 
 // CreateBackup creates a full backup of the Infrahub deployment
 func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeTaskManager bool, s3Upload bool, s3KeepLocal bool, sleepDuration time.Duration, redact bool) (retErr error) {
+	if iops.config.Backend == BackendPlakar {
+		return iops.CreatePlakarBackup(force, neo4jMetadata, excludeTaskManager, sleepDuration, redact)
+	}
+
 	if err := iops.checkPrerequisites(); err != nil {
 		return err
 	}
@@ -185,6 +189,10 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 
 // RestoreBackup restores an Infrahub deployment from a backup archive
 func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager bool, restoreMigrateFormat bool, sleepDuration time.Duration) error {
+	if iops.config.Backend == BackendPlakar {
+		return iops.RestorePlakarBackup(excludeTaskManager, restoreMigrateFormat, sleepDuration)
+	}
+
 	actualBackupFile := backupFile
 
 	// Check if backup file is an S3 URI

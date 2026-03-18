@@ -6,6 +6,8 @@ BUILD_DIR=$(shell pwd)/bin
 SRC_ROOT=./src
 VERSION?=
 LDFLAGS=-ldflags "-X main.version=$(VERSION) -s -w"
+# cockroachdb/swiss (transitive dep of pebble cache) needs this tag for Go 1.26+
+GO_TAGS=-tags untested_go_version
 CGO_ENABLED=0
 
 # Default target
@@ -20,7 +22,7 @@ build: build-watchdog ## Build all CLI binaries for the current platform
 	@mkdir -p $(BUILD_DIR)
 	@for bin in $(BINARIES); do \
 		echo "  $$bin"; \
-		CGO_ENABLED=$(CGO_ENABLED) go build $(LDFLAGS) -o $(BUILD_DIR)/$$bin $(SRC_ROOT)/cmd/$$bin; \
+		CGO_ENABLED=$(CGO_ENABLED) go build $(GO_TAGS) $(LDFLAGS) -o $(BUILD_DIR)/$$bin $(SRC_ROOT)/cmd/$$bin; \
 	done
 	@echo "Binaries available in $(BUILD_DIR)"
 
@@ -39,7 +41,7 @@ build-all: build-watchdog ## Build for multiple platforms
 			EXT=$$( [ "$$OS" = "windows" ] && echo ".exe" ); \
 			OUT=$(BUILD_DIR)/$$bin-$$OS-$$ARCH$$EXT; \
 			echo "  $$bin ($$OS/$$ARCH)"; \
-			CGO_ENABLED=$(CGO_ENABLED) GOOS=$$OS GOARCH=$$ARCH go build $(LDFLAGS) -o "$$OUT" $(SRC_ROOT)/cmd/$$bin; \
+			CGO_ENABLED=$(CGO_ENABLED) GOOS=$$OS GOARCH=$$ARCH go build $(GO_TAGS) $(LDFLAGS) -o "$$OUT" $(SRC_ROOT)/cmd/$$bin; \
 		done; \
 	done
 	@echo "Built binaries are located in $(BUILD_DIR)"
@@ -48,7 +50,7 @@ install: ## Install the binaries to $GOPATH/bin
 	@echo "Installing Infrahub CLI binaries..."
 	@for bin in $(BINARIES); do \
 		echo "  $$bin"; \
-		go install $(LDFLAGS) $(SRC_ROOT)/cmd/$$bin; \
+		go install $(GO_TAGS) $(LDFLAGS) $(SRC_ROOT)/cmd/$$bin; \
 	done
 	@echo "Binaries installed to $(shell go env GOPATH)/bin/"
 
@@ -59,11 +61,11 @@ clean: ## Clean build artifacts
 
 test: ## Run tests
 	@echo "Running tests..."
-	@go test -v ./...
+	@go test $(GO_TAGS) -v ./...
 
 test-coverage: ## Run tests with coverage
 	@echo "Running tests with coverage..."
-	@go test -v -coverprofile=coverage.out ./...
+	@go test $(GO_TAGS) -v -coverprofile=coverage.out ./...
 	@go tool cover -html=coverage.out -o coverage.html
 	@echo "Coverage report generated: coverage.html"
 
@@ -77,7 +79,7 @@ fmt: ## Format Go code
 
 vet: ## Run go vet
 	@echo "Running go vet..."
-	@go vet ./...
+	@go vet $(GO_TAGS) ./...
 
 deps: ## Download dependencies
 	@echo "Downloading dependencies..."

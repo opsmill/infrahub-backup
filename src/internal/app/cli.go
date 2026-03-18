@@ -18,6 +18,10 @@ func ConfigureRootCommand(cmd *cobra.Command, app *InfrahubOps) {
 	cmd.PersistentFlags().StringVar(&cfg.K8sNamespace, "k8s-namespace", cfg.K8sNamespace, "Target Kubernetes namespace")
 	cmd.PersistentFlags().String("log-format", "text", "Log output format: text or json (can also set INFRAHUB_LOG_FORMAT)")
 
+	// Plakar backend flags
+	cmd.PersistentFlags().String("backend", string(BackendTarball), "Backup backend: tarball or plakar")
+	cmd.PersistentFlags().StringVar(&cfg.Plakar.RepoPath, "repo", cfg.Plakar.RepoPath, "Plakar repository path or URI (required when backend=plakar)")
+
 	// S3 configuration flags
 	cmd.PersistentFlags().StringVar(&cfg.S3.Bucket, "s3-bucket", cfg.S3.Bucket, "S3 bucket name for backup storage")
 	cmd.PersistentFlags().StringVar(&cfg.S3.Prefix, "s3-prefix", cfg.S3.Prefix, "S3 key prefix (path within bucket)")
@@ -34,6 +38,8 @@ func ConfigureRootCommand(cmd *cobra.Command, app *InfrahubOps) {
 	bind("backup-dir")
 	bind("k8s-namespace")
 	bind("log-format")
+	bind("backend")
+	bind("repo")
 	bind("s3-bucket")
 	bind("s3-prefix")
 	bind("s3-endpoint")
@@ -52,6 +58,15 @@ func ConfigureRootCommand(cmd *cobra.Command, app *InfrahubOps) {
 		}
 		if viper.IsSet("k8s-namespace") {
 			cfg.K8sNamespace = viper.GetString("k8s-namespace")
+		}
+		if viper.IsSet("backend") {
+			cfg.Backend = BackendType(viper.GetString("backend"))
+		}
+		if viper.IsSet("repo") {
+			cfg.Plakar.RepoPath = viper.GetString("repo")
+		}
+		if viper.IsSet("snapshot") {
+			cfg.Plakar.SnapshotID = viper.GetString("snapshot")
 		}
 		if viper.IsSet("s3-bucket") {
 			cfg.S3.Bucket = viper.GetString("s3-bucket")

@@ -21,6 +21,22 @@ func ReadScript(name string) ([]byte, error) {
 	return scriptsFS.ReadFile("scripts/" + name)
 }
 
+// BackendType selects the backup storage engine.
+type BackendType string
+
+const (
+	BackendTarball BackendType = "tarball"
+	BackendPlakar  BackendType = "plakar"
+)
+
+// PlakarConfig holds Plakar-specific configuration.
+type PlakarConfig struct {
+	RepoPath   string // Repository location (local path or URI like s3://bucket/prefix)
+	CacheDir   string // Local cache directory for dedup state
+	SnapshotID string // Specific snapshot ID for restore (empty = latest)
+	Encrypt    bool   // Opt-in passphrase-based encryption
+}
+
 // Configuration holds the application configuration
 type Configuration struct {
 	BackupDir            string
@@ -33,6 +49,8 @@ type Configuration struct {
 	PostgresPassword     string
 	PostgresDatabase     string
 	S3                   *S3Config
+	Backend              BackendType
+	Plakar               *PlakarConfig
 }
 
 // InfrahubOps is the main application struct
@@ -54,6 +72,8 @@ func NewInfrahubOps() *InfrahubOps {
 		S3: &S3Config{
 			Region: "us-east-1",
 		},
+		Backend: BackendTarball,
+		Plakar:  &PlakarConfig{},
 	}
 	return &InfrahubOps{
 		config:   config,

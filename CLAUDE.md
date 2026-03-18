@@ -257,3 +257,12 @@ The codebase uses explicit error wrapping with `fmt.Errorf` for context. All com
 - Different perspectives or approaches are acknowledged where relevant
 - The content remains focused on explanation without drifting into tutorial or reference material
 - The explanation answers "why" questions, not just "what" or "how"
+
+## Active Technologies
+- Go 1.25.0 (already in go.mod) + kloset (Plakar core library), integration-fs (filesystem storage/exporter), cobra, logrus (002-plakar-integration)
+- Plakar repository (local fs or S3 via integration backends) (002-plakar-integration)
+- Go 1.25.0 (already in go.mod) + `github.com/PlakarKorp/kloset` (core library), `github.com/PlakarKorp/integration-fs` (filesystem storage/importer/exporter), cobra, logrus, viper (002-plakar-integration)
+- Plakar repository (local filesystem via integration-fs, S3 via integration-s3) (002-plakar-integration)
+
+## Recent Changes
+- 002-plakar-integration: Added Go 1.25.0 (already in go.mod) + kloset (Plakar core library), integration-fs (filesystem storage/exporter), cobra, logrus
