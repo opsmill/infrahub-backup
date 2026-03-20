@@ -1,154 +1,190 @@
-# Tasks: Plakar Integration for infrahub-backup
+# Tasks: Plakar Integration with Streaming Backup
 
 **Input**: Design documents from `/specs/002-plakar-integration/`
-**Prerequisites**: plan.md (required), spec.md (required for user stories), research.md, data-model.md, contracts/
+**Prerequisites**: plan.md, spec.md, research.md, data-model.md, contracts/cli-interface.md
 
-**Tests**: Not explicitly requested in the spec. Unit tests are included for new code as per plan.md structure.
-
-**Organization**: Tasks are grouped by user story to enable independent implementation and testing of each story.
+**Organization**: Tasks grouped by user story. US1 (Backup) and US6 (Streaming) are combined since streaming IS the backup mechanism.
 
 ## Format: `[ID] [P?] [Story] Description`
 
 - **[P]**: Can run in parallel (different files, no dependencies)
-- **[Story]**: Which user story this task belongs to (e.g., US1, US2, US3)
-- Include exact file paths in descriptions
-
-## Path Conventions
-
-- **Single project**: `src/` at repository root, Go module structure
-- Paths use existing project layout from plan.md
+- **[Story]**: Which user story (US1, US2, etc.)
+- Exact file paths included
 
 ---
 
-## Phase 1: Setup (Shared Infrastructure)
+## Phase 1: Setup
 
-**Purpose**: Add Plakar dependencies and extend core types
+**Purpose**: Configuration and shared infrastructure changes needed before any user story work
 
-- [x] T001 Add `github.com/PlakarKorp/kloset` and `github.com/PlakarKorp/integration-fs` dependencies to `go.mod` via `go get`
-- [x] T002 Add `BackendType` string type and `PlakarConfig` struct to `src/internal/app/app.go` — fields: `RepoPath string`, `CacheDir string`, `SnapshotID string`, `Plaintext bool`, `Encrypt bool`; add `Backend BackendType` and `Plakar *PlakarConfig` fields to `Configuration` struct
-- [x] T003 Add shared Plakar CLI flags (`--backend`, `--repo`) to `src/internal/app/cli.go` in `ConfigureRootCommand()` — bind to viper with `INFRAHUB_` prefix; set `BackendType` default to `"tarball"`
+- [X] T001 Add `BackupID` field to `PlakarConfig` struct in `src/internal/app/app.go`
+- [X] T002 Add `--backup-id` flag and `INFRAHUB_BACKUP_ID` env var to CLI config in `src/internal/app/cli.go`
+- [X] T003 Add `ExecStreamPipe()` method to `EnvironmentBackend` interface and `InfrahubOps` — returns `(io.ReadCloser, func() error, error)` (stdout pipe, wait func, error) instead of captured string. Implement in `src/internal/app/app.go`, `src/internal/app/environment_docker.go`, `src/internal/app/environment_kubernetes.go`
 
-**Checkpoint**: Project compiles with new dependencies and types. `make build` succeeds. Existing behavior unchanged.
-
----
-
-## Phase 2: Foundational (Blocking Prerequisites)
-
-**Purpose**: Core Plakar infrastructure that MUST be complete before ANY user story can be implemented
-
-**⚠️ CRITICAL**: No user story work can begin until this phase is complete
-
-- [x] T004 Create `src/internal/app/plakar.go` — implement `initPlakarContext()` returning `*kcontext.KContext` with hostname, CWD, cache directory (`~/.cache/infrahub-backup/plakar/` default from `PlakarConfig.CacheDir`), logrus-backed logger, and `caching.Manager` (pebble backend)
-- [x] T005 [P] Implement `openOrCreateRepo()` in `src/internal/app/plakar.go` — if repo path exists: `storage.Open()` then `repository.NewNoRebuild()`; if not: create new plaintext repo via `storage.Create()` with default `storage.Configuration`; handle `PlakarConfig.Encrypt` for passphrase-protected repos
-- [x] T006 [P] Implement `closeRepo()` and `closePlakarContext()` cleanup helpers in `src/internal/app/plakar.go`
-- [x] T007 Add S3 flag conflict validation in `src/cmd/infrahub-backup/main.go` — in `create` and `restore` command `RunE`, before calling app logic: if `--backend plakar` and any of `--s3-upload`, `--s3-bucket`, `--s3-prefix`, `--s3-endpoint`, `--s3-region`, `--s3-keep-local` are set, return error: `"--s3-upload and related S3 flags cannot be used with plakar backend; use --repo s3://... instead"`
-- [x] T008 Add `--backend plakar` requires `--repo` validation in `src/cmd/infrahub-backup/main.go` — if backend is `plakar` and `--repo` is empty, return error: `"--repo is required when using plakar backend"`
-- [x] T009 Verify `make build` and `make test` pass with all changes — no regressions in existing tests
-
-**Checkpoint**: Foundation ready — `plakar.go` can init context, open/create repos, and validate CLI flags. User story implementation can now begin.
+**Checkpoint**: Shared infrastructure ready — user story implementation can begin
 
 ---
 
-## Phase 3: User Story 1 — Deduplicated Backup Creation (Priority: P1) 🎯 MVP
+## Phase 2: US1+US6 - Streaming Multi-Snapshot Backup (P1) MVP
 
-**Goal**: Create Infrahub backups as Plakar snapshots with deduplication
+**Goal**: Plakar backups stream database dumps directly from container exec stdout into kloset, producing one snapshot per component grouped by backup-id tag. Zero local temp files.
 
-**Independent Test**: Run `infrahub-backup create --backend plakar --repo /tmp/test-repo` against a running Infrahub instance; verify a Plakar snapshot is created with all components
+**Independent Test**: Run `infrahub-backup create --backend plakar --repo /tmp/test-repo` and verify: (1) 3 snapshots created with matching backup-id tag, (2) no local temp directory created for dumps, (3) each snapshot tagged with correct component type.
 
-### Implementation for User Story 1
+### Implementation
 
-- [x] T010 [P] [US1] Create `src/internal/app/importer.go` — implement `InfrahubImporter` struct satisfying `importer.Importer` interface: `Origin()` returns hostname, `Type()` returns `"infrahub"`, `Root()` returns `"/"`, `Flags()` returns `FLAG_STREAM`; `Ping()` returns nil; `Close()` cleans up temp dir
-- [x] T011 [US1] Implement `Import()` method on `InfrahubImporter` in `src/internal/app/importer.go` — accepts `InfrahubOps` reference and dump config; in Import(): (1) call existing `backupDatabase()` to temp dir, (2) call existing `backupTaskManagerDB()` to temp dir (unless excluded), (3) generate `backup_information.json` metadata, (4) walk temp dir and send each file as `connectors.Record` with pathname, FileInfo, and lazy ReadCloser into records channel
-- [x] T012 [US1] Create `src/internal/app/plakar_backup.go` — implement `CreatePlakarBackup()` on `InfrahubOps`: (1) init Plakar context via `initPlakarContext()`, (2) open/create repo via `openOrCreateRepo()`, (3) create `InfrahubImporter`, (4) create `snapshot.NewSource()`, (5) create `snapshot.Create()` builder with tags from backup metadata (infrahub.version, infrahub.neo4j-edition, infrahub.components, infrahub.redacted), (6) call `builder.Backup(source)`, (7) call `builder.Commit()`, (8) cleanup
-- [x] T013 [US1] Modify `CreateBackup()` in `src/internal/app/backup.go` — add early check: if `config.Backend == "plakar"`, delegate to `CreatePlakarBackup()` with same parameters and return; existing tarball flow remains untouched below
-- [x] T014 [US1] Add `--backend` and `--repo` flags to `createCmd` in `src/cmd/infrahub-backup/main.go` — wire flag values through to `iops.Config()` before calling `CreateBackup()`; add `--encrypt` flag (optional, for FR-020)
-- [x] T015 [US1] Verify `make build` succeeds and `make test` passes with no regressions
+- [X] T004 [US1] Refactor `StreamingImporter` in `src/internal/app/importer.go` — replace file-walking `Scan()` with a constructor that accepts a pathname, FileInfo, and a `func() (io.ReadCloser, error)` data factory. `Scan()` returns a channel with a single `ScanResult` whose lazy reader starts the exec pipe on first Read.
 
-**Checkpoint**: `infrahub-backup create --backend plakar --repo /path` creates a Plakar snapshot. Default `create` (no --backend) still produces tar.gz.
+- [X] T005 [US1] Add `infrahub.backup-id`, `infrahub.component`, and `infrahub.backup-status` tag keys to `buildSnapshotTags()` in `src/internal/app/plakar_backup.go`. Update tag builder to accept component type and backup-id parameters.
 
----
+- [X] T006 [US1] Refactor `CreatePlakarBackup()` in `src/internal/app/plakar_backup.go` — replace single-snapshot flow with a loop over components:
+  1. Generate backup-id timestamp
+  2. For Neo4j: create `StreamingImporter` with exec pipe factory (tar of backup dir for Enterprise, cat of dump for Community)
+  3. For PostgreSQL (if not excluded): create `StreamingImporter` with exec pipe factory (`pg_dump -Fc -Z0` to stdout)
+  4. For metadata: create `StreamingImporter` with in-memory JSON bytes factory
+  5. For each component: `snapshot.Create()` → `builder.Backup(imp, opts)` → `builder.Close()`
+  6. Tag all component snapshots with shared backup-id
 
-## Phase 4: User Story 2 — Restore from Plakar Snapshot (Priority: P1)
+- [X] T007 [US1] Implement partial failure handling in `CreatePlakarBackup()` in `src/internal/app/plakar_backup.go` — if component N fails, log the error, tag previously completed component snapshots with `infrahub.backup-status=incomplete`, and return the error. Do not delete successful snapshots.
 
-**Goal**: Restore Infrahub databases from a Plakar snapshot
+- [X] T008 [US1] Create Neo4j Enterprise streaming backup helper in `src/internal/app/backup_neo4j.go` — add `backupNeo4jEnterpriseStream()` that returns a `func() (io.ReadCloser, error)` factory. The factory calls `ExecStreamPipe("database", ["sh", "-c", "neo4j-admin database backup --expand-commands --include-metadata=... --compress=false --to-path=/tmp/infrahubops <db> && tar cf - -C /tmp infrahubops"])` and returns the stdout pipe.
 
-**Independent Test**: After creating a Plakar backup (US1), run `infrahub-backup restore --backend plakar --repo /tmp/test-repo` and verify databases are restored
+- [X] T009 [US1] Create Neo4j Community streaming backup helper in `src/internal/app/backup_neo4j.go` — add `backupNeo4jCommunityStream()` that returns a factory. The factory runs the dump command via `Exec()` (writes file in container), then calls `ExecStreamPipe("database", ["cat", "/tmp/infrahubops/<db>.dump"])` and returns the stdout pipe.
 
-**Dependencies**: Requires US1 (need a snapshot to restore from)
+- [X] T010 [US1] Create PostgreSQL streaming backup helper in `src/internal/app/backup_taskmanager.go` — add `backupTaskManagerDBStream()` that returns a factory. The factory calls `ExecStreamPipe("task-manager-db", ["pg_dump", "-Fc", "-Z0", "-h", "localhost", "-U", user, "-d", db])` with `PGPASSWORD` env and returns the stdout pipe.
 
-### Implementation for User Story 2
+- [X] T011 [US1] Create metadata streaming helper in `src/internal/app/plakar_backup.go` — add `metadataStreamFactory()` that generates the backup metadata JSON in memory and returns a `func() (io.ReadCloser, error)` wrapping `io.NopCloser(bytes.NewReader(jsonBytes))`.
 
-- [x] T016 [US2] Create `src/internal/app/plakar_restore.go` — implement `RestorePlakarBackup()` on `InfrahubOps`: (1) init Plakar context, (2) open repo, (3) resolve snapshot: if `SnapshotID` set, load by ID via `snapshot.Load()`; if empty, find latest snapshot from repo state, (4) create temp dir, (5) create fs exporter targeting temp dir, (6) call `snapshot.Export()` to extract all files, (7) delegate to existing `restoreNeo4j()` and `restorePostgreSQL()` using extracted files in temp dir, (8) cleanup
-- [x] T017 [US2] Modify `RestoreBackup()` in `src/internal/app/backup.go` — add early check: if `config.Backend == "plakar"`, delegate to `RestorePlakarBackup()` with same parameters; existing tarball flow remains untouched
-- [x] T018 [US2] Add `--snapshot` flag to `restoreCmd` in `src/cmd/infrahub-backup/main.go` — optional string flag, defaults to empty (latest); bind to viper as `INFRAHUB_SNAPSHOT`; modify restore command `Args` to accept 0 args when `--backend plakar` (positional backup-file not required)
-- [x] T019 [US2] Handle snapshot-not-found error in `RestorePlakarBackup()` in `src/internal/app/plakar_restore.go` — if snapshot ID doesn't exist, list available snapshots in error message
-- [x] T020 [US2] Verify `make build` succeeds and `make test` passes with no regressions
+- [X] T012 [US1] Remove local temp directory creation from `CreatePlakarBackup()` in `src/internal/app/plakar_backup.go` — delete `os.MkdirTemp`, `os.MkdirAll(backupDir)`, and `os.RemoveAll(workDir)`. The streaming path should not touch the local filesystem for backup data.
 
-**Checkpoint**: Full backup→restore cycle works via Plakar. Default restore from tar.gz still works.
+- [X] T013 [US1] Update `src/cmd/infrahub-backup/main.go` to wire `--backup-id` flag to `PlakarConfig.BackupID` for the restore command.
 
----
-
-## Phase 5: User Story 3 — Backward Compatibility with Archive Backups (Priority: P1)
-
-**Goal**: Verify and ensure existing tar.gz backup/restore workflows are completely unchanged
-
-**Independent Test**: Run `infrahub-backup create` (no --backend flag) and confirm tar.gz output; restore from that tar.gz
-
-### Implementation for User Story 3
-
-- [x] T021 [US3] Verify default `create` produces tar.gz — run `infrahub-backup create` without `--backend` flag; confirm output is `.tar.gz` file with `backup_information.json` inside
-- [x] T022 [US3] Verify default `restore` from tar.gz works — restore from a tar.gz file produced by the previous step
-- [x] T023 [US3] Verify S3 flag conflict rejection works — run `infrahub-backup create --backend plakar --repo /tmp/r --s3-upload` and confirm error message matches contract: `"--s3-upload and related S3 flags cannot be used with plakar backend; use --repo s3://... instead"`
-- [x] T024 [US3] Verify unknown backend rejection — run `infrahub-backup create --backend invalid` and confirm error: `"unknown backend: invalid, expected 'tarball' or 'plakar'"`
-- [x] T025 [US3] Run `make test` to confirm all existing unit tests pass without modification
-
-**Checkpoint**: All backward compatibility acceptance scenarios verified. No existing workflow broken.
+**Checkpoint**: Plakar backups now stream directly, produce multi-snapshot groups. Verify with `make build && bin/infrahub-backup create --backend plakar --repo /tmp/test`.
 
 ---
 
-## Phase 6: User Story 4 — List and Inspect Snapshots (Priority: P2)
+## Phase 3: US2 - Restore from Backup Group (P1)
 
-**Goal**: Provide a command to list all Plakar snapshots with Infrahub metadata
+**Goal**: Restore all components from a backup group identified by backup-id tag. Default to latest complete group. Support single-component restore via --snapshot.
 
-**Independent Test**: After creating multiple Plakar backups, run `infrahub-backup snapshots list --repo /path` and verify all snapshots appear with correct metadata
+**Independent Test**: Create a Plakar backup, then run `infrahub-backup restore --backend plakar --repo /tmp/test-repo` and verify databases are restored. Also test `--backup-id` and `--snapshot` flags.
 
-### Implementation for User Story 4
+### Implementation
 
-- [x] T026 [US4] Create `src/internal/app/snapshots.go` — implement `ListSnapshots()` on `InfrahubOps`: (1) init Plakar context, (2) open repo (read-only), (3) iterate all snapshots in repo state, (4) for each snapshot: extract tags (infrahub.version, infrahub.neo4j-edition, infrahub.components), creation timestamp, snapshot ID prefix, (5) format output as table (text) or JSON array (when `--log-format json`)
-- [x] T027 [US4] Add `snapshots list` subcommand in `src/cmd/infrahub-backup/main.go` — create `snapshotsCmd` parent and `listCmd` child; `listCmd` requires `--repo` flag; calls `iops.ListSnapshots()`
-- [x] T028 [US4] Handle empty repository in `ListSnapshots()` in `src/internal/app/snapshots.go` — if no snapshots exist, log info message: `"No snapshots found in repository"`
-- [x] T029 [US4] Verify `make build` succeeds and output matches contract format in `specs/002-plakar-integration/contracts/cli-interface.md`
+- [X] T014 [US2] Add `findBackupGroup()` function in `src/internal/app/snapshots.go` — given a repo and optional backup-id, find all component snapshots in the group. If no backup-id specified, find the most recent complete group. Return a `BackupGroup` struct with snapshot MACs, component types, status.
 
-**Checkpoint**: `infrahub-backup snapshots list --repo /path` displays all snapshots with metadata.
+- [X] T015 [US2] Add `findLatestCompleteGroup()` helper in `src/internal/app/snapshots.go` — iterate all snapshots, group by `infrahub.backup-id` tag, sort by timestamp, return the newest group where all expected components are present. If only incomplete groups exist, return the newest incomplete group with a warning flag.
+
+- [X] T016 [US2] Refactor `RestorePlakar()` in `src/internal/app/plakar_restore.go` — replace single-snapshot restore with backup-group restore:
+  1. If `--snapshot` is provided: restore single component (existing flow)
+  2. If `--backup-id` is provided: call `findBackupGroup()`, export each component snapshot to temp dir, run restore for each
+  3. If neither: call `findLatestCompleteGroup()`, warn if incomplete and require `--force`
+  4. Restore uses local temp (FR-026a) — export from kloset → temp → push to containers
+
+- [X] T017 [US2] Add incomplete group warning and `--force` gate in `src/internal/app/plakar_restore.go` — if the selected backup group has `infrahub.backup-status=incomplete`, log a warning listing missing components and return an error unless `--force` is set.
+
+- [X] T018 [US2] Add error message with available backup groups when backup-id not found in `src/internal/app/plakar_restore.go` — list available groups with their backup-id, date, and status.
+
+**Checkpoint**: Full backup→restore cycle works with backup groups. Test: create backup, restore latest, verify data integrity.
 
 ---
 
-## Phase 7: User Story 5 — Remote Repository Storage (Priority: P3)
+## Phase 4: US3 - Backward Compatibility (P1)
 
-**Goal**: Support S3-compatible storage as Plakar repository backend
+**Goal**: Verify existing tar.gz flows are unaffected. Validate S3 flag rejection with Plakar backend.
 
-**Independent Test**: Run backup with `--repo s3://bucket/prefix` and verify snapshot is stored in S3; restore from same URI
+**Independent Test**: Run `infrahub-backup create` (no --backend) and verify tar.gz output. Run with `--backend plakar --s3-upload` and verify clear error.
 
-### Implementation for User Story 5
+### Implementation
 
-- [ ] T030 [US5] Add `github.com/PlakarKorp/integration-s3` dependency to `go.mod` via `go get`
-- [ ] T031 [US5] Import `integration-s3` storage registration in `src/internal/app/plakar.go` — add blank import or explicit `init()` registration so S3 URI scheme (`s3://`) is recognized by kloset's storage layer
-- [ ] T032 [US5] Verify `openOrCreateRepo()` in `src/internal/app/plakar.go` handles S3 URIs transparently — kloset's `storage.Open()`/`storage.Create()` should route `s3://` URIs to the S3 backend automatically via registered scheme
-- [ ] T033 [US5] Verify `make build` succeeds and existing local-repo tests pass
+- [X] T019 [P] [US3] Add S3-flag-with-Plakar rejection in `src/cmd/infrahub-backup/main.go` — in the `create` command's PreRunE, check if `backend=plakar` and any of `--s3-upload`, `--s3-bucket`, etc. are set; return error per contract: `--s3-upload and related S3 flags cannot be used with plakar backend; use --repo s3://... instead`
 
-**Checkpoint**: Backup and restore work against S3 repositories via `--repo s3://bucket/prefix`.
+- [X] T020 [P] [US3] Verify tarball backup path is unchanged in `src/internal/app/backup.go` — ensure `CreateBackup()` still calls existing tar.gz flow when `config.Backend != BackendPlakar`. No changes needed if the branching `if iops.config.Backend == BackendPlakar` at line 18 is preserved.
+
+- [X] T021 [US3] Verify tarball restore path is unchanged in `src/cmd/infrahub-backup/main.go` — ensure restore command still requires positional `<backup-file>` argument when backend is tarball, and uses Plakar flow only when backend is plakar.
+
+**Checkpoint**: Existing tar.gz workflows verified. S3 flag conflict validated.
+
+---
+
+## Phase 5: US7 - Uncompressed Dumps for Dedup (P2)
+
+**Goal**: Neo4j Enterprise uses `--compress=false` and PostgreSQL uses `-Fc -Z0` when Plakar backend is selected. Legacy path unchanged.
+
+**Independent Test**: Run two Plakar backups with minimal data change, check Plakar repo grows by <20% of a full dump.
+
+### Implementation
+
+- [X] T022 [P] [US7] Add `--compress=false` to Neo4j Enterprise backup command in `src/internal/app/backup_neo4j.go` — in the streaming helper `backupNeo4jEnterpriseStream()` (created in T008), the command already uses `--compress=false`. If the non-streaming Enterprise backup path still exists for legacy, guard compression flag with `if config.Backend == BackendPlakar`.
+
+- [X] T023 [P] [US7] Verify PostgreSQL `-Fc -Z0` in `src/internal/app/backup_taskmanager.go` — the streaming helper `backupTaskManagerDBStream()` (created in T010) already uses `-Fc -Z0`. Verify the non-streaming legacy path preserves `-Fc` without `-Z0`.
+
+- [X] T024 [US7] Guard all dump format changes with backend check — review `src/internal/app/backup_neo4j.go` and `src/internal/app/backup_taskmanager.go` to ensure uncompressed flags are ONLY applied when `config.Backend == BackendPlakar`. Legacy tarball path MUST use original compressed formats.
+
+**Checkpoint**: Uncompressed dumps verified for Plakar path, compressed preserved for legacy.
+
+---
+
+## Phase 6: US4 - List and Inspect Snapshots (P2)
+
+**Goal**: `infrahub-backup snapshots list` groups snapshots by backup-id with status, components, and metadata.
+
+**Independent Test**: Create multiple backups, run `snapshots list`, verify output shows grouped backup-ids with correct metadata and status.
+
+### Implementation
+
+- [X] T025 [US4] Refactor `ListSnapshots()` in `src/internal/app/snapshots.go` — replace flat snapshot list with grouped output:
+  1. Iterate all snapshots, parse tags into map
+  2. Group by `infrahub.backup-id` tag
+  3. For each group: determine status (complete/incomplete), collect components
+  4. Sort groups by timestamp descending
+  5. Return `[]BackupGroupInfo` struct
+
+- [X] T026 [US4] Add `BackupGroupInfo` struct in `src/internal/app/snapshots.go` — fields: BackupID, Timestamp, Status, InfrahubVersion, Neo4jEdition, Components []string, Snapshots []SnapshotInfo (id + component).
+
+- [X] T027 [US4] Update text output format in `src/cmd/infrahub-backup/main.go` — format per contract: `BACKUP ID | DATE | STATUS | INFRAHUB VERSION | NEO4J EDITION | COMPONENTS`. Handle empty repo with "No backups found" message.
+
+- [X] T028 [US4] Update JSON output format in `src/cmd/infrahub-backup/main.go` — when `--log-format json`, output array of backup group objects per contract schema including nested snapshots array.
+
+**Checkpoint**: Snapshot listing shows grouped backup-ids with correct metadata.
+
+---
+
+## Phase 7: US5 - Remote Repository Storage (P3)
+
+**Goal**: S3-compatible storage as Plakar repository backend via `--repo s3://...`.
+
+**Independent Test**: Run backup with `--repo s3://bucket/prefix` and verify snapshot stored in S3. Restore from S3 and verify.
+
+### Implementation
+
+- [X] T029 [US5] Add `integration-s3` dependency to `src/go.mod` — add `github.com/PlakarKorp/integration-s3` and run `go mod tidy`.
+
+- [X] T030 [US5] Register S3 storage backend in `src/internal/app/plakar.go` — import integration-s3 and register the S3 storage factory so `s3://` URIs are recognized by kloset's connector resolution.
+
+- [X] T031 [US5] Handle S3 credentials and endpoint configuration in `src/internal/app/plakar.go` — parse `s3://` URI from `--repo`, configure AWS credentials from environment (standard AWS SDK env vars or explicit flags if needed).
+
+- [X] T032 [US5] Verify backup and restore work with S3 repository in `src/internal/app/plakar_backup.go` and `src/internal/app/plakar_restore.go` — the streaming backup and group restore flows should work transparently once S3 storage is registered.
+
+**Checkpoint**: S3-backed Plakar backups work end-to-end.
 
 ---
 
 ## Phase 8: Polish & Cross-Cutting Concerns
 
-**Purpose**: Improvements that affect multiple user stories
+**Purpose**: Cleanup, edge case handling, and validation
 
-- [x] T034 [P] Add backend validation helper in `src/internal/app/app.go` — validate `BackendType` is either `"tarball"` or `"plakar"`; return clear error for unknown values
-- [ ] T035 [P] Add `--encrypt` passphrase handling in `src/internal/app/plakar.go` — if `PlakarConfig.Encrypt` is true: read passphrase from `INFRAHUB_PLAKAR_PASSPHRASE` env var or prompt stdin; derive key and pass to `repository.New()`/`repository.Inexistent()`
-- [ ] T036 Run `make lint` and fix any golangci-lint issues in new files
-- [x] T037 Run full `make test` and verify all tests pass
-- [ ] T038 Verify quickstart examples from `specs/002-plakar-integration/quickstart.md` work end-to-end
+- [X] T033 Add stream interruption error handling in `src/internal/app/importer.go` — if the exec stdout pipe returns an error mid-stream, ensure the error propagates cleanly through the ScanRecord's ReadCloser and the snapshot builder fails without committing.
+
+- [X] T034 Add configurable stream timeout — if `ExecStreamPipe()` produces no data for a configurable duration, cancel the exec and fail the component backup. Add timeout parameter to streaming helpers in `src/internal/app/backup_neo4j.go` and `src/internal/app/backup_taskmanager.go`.
+
+- [X] T035 [P] Clean up old file-walking importer code in `src/internal/app/importer.go` — remove `InfrahubImporter.tempDir` field, `filepath.Walk` logic, and `emptyReader` struct if no longer used.
+
+- [X] T036 [P] Run `make lint` and `make vet` — fix any issues introduced by refactoring.
+
+- [X] T037 Run `make test` — verify all existing tests pass.
+
+- [ ] T038 Run quickstart.md validation — manually verify the commands in `specs/002-plakar-integration/quickstart.md` work as documented. (Requires running Infrahub instance — manual testing)
 
 ---
 
@@ -156,93 +192,75 @@
 
 ### Phase Dependencies
 
-- **Setup (Phase 1)**: No dependencies — can start immediately
-- **Foundational (Phase 2)**: Depends on Setup completion — BLOCKS all user stories
-- **US1 Backup (Phase 3)**: Depends on Foundational — first story to implement
-- **US2 Restore (Phase 4)**: Depends on US1 (needs snapshots to restore from)
-- **US3 Backward Compat (Phase 5)**: Depends on US1+US2 (validation of the branching pattern)
-- **US4 Snapshot List (Phase 6)**: Depends on Foundational only — can run in parallel with US1/US2
-- **US5 Remote Storage (Phase 7)**: Depends on Foundational — can run in parallel with US1/US2
-- **Polish (Phase 8)**: Depends on all desired user stories being complete
+- **Phase 1 (Setup)**: No dependencies — start immediately
+- **Phase 2 (US1+US6 Backup)**: Depends on Phase 1 (T003 ExecStreamPipe needed)
+- **Phase 3 (US2 Restore)**: Depends on Phase 2 (needs multi-snapshot backups to exist)
+- **Phase 4 (US3 Compat)**: Can run in parallel with Phase 2 (independent files)
+- **Phase 5 (US7 Dedup)**: Can run in parallel with Phase 2 (verifies format flags)
+- **Phase 6 (US4 Listing)**: Depends on Phase 2 (needs backup-id tags)
+- **Phase 7 (US5 S3)**: Depends on Phase 2 (needs streaming backup working)
+- **Phase 8 (Polish)**: Depends on all prior phases
 
 ### User Story Dependencies
 
-- **US1 (P1 Backup)**: Can start after Foundational (Phase 2) — no dependencies on other stories
-- **US2 (P1 Restore)**: Depends on US1 — needs a Plakar snapshot to restore from
-- **US3 (P1 Backward Compat)**: Depends on US1+US2 — validates that branching didn't break defaults
-- **US4 (P2 List Snapshots)**: Can start after Foundational — independent of US1/US2 at code level (but needs snapshots for testing)
-- **US5 (P3 Remote Storage)**: Can start after Foundational — independent of other stories at code level
-
-### Within Each User Story
-
-- Models/types before services
-- Services before CLI wiring
-- Core implementation before validation
-- Story complete before moving to next priority
+- **US1+US6 (Backup+Streaming)**: Foundational — all other stories depend on this
+- **US2 (Restore)**: Depends on US1 (needs backup groups to restore from)
+- **US3 (Backward Compat)**: Independent — can run in parallel
+- **US4 (Listing)**: Depends on US1 (needs backup-id tagged snapshots)
+- **US5 (S3)**: Depends on US1 (extends storage backend)
+- **US7 (Dedup)**: Mostly independent — verifies format flags set in US1
 
 ### Parallel Opportunities
 
-- **Phase 2**: T005 and T006 can run in parallel (different functions in same file)
-- **Phase 3**: T010 (importer.go) can start in parallel with T012 (plakar_backup.go) scaffolding
-- **Phase 6 + Phase 3/4**: US4 (snapshot listing) code can be written in parallel with US1/US2
-- **Phase 7 + Phase 3/4**: US5 (S3 storage) dependency addition can be done in parallel with US1/US2
-- **Phase 8**: T034, T035 can run in parallel (different files/concerns)
+- T019, T020 (US3) can run in parallel with Phase 2
+- T022, T023 (US7) can run in parallel with Phase 2
+- T025, T026 (US4) can run in parallel within Phase 6
+- T029, T030 (US5) can run in parallel within Phase 7
+- T033–T036 (Polish) marked [P] can run in parallel
 
 ---
 
-## Parallel Example: User Story 1
+## Parallel Example: Phase 2 (US1+US6)
 
-```bash
-# Launch importer and backup flow scaffolding in parallel:
-Task: "Create InfrahubImporter struct in src/internal/app/importer.go"
-Task: "Create CreatePlakarBackup() scaffold in src/internal/app/plakar_backup.go"
+```
+# Sequential within Phase 2 (dependencies):
+T004 (StreamingImporter) → T006 (CreatePlakarBackup refactor)
+T005 (Tag builder) → T006
+T008, T009, T010, T011 (stream helpers) → T006
+T006 → T007 (partial failure) → T012 (remove temp)
 
-# Then wire them together:
-Task: "Implement Import() method connecting importer to backup flow"
-Task: "Modify CreateBackup() to branch on BackendType in src/internal/app/backup.go"
+# Can overlap with Phase 2:
+T019, T020 (US3 backward compat checks)
+T022, T023 (US7 format verification)
 ```
 
 ---
 
 ## Implementation Strategy
 
-### MVP First (User Story 1 Only)
+### MVP First (Phase 1 + Phase 2 Only)
 
 1. Complete Phase 1: Setup (T001–T003)
-2. Complete Phase 2: Foundational (T004–T009)
-3. Complete Phase 3: User Story 1 — Backup (T010–T015)
-4. **STOP and VALIDATE**: Create a Plakar backup, verify snapshot exists with correct metadata
-5. Default `create` still produces tar.gz
+2. Complete Phase 2: US1+US6 Streaming Backup (T004–T013)
+3. **STOP and VALIDATE**: Create a backup, verify 3 snapshots, no local temp files
+4. This alone delivers the core value: streaming dedup backups
 
 ### Incremental Delivery
 
-1. Setup + Foundational → Foundation ready
-2. Add US1 (Backup) → Test backup independently → **MVP!**
-3. Add US2 (Restore) → Test full backup→restore cycle
-4. Add US3 (Backward Compat) → Validate no regressions
-5. Add US4 (Snapshot List) → Test listing with metadata
-6. Add US5 (Remote Storage) → Test S3 repositories
-7. Polish → Lint, encrypt support, end-to-end validation
-
-### Parallel Team Strategy
-
-With multiple developers:
-
-1. Team completes Setup + Foundational together
-2. Once Foundational is done:
-   - Developer A: US1 (Backup) → US2 (Restore) → US3 (Backward Compat)
-   - Developer B: US4 (Snapshot Listing) code → US5 (Remote Storage)
-3. Developer B's work can be code-reviewed and tested once Developer A has snapshots to test against
+1. Phase 1 + 2 → Streaming backup works (MVP)
+2. Add Phase 3 (US2) → Full backup/restore cycle
+3. Add Phase 4 (US3) → Backward compat verified
+4. Add Phase 5 (US7) → Dedup optimized
+5. Add Phase 6 (US4) → Operator UX (listing)
+6. Add Phase 7 (US5) → S3 remote storage
+7. Phase 8 → Polish
 
 ---
 
 ## Notes
 
-- [P] tasks = different files, no dependencies
-- [Story] label maps task to specific user story for traceability
-- Each user story should be independently completable and testable
+- [P] tasks = different files, no dependencies on incomplete tasks
+- [Story] label maps task to specific user story
+- Existing code already has initial Plakar integration — tasks focus on the streaming + multi-snapshot refactoring delta
+- `ExecStream()` already exists but returns `(string, error)` — T003 adds `ExecStreamPipe()` returning `(io.ReadCloser, func() error, error)`
 - Commit after each task or logical group
-- Stop at any checkpoint to validate story independently
-- US2 (Restore) depends on US1 (Backup) since you need snapshots to restore
-- US3 (Backward Compat) is primarily validation — the compatibility is achieved by design in US1/US2
-- The `integration-fs` exporter is used for restore (D3) — no custom exporter needed

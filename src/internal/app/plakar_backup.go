@@ -3,8 +3,8 @@ package app
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -14,7 +14,14 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// CreatePlakarBackup creates an Infrahub backup as a Plakar snapshot.
+// componentBackup holds the result of a single component snapshot creation.
+type componentBackup struct {
+	component string
+	mac       objects.MAC
+}
+
+// CreatePlakarBackup creates an Infrahub backup as multiple Plakar snapshots (one per component),
+// streaming database dumps directly from container exec stdout into kloset.
 func (iops *InfrahubOps) CreatePlakarBackup(force bool, neo4jMetadata string, excludeTaskManager bool, sleepDuration time.Duration, redact bool) error {
 	if err := iops.checkPrerequisites(); err != nil {
 		return err
@@ -75,55 +82,14 @@ func (iops *InfrahubOps) CreatePlakarBackup(force bool, neo4jMetadata string, ex
 		}()
 	}
 
-	// Create temp directory for database dumps
-	workDir, err := os.MkdirTemp("", "infrahub_plakar_backup_*")
-	if err != nil {
-		return fmt.Errorf("failed to create temp directory: %w", err)
-	}
-	defer os.RemoveAll(workDir)
-
-	backupDir := filepath.Join(workDir, "backup")
-	if err := os.MkdirAll(backupDir, 0755); err != nil {
-		return fmt.Errorf("failed to create backup directory: %w", err)
-	}
+	// Generate backup-id timestamp
+	backupID := time.Now().Format("20060102_150405")
 
 	logrus.WithFields(logrus.Fields{
 		"repo":          iops.config.Plakar.RepoPath,
 		"neo4j_edition": editionInfo.Edition,
-	}).Info("Creating Plakar backup")
-
-	// Dump databases to temp directory
-	if err := iops.backupDatabase(backupDir, neo4jMetadata, editionInfo.Edition); err != nil {
-		return err
-	}
-
-	if !excludeTaskManager {
-		if err := iops.backupTaskManagerDB(backupDir); err != nil {
-			return err
-		}
-	} else {
-		logrus.Info("Skipping task manager database backup as requested")
-	}
-
-	// Generate backup metadata
-	backupID := fmt.Sprintf("infrahub_backup_%s", time.Now().Format("20060102_150405"))
-	metadata := iops.createBackupMetadata(backupID, !excludeTaskManager, version, editionInfo.Edition)
-	if redact {
-		metadata.Redacted = true
-	}
-
-	// Write metadata JSON into the dump directory
-	metadataBytes, err := json.MarshalIndent(metadata, "", "    ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal metadata: %w", err)
-	}
-	metadataDir := filepath.Join(backupDir, "metadata")
-	if err := os.MkdirAll(metadataDir, 0755); err != nil {
-		return fmt.Errorf("failed to create metadata directory: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(metadataDir, "backup_information.json"), metadataBytes, 0644); err != nil {
-		return fmt.Errorf("failed to write metadata: %w", err)
-	}
+		"backup_id":     backupID,
+	}).Info("Creating Plakar streaming backup")
 
 	// Initialize Plakar context and repository
 	kctx, err := initPlakarContext(iops.config.Plakar)
@@ -138,35 +104,102 @@ func (iops *InfrahubOps) CreatePlakarBackup(force bool, neo4jMetadata string, ex
 	}
 	defer closeRepo(repo)
 
-	// Create snapshot builder
-	builder, err := snapshot.Create(repo, repository.DefaultType, os.TempDir(), objects.NilMac)
-	if err != nil {
-		return fmt.Errorf("failed to create plakar snapshot: %w", err)
+	hostname := kctx.Hostname
+
+	// Build component list
+	components := []string{ComponentNeo4j}
+	if !excludeTaskManager {
+		components = append(components, ComponentPostgres)
 	}
-	defer builder.Close()
+	components = append(components, ComponentMetadata)
 
-	// Build snapshot tags from metadata
-	tags := buildSnapshotTags(metadata)
+	// Track completed snapshots for partial failure handling
+	var completed []componentBackup
 
-	// Create importer from the dump directory
-	hostname, _ := os.Hostname()
-	imp := NewInfrahubImporter(hostname, backupDir)
-
-	// Run the backup
-	opts := &snapshot.BackupOptions{
-		Name: backupID,
-		Tags: tags,
+	// Generate backup metadata for the metadata component
+	metadataObj := iops.createBackupMetadata(
+		fmt.Sprintf("infrahub_backup_%s", backupID),
+		!excludeTaskManager, version, editionInfo.Edition,
+	)
+	if redact {
+		metadataObj.Redacted = true
 	}
+	// Override components to use Plakar naming (neo4j, postgres, metadata)
+	// instead of the tarball naming (database, task-manager-db) from createBackupMetadata
+	metadataObj.Components = components
 
-	logrus.Info("Creating Plakar snapshot...")
-	if err := builder.Backup(imp, opts); err != nil {
-		return fmt.Errorf("failed to create plakar snapshot: %w", err)
+	// Create one snapshot per component
+	for _, component := range components {
+		logrus.Infof("Creating snapshot for component: %s", component)
+
+		var imp *StreamingImporter
+		switch component {
+		case ComponentNeo4j:
+			dataFunc, err := iops.neo4jStreamFactory(editionInfo.Edition, neo4jMetadata)
+			if err != nil {
+				logIncompleteBackup(completed, len(components), backupID)
+				return fmt.Errorf("failed to prepare neo4j stream: %w", err)
+			}
+			now := time.Now()
+			fi := objects.NewFileInfo("/neo4j-backup.tar", 0, 0644, now, 0, 0, 0, 0, 0)
+			if editionInfo.IsCommunity {
+				fi = objects.NewFileInfo("/neo4j.dump", 0, 0644, now, 0, 0, 0, 0, 0)
+			}
+			imp = NewStreamingImporter(hostname, fi.Name(), fi, dataFunc)
+
+		case ComponentPostgres:
+			dataFunc, err := iops.postgresStreamFactory()
+			if err != nil {
+				logIncompleteBackup(completed, len(components), backupID)
+				return fmt.Errorf("failed to prepare postgres stream: %w", err)
+			}
+			now := time.Now()
+			fi := objects.NewFileInfo("/prefect.dump", 0, 0644, now, 0, 0, 0, 0, 0)
+			imp = NewStreamingImporter(hostname, "/prefect.dump", fi, dataFunc)
+
+		case ComponentMetadata:
+			metadataBytes, err := json.MarshalIndent(metadataObj, "", "    ")
+			if err != nil {
+				logIncompleteBackup(completed, len(components), backupID)
+				return fmt.Errorf("failed to marshal metadata: %w", err)
+			}
+			imp = NewMemoryImporter(hostname, "/backup_information.json", metadataBytes)
+		}
+
+		// Create snapshot
+		tags := buildSnapshotTags(metadataObj, component, backupID, StatusComplete)
+		builder, err := snapshot.Create(repo, repository.DefaultType, os.TempDir(), objects.NilMac)
+		if err != nil {
+			logIncompleteBackup(completed, len(components), backupID)
+			return fmt.Errorf("failed to create snapshot for %s: %w", component, err)
+		}
+
+		opts := &snapshot.BackupOptions{
+			Name: fmt.Sprintf("%s_%s", backupID, component),
+			Tags: tags,
+		}
+
+		if err := builder.Backup(imp, opts); err != nil {
+			builder.Close()
+			logIncompleteBackup(completed, len(components), backupID)
+			return fmt.Errorf("streaming backup failed for %s: %w", component, err)
+		}
+
+		mac := builder.Header.Identifier
+		builder.Close()
+
+		completed = append(completed, componentBackup{component: component, mac: mac})
+		logrus.WithFields(logrus.Fields{
+			"component":   component,
+			"snapshot_id": fmt.Sprintf("%x", mac[:8]),
+		}).Info("Component snapshot created")
 	}
 
 	logrus.WithFields(logrus.Fields{
-		"snapshot_id": fmt.Sprintf("%x", builder.Header.Identifier[:8]),
-		"repo":        iops.config.Plakar.RepoPath,
-	}).Info("Plakar backup created successfully")
+		"backup_id":  backupID,
+		"components": len(completed),
+		"repo":       iops.config.Plakar.RepoPath,
+	}).Info("Plakar streaming backup completed successfully")
 
 	// Sleep if requested
 	if sleepDuration > 0 {
@@ -177,16 +210,49 @@ func (iops *InfrahubOps) CreatePlakarBackup(force bool, neo4jMetadata string, ex
 	return nil
 }
 
-// buildSnapshotTags creates Plakar snapshot tags from backup metadata.
-func buildSnapshotTags(metadata *BackupMetadata) []string {
+// neo4jStreamFactory returns a data factory for streaming Neo4j backup data.
+func (iops *InfrahubOps) neo4jStreamFactory(edition string, backupMetadata string) (func() (io.ReadCloser, error), error) {
+	switch strings.ToLower(edition) {
+	case neo4jEditionCommunity:
+		return iops.backupNeo4jCommunityStream()
+	default:
+		return iops.backupNeo4jEnterpriseStream(backupMetadata)
+	}
+}
+
+// postgresStreamFactory returns a data factory for streaming PostgreSQL backup data.
+func (iops *InfrahubOps) postgresStreamFactory() (func() (io.ReadCloser, error), error) {
+	return iops.backupTaskManagerDBStream()
+}
+
+// logIncompleteBackup warns about a partial backup failure.
+// Note: kloset doesn't support modifying tags after snapshot creation,
+// so the group's incomplete status is derived at query time from missing components.
+func logIncompleteBackup(completed []componentBackup, totalExpected int, backupID string) {
+	if len(completed) == 0 {
+		return
+	}
+	names := make([]string, len(completed))
+	for i, c := range completed {
+		names[i] = c.component
+	}
+	logrus.Warnf("Backup group %s is incomplete (%d/%d components created: %s)",
+		backupID, len(completed), totalExpected, strings.Join(names, ", "))
+}
+
+// buildSnapshotTags creates Plakar snapshot tags for a component snapshot.
+func buildSnapshotTags(metadata *BackupMetadata, component, backupID, status string) []string {
 	tags := []string{
-		"infrahub.version=" + metadata.InfrahubVersion,
-		"infrahub.backup-tool-version=" + metadata.ToolVersion,
-		"infrahub.neo4j-edition=" + metadata.Neo4jEdition,
-		"infrahub.components=" + strings.Join(metadata.Components, ","),
+		TagBackupID + "=" + backupID,
+		TagComponent + "=" + component,
+		TagBackupStatus + "=" + status,
+		TagVersion + "=" + metadata.InfrahubVersion,
+		TagToolVersion + "=" + metadata.ToolVersion,
+		TagNeo4jEdition + "=" + metadata.Neo4jEdition,
+		TagComponents + "=" + strings.Join(metadata.Components, ","),
 	}
 	if metadata.Redacted {
-		tags = append(tags, "infrahub.redacted=true")
+		tags = append(tags, TagRedacted+"=true")
 	}
 	return tags
 }

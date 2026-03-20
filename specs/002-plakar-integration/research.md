@@ -78,28 +78,30 @@ Registration uses URI scheme mapping: `importer.Register("infrahub", flags, fact
 - Using fs importer directly (back up temp dir): Simpler but loses control over the data flow and requires writing full dumps to disk first, then re-reading them
 - Single combined connector: Not possible; Plakar architecture separates import/export
 
-## R3: Backup Data Flow
+## R3: Backup Data Flow (Streaming Architecture)
 
-**Decision**: Generate database dumps to temp files, then produce Plakar Records pointing to those files.
+**Decision**: Stream database dumps directly from container exec stdout into Plakar snapshots. Create one snapshot per component (Neo4j, PostgreSQL, metadata) grouped by a shared backup-id tag.
 
-**Rationale**: The backup flow is:
-1. Initialize `kcontext.KContext` with hostname, CWD, cache dir, logger
-2. Open or create repository: `storage.Open()` → `repository.NewNoRebuild()`
-3. Create importer (our custom Infrahub importer)
-4. Create source: `snapshot.NewSource(ctx, flags, importers...)`
-5. Create snapshot builder: `snapshot.Create(repo, type, tmpDir, nilMac, options)`
-6. Execute: `builder.Backup(source)` — importer sends Records through channel
-7. Commit: `builder.Commit()` — persists snapshot
+**Rationale**: The kloset importer interface supports streaming natively. `NewScanRecord` accepts a lazy `func() (io.ReadCloser, error)` that is only called when data is needed. This function can return an exec stdout pipe instead of a file handle.
 
-Our custom importer's `Import()` method will:
-1. Execute Neo4j backup (via existing `backupDatabase()` to temp dir)
-2. Execute PostgreSQL dump (via existing `backupTaskManagerDB()` to temp dir)
-3. Generate metadata JSON
-4. Send each file as a `connectors.Record` with pathname, FileInfo, and ReadCloser
+The backup flow per component:
+1. Initialize `kcontext.KContext` and open/create repository (once)
+2. For each component (Neo4j, PostgreSQL, metadata):
+   a. Create a dedicated importer that returns a single ScanRecord
+   b. The ScanRecord's data function starts the exec command and returns stdout
+   c. Create snapshot builder: `snapshot.Create(repo, ...)`
+   d. Execute: `builder.Backup(imp, opts)` with backup-id and component tags
+   e. Close builder (commits snapshot)
+
+Streaming patterns per component:
+- **Neo4j Enterprise**: `exec database neo4j-admin database backup --compress=false --to-path=/tmp/x && tar cf - -C /tmp x` → stdout
+- **Neo4j Community**: `exec database neo4j-admin database dump --to-path=/tmp/x && cat /tmp/x/<db>.dump` → stdout
+- **PostgreSQL**: `exec task-manager-db pg_dump -Fc -Z0 -U user -d db` → stdout (streams directly, no intermediate files on host)
+- **Metadata**: Generated in-memory as JSON bytes, wrapped in `io.NopCloser(bytes.NewReader(...))`
 
 **Alternatives considered**:
-- Streaming directly from docker exec: More complex, requires FLAG_STREAM/FLAG_NEEDACK, higher risk of partial data
-- Using fs importer on temp dir: Simpler but doesn't allow custom metadata or control over what's included
+- Temp files then import (original R3): Works but defeats the purpose of streaming — duplicates data on local disk
+- Single snapshot with all components: Harder to stream multiple exec commands into one importer; multi-snapshot is cleaner and enables partial recovery
 
 ## R4: Restore Data Flow
 
@@ -175,3 +177,66 @@ infrahub-backup snapshots list --repo /path/to/repo
 **Alternatives considered**:
 - Silent ignore: Rejected because operators may assume their S3 upload is happening when it's not.
 - Allow both (Plakar local + S3 upload): Rejected because it defeats the purpose of Plakar's native S3 support and creates redundant storage.
+
+## R10: Streaming Importer Interface Compatibility
+
+**Decision**: The kloset importer interface natively supports streaming from exec stdout. No special flags or modifications needed.
+
+**Rationale**: Research of kloset v1.0.13 source confirms:
+- `importer.NewScanRecord()` accepts a `func() (io.ReadCloser, error)` wrapped in `LazyReader`
+- The function is only called when `Read()` is first invoked on the record
+- This means the closure can start an exec command and return its stdout pipe
+- Multiple ScanRecords can be sent sequentially on the channel from different exec sources
+- The `Scan()` method returns `<-chan *importer.ScanResult` — we control the goroutine
+- `importer.Options` has `Stdin/Stdout/Stderr` fields (msgpack-excluded) available for implementations
+
+No changes to kloset are required.
+
+**Alternatives considered**:
+- Custom streaming connector bypassing importer interface: Unnecessary — the standard interface already supports this pattern
+
+## R11: Multi-Snapshot Per Backup and Tag-Based Querying
+
+**Decision**: Create sequential snapshots per component using the same repository handle. Use `key=value` tags for grouping and client-side filtering.
+
+**Rationale**:
+- Sequential calls to `snapshot.Create()` / `builder.Backup()` / `builder.Close()` on the same repo work correctly. Each gets a unique `Identifier` via `objects.RandomMAC()`.
+- Tags are stored as `[]string` in `snapshot.Header.Tags`, set via `BackupOptions.Tags`
+- Tag convention: `infrahub.backup-id=<timestamp>`, `infrahub.component=neo4j|postgres|metadata`, `infrahub.backup-status=complete|incomplete`
+- Querying: kloset has no built-in tag filter API. Must iterate `repo.ListSnapshots()`, load each snapshot, check `snap.Header.HasTag(tag)`. Headers are cached so repeated loads are fast.
+- Grouping for listing: load all snapshots, parse tags into map, group by `infrahub.backup-id`
+
+**Alternatives considered**:
+- Single snapshot with all components: Can't easily stream multiple exec commands into one importer; also prevents independent component restore
+- External metadata store (SQLite index): Over-engineering — snapshot count is small enough for linear scan
+
+## R12: Neo4j Backup Compression Control
+
+**Decision**: Use `--compress=false` for Enterprise Edition. Community Edition dump is already uncompressed.
+
+**Rationale**:
+- Enterprise `neo4j-admin database backup` supports `--compress[=true|false]` (default: true)
+- Adding `--compress=false` to the existing backup command produces uncompressed backup artifacts
+- Output format: still backup artifact files in a directory, just uncompressed
+- Community `neo4j-admin database dump` has no `--compress` flag — the `.dump` file is not inherently compressed
+- For streaming: Enterprise backup dir → `tar cf -` inside container → stdout; Community dump file → `cat` inside container → stdout
+
+**Alternatives considered**:
+- External decompression on host: Defeats streaming purpose
+- Accept compressed dumps with reduced dedup: Undermines Plakar's core value proposition
+
+## R13: PostgreSQL Dump Format for Streaming + Dedup
+
+**Decision**: Use `-Fc -Z0` (custom format, no compression) instead of the originally planned `-Fd` (directory format).
+
+**Rationale**: Research revealed that `-Fd` (directory format) **cannot stream to stdout** — it requires writing multiple files to a directory path. This makes it incompatible with the streaming architecture. `-Fc -Z0` is strictly better because:
+- Streams to stdout directly (single binary stream)
+- Internal per-table structure preserves table boundaries for Plakar's content-defined chunking
+- `-Z0` disables compression so Plakar handles dedup on raw data
+- Restores with `pg_restore` (not `psql`) — no change to restore path
+- Simpler pipeline: `exec task-manager-db pg_dump -Fc -Z0 -U user -d db` → pipe to kloset importer
+
+**Alternatives considered**:
+- `-Fd` with tar wrapper: Can't stream to stdout, requires two-step (dump dir + tar); adds complexity
+- `-Fp` (plain SQL): Streams to stdout but produces monolithic SQL; worse dedup than `-Fc` internal structure; requires `psql` instead of `pg_restore` for restore
+- `-Fc` with default compression: Streams to stdout but compressed output defeats dedup

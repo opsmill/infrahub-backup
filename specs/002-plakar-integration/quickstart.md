@@ -9,13 +9,16 @@
 
 ```bash
 # First backup — repository is created automatically
+# Streams directly from containers into kloset (no local temp files)
 infrahub-backup create --backend plakar --repo /var/backups/infrahub
 
 # Subsequent backups — deduplicated against existing snapshots
 infrahub-backup create --backend plakar --repo /var/backups/infrahub
 ```
 
-## List Available Snapshots
+Each backup creates one snapshot per component (Neo4j, PostgreSQL, metadata), grouped by a backup-id.
+
+## List Available Backups
 
 ```bash
 infrahub-backup snapshots list --repo /var/backups/infrahub
@@ -23,18 +26,21 @@ infrahub-backup snapshots list --repo /var/backups/infrahub
 
 Output:
 ```
-SNAPSHOT ID    DATE                  INFRAHUB VERSION  COMPONENTS
-a3f2b1c8      2026-03-18 14:30:00   1.2.0            neo4j, task-manager-db
-e7d9a4f1      2026-03-17 02:00:00   1.2.0            neo4j, task-manager-db
+BACKUP ID            DATE                  STATUS      INFRAHUB VERSION  NEO4J EDITION  COMPONENTS
+20260318_143000      2026-03-18 14:30:00   complete    1.2.0            enterprise     neo4j, postgres, metadata
+20260317_020000      2026-03-17 02:00:00   complete    1.2.0            enterprise     neo4j, postgres, metadata
 ```
 
-## Restore from a Snapshot
+## Restore from a Backup
 
 ```bash
-# Restore the latest snapshot
+# Restore the latest complete backup group
 infrahub-backup restore --backend plakar --repo /var/backups/infrahub
 
-# Restore a specific snapshot
+# Restore a specific backup group
+infrahub-backup restore --backend plakar --repo /var/backups/infrahub --backup-id 20260318_143000
+
+# Restore a single component (partial recovery)
 infrahub-backup restore --backend plakar --repo /var/backups/infrahub --snapshot a3f2b1c8
 ```
 

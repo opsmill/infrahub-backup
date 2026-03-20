@@ -188,9 +188,9 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 }
 
 // RestoreBackup restores an Infrahub deployment from a backup archive
-func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager bool, restoreMigrateFormat bool, sleepDuration time.Duration) error {
+func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager bool, restoreMigrateFormat bool, sleepDuration time.Duration, force bool) error {
 	if iops.config.Backend == BackendPlakar {
-		return iops.RestorePlakarBackup(excludeTaskManager, restoreMigrateFormat, sleepDuration)
+		return iops.RestorePlakarBackup(excludeTaskManager, restoreMigrateFormat, sleepDuration, force)
 	}
 
 	actualBackupFile := backupFile

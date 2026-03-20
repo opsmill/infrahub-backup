@@ -101,7 +101,6 @@ func main() {
 	createCmd.Flags().BoolVar(&s3Upload, "s3-upload", false, "Upload backup to S3 after creation")
 	createCmd.Flags().BoolVar(&s3KeepLocal, "s3-keep-local", false, "Keep local backup file after successful S3 upload (default: delete local file)")
 	createCmd.Flags().DurationVar(&sleepDuration, "sleep", 0, "Sleep duration after backup creation (e.g., 5m, 300s) for manual file transfer")
-	createCmd.Flags().Bool("encrypt", false, "Enable passphrase-based encryption for Plakar repository (reads INFRAHUB_PLAKAR_PASSPHRASE or prompts)")
 
 	// Bind create flags to Viper for environment variable support (INFRAHUB_<FLAG_NAME>)
 	viper.BindPFlag("force", createCmd.Flags().Lookup("force"))
@@ -111,7 +110,6 @@ func main() {
 	viper.BindPFlag("s3-upload", createCmd.Flags().Lookup("s3-upload"))
 	viper.BindPFlag("s3-keep-local", createCmd.Flags().Lookup("s3-keep-local"))
 	viper.BindPFlag("sleep", createCmd.Flags().Lookup("sleep"))
-	viper.BindPFlag("encrypt", createCmd.Flags().Lookup("encrypt"))
 
 	// Undocumented subcommand: create from-files
 	fromFilesCmd := &cobra.Command{
@@ -148,17 +146,17 @@ func main() {
 			if err := validateBackendFlags(iops); err != nil {
 				return err
 			}
+			forceRestore, _ := cmd.Flags().GetBool("force")
 			if iops.Config().Backend == app.BackendPlakar {
-				return iops.RestoreBackup("", restoreExcludeTaskManagerDB, restoreMigrateFormat, restoreSleepDuration)
+				return iops.RestoreBackup("", restoreExcludeTaskManagerDB, restoreMigrateFormat, restoreSleepDuration, forceRestore)
 			}
-			return iops.RestoreBackup(args[0], restoreExcludeTaskManagerDB, restoreMigrateFormat, restoreSleepDuration)
+			return iops.RestoreBackup(args[0], restoreExcludeTaskManagerDB, restoreMigrateFormat, restoreSleepDuration, forceRestore)
 		},
 	}
 	restoreCmd.Flags().BoolVar(&restoreExcludeTaskManagerDB, "exclude-taskmanager", false, "Skip restoring the task manager database even if present in the archive")
 	restoreCmd.Flags().BoolVar(&restoreMigrateFormat, "migrate-format", false, "Run neo4j-admin database migrate --to-format=block after the restore completes")
 	restoreCmd.Flags().DurationVar(&restoreSleepDuration, "sleep", 0, "Sleep duration before restore begins (e.g., 5m, 300s) for manual file transfer")
-	restoreCmd.Flags().String("snapshot", "", "Plakar snapshot ID to restore (latest if empty)")
-	viper.BindPFlag("snapshot", restoreCmd.Flags().Lookup("snapshot"))
+	restoreCmd.Flags().Bool("force", false, "Force restore of incomplete backup group")
 
 	rootCmd.AddCommand(createCmd)
 	rootCmd.AddCommand(restoreCmd)

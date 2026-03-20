@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 
@@ -68,26 +69,40 @@ func (k *KubernetesBackend) Detect() error {
 	}
 }
 
-func (k *KubernetesBackend) Exec(service string, command []string, opts *ExecOptions) (string, error) {
+// buildExecArgs resolves the pod and constructs kubectl exec arguments.
+func (k *KubernetesBackend) buildExecArgs(service string, command []string, opts *ExecOptions) ([]string, error) {
 	pod, err := k.getPodForService(service)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	finalCmd := k.prepareCommand(command, opts)
 	args := []string{"exec", "-n", k.namespace, pod, "--"}
 	args = append(args, finalCmd...)
+	return args, nil
+}
+
+func (k *KubernetesBackend) Exec(service string, command []string, opts *ExecOptions) (string, error) {
+	args, err := k.buildExecArgs(service, command, opts)
+	if err != nil {
+		return "", err
+	}
 	return k.executor.runCommand("kubectl", args...)
 }
 
 func (k *KubernetesBackend) ExecStream(service string, command []string, opts *ExecOptions) (string, error) {
-	pod, err := k.getPodForService(service)
+	args, err := k.buildExecArgs(service, command, opts)
 	if err != nil {
 		return "", err
 	}
-	finalCmd := k.prepareCommand(command, opts)
-	args := []string{"exec", "-n", k.namespace, pod, "--"}
-	args = append(args, finalCmd...)
 	return k.executor.runCommandWithStream("kubectl", args...)
+}
+
+func (k *KubernetesBackend) ExecStreamPipe(service string, command []string, opts *ExecOptions) (io.ReadCloser, func() error, error) {
+	args, err := k.buildExecArgs(service, command, opts)
+	if err != nil {
+		return nil, nil, err
+	}
+	return k.executor.runCommandPipe("kubectl", args...)
 }
 
 func (k *KubernetesBackend) CopyTo(service, src, dest string) error {

@@ -23,6 +23,9 @@ import (
 	_ "github.com/PlakarKorp/integration-fs/exporter"
 	_ "github.com/PlakarKorp/integration-fs/importer"
 	_ "github.com/PlakarKorp/integration-fs/storage"
+
+	// Register S3 storage backend (handles s3:// URIs)
+	_ "github.com/PlakarKorp/integration-s3/storage"
 )
 
 // defaultCacheDir returns the default Plakar cache directory.
@@ -86,6 +89,25 @@ func storeConfig(repoPath string) map[string]string {
 	return map[string]string{"location": location}
 }
 
+// openRepo opens an existing Plakar repository. Returns an error if the repository does not exist.
+func openRepo(kctx *kcontext.KContext, cfg *PlakarConfig) (*repository.Repository, error) {
+	sc := storeConfig(cfg.RepoPath)
+
+	store, configBytes, err := storage.Open(kctx, sc)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open plakar repository %s: %w", cfg.RepoPath, err)
+	}
+
+	var secret []byte // plaintext
+	repo, err := repository.New(kctx, secret, store, configBytes)
+	if err != nil {
+		store.Close(kctx.Context)
+		return nil, fmt.Errorf("failed to open plakar repository: %w", err)
+	}
+	logrus.Debugf("Opened existing Plakar repository: %s", cfg.RepoPath)
+	return repo, nil
+}
+
 // openOrCreateRepo opens an existing Plakar repository, or creates a new one if it doesn't exist.
 func openOrCreateRepo(kctx *kcontext.KContext, cfg *PlakarConfig) (*repository.Repository, error) {
 	sc := storeConfig(cfg.RepoPath)
@@ -135,8 +157,7 @@ func openOrCreateRepo(kctx *kcontext.KContext, cfg *PlakarConfig) (*repository.R
 	createdStore.Close(kctx.Context)
 
 	// Re-open to get config bytes for repository.New()
-	sc2 := storeConfig(cfg.RepoPath)
-	store, configBytes, err = storage.Open(kctx, sc2)
+	store, configBytes, err = storage.Open(kctx, sc)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open newly created plakar repository: %w", err)
 	}

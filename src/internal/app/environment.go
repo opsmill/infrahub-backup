@@ -2,6 +2,7 @@ package app
 
 import (
 	"errors"
+	"io"
 	"sort"
 	"strings"
 )
@@ -20,6 +21,7 @@ type EnvironmentBackend interface {
 	Info() string
 	Exec(service string, command []string, opts *ExecOptions) (string, error)
 	ExecStream(service string, command []string, opts *ExecOptions) (string, error)
+	ExecStreamPipe(service string, command []string, opts *ExecOptions) (io.ReadCloser, func() error, error)
 	CopyTo(service, src, dest string) error
 	CopyFrom(service, src, dest string) error
 	Start(services ...string) error
