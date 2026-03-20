@@ -4,6 +4,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,7 +35,7 @@ type PlakarConfig struct {
 	RepoPath   string // Repository location (local path or URI like s3://bucket/prefix)
 	CacheDir   string // Local cache directory for dedup state
 	SnapshotID string // Specific snapshot ID for restore (empty = latest)
-	Encrypt    bool   // Opt-in passphrase-based encryption
+	BackupID   string // Specific backup-id tag for restore (empty = latest complete group)
 }
 
 // Configuration holds the application configuration
@@ -219,6 +220,14 @@ func (iops *InfrahubOps) buildTaskWorkerExecOpts(existingOpts *ExecOptions) *Exe
 		opts.Env = nil
 	}
 	return opts
+}
+
+func (iops *InfrahubOps) ExecStreamPipe(service string, command []string, opts *ExecOptions) (io.ReadCloser, func() error, error) {
+	backend, err := iops.ensureBackend()
+	if err != nil {
+		return nil, nil, err
+	}
+	return backend.ExecStreamPipe(service, command, opts)
 }
 
 func (iops *InfrahubOps) ExecStream(service string, command []string, opts *ExecOptions) (string, error) {

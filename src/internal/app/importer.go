@@ -1,94 +1,81 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os"
-	"path/filepath"
+	"time"
 
 	"github.com/PlakarKorp/kloset/objects"
 	"github.com/PlakarKorp/kloset/snapshot/importer"
-	"github.com/sirupsen/logrus"
 )
 
-// InfrahubImporter implements the kloset importer.Importer interface.
-// It produces Records from Infrahub database dumps stored in a temp directory.
-type InfrahubImporter struct {
+// StreamingImporter implements the kloset importer.Importer interface.
+// It produces a single Record from a streaming data source (e.g., exec stdout pipe).
+type StreamingImporter struct {
 	hostname string
-	tempDir  string // directory containing the dump files
+	pathname string                      // virtual path for the record (e.g., "/neo4j-backup.tar")
+	fi       objects.FileInfo            // file metadata (size can be 0 for streaming)
+	dataFunc func() (io.ReadCloser, error) // lazy data factory — called on first Read
 }
 
-// NewInfrahubImporter creates a new importer from a directory of dump files.
-func NewInfrahubImporter(hostname, tempDir string) *InfrahubImporter {
-	return &InfrahubImporter{
+// NewStreamingImporter creates an importer that produces a single record from a data factory.
+// pathname is the virtual path in the snapshot (e.g., "/neo4j-backup.tar").
+// fi provides file metadata. dataFunc is called lazily to obtain the data stream.
+func NewStreamingImporter(hostname, pathname string, fi objects.FileInfo, dataFunc func() (io.ReadCloser, error)) *StreamingImporter {
+	return &StreamingImporter{
 		hostname: hostname,
-		tempDir:  tempDir,
+		pathname: pathname,
+		fi:       fi,
+		dataFunc: dataFunc,
 	}
 }
 
-func (imp *InfrahubImporter) Origin(_ context.Context) (string, error) {
+func (imp *StreamingImporter) Origin(_ context.Context) (string, error) {
 	return imp.hostname, nil
 }
 
-func (imp *InfrahubImporter) Type(_ context.Context) (string, error) {
+func (imp *StreamingImporter) Type(_ context.Context) (string, error) {
 	return "infrahub", nil
 }
 
-func (imp *InfrahubImporter) Root(_ context.Context) (string, error) {
+func (imp *StreamingImporter) Root(_ context.Context) (string, error) {
 	return "/", nil
 }
 
-func (imp *InfrahubImporter) Close(_ context.Context) error {
+func (imp *StreamingImporter) Close(_ context.Context) error {
 	return nil
 }
 
-// Scan walks the temp directory and sends each file as a ScanResult.
-func (imp *InfrahubImporter) Scan(_ context.Context) (<-chan *importer.ScanResult, error) {
-	ch := make(chan *importer.ScanResult, 32)
+// Scan returns a channel with a root directory record and a single file record.
+func (imp *StreamingImporter) Scan(_ context.Context) (<-chan *importer.ScanResult, error) {
+	ch := make(chan *importer.ScanResult, 2)
 
 	go func() {
 		defer close(ch)
 
-		err := filepath.Walk(imp.tempDir, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				ch <- importer.NewScanError(path, err)
-				return nil
-			}
-
-			// Compute pathname relative to tempDir, prefixed with /
-			rel, err := filepath.Rel(imp.tempDir, path)
-			if err != nil {
-				ch <- importer.NewScanError(path, err)
-				return nil
-			}
-			pathname := "/" + filepath.ToSlash(rel)
-			if pathname == "/." {
-				pathname = "/"
-			}
-
-			fi := objects.FileInfoFromStat(info)
-
-			if info.IsDir() {
-				ch <- importer.NewScanRecord(pathname, "", fi, nil, func() (io.ReadCloser, error) {
-					return io.NopCloser(&emptyReader{}), nil
-				})
-				return nil
-			}
-
-			fullPath := path // capture for closure
-			ch <- importer.NewScanRecord(pathname, "", fi, nil, func() (io.ReadCloser, error) {
-				return os.Open(fullPath)
-			})
-
-			logrus.Debugf("Importer: queued %s (%d bytes)", pathname, info.Size())
-			return nil
+		// Root directory entry
+		now := time.Now()
+		dirInfo := objects.NewFileInfo("/", 0, os.ModeDir|0755, now, 0, 0, 0, 0, 0)
+		ch <- importer.NewScanRecord("/", "", dirInfo, nil, func() (io.ReadCloser, error) {
+			return io.NopCloser(&emptyReader{}), nil
 		})
-		if err != nil {
-			logrus.Warnf("Importer walk error: %v", err)
-		}
+
+		// The single file record with lazy data factory
+		ch <- importer.NewScanRecord(imp.pathname, "", imp.fi, nil, imp.dataFunc)
 	}()
 
 	return ch, nil
+}
+
+// NewMemoryImporter creates an importer for in-memory data (e.g., metadata JSON).
+func NewMemoryImporter(hostname, pathname string, data []byte) *StreamingImporter {
+	now := time.Now()
+	fi := objects.NewFileInfo(pathname, int64(len(data)), 0644, now, 0, 0, 0, 0, 0)
+	return NewStreamingImporter(hostname, pathname, fi, func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(data)), nil
+	})
 }
 
 type emptyReader struct{}

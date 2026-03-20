@@ -34,3 +34,4 @@
 - All items pass validation. Spec is ready for `/speckit.clarify` or `/speckit.plan`.
 - The spec references "Plakar" by name (the product being integrated) which is appropriate — it's the feature being specified, not an implementation detail.
 - FR-016 uses SHOULD (not MUST) for S3 support, reflecting its P3 priority status.
+- **2026-03-19**: Added User Stories 6-7 (streaming backups, uncompressed dumps) and FR-022 through FR-029. All new items pass validation — no clarification markers needed.

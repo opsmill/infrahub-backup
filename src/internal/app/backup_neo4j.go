@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -17,6 +18,148 @@ const (
 	neo4jProcessStopTimeout  = 120 * time.Second
 	neo4jMetadataScriptPath  = "/data/scripts/neo4j/restore_metadata.cypher"
 )
+
+// backupNeo4jEnterpriseStream returns a data factory that streams a tar archive of the Neo4j
+// Enterprise backup directory from the container via exec stdout.
+// The backup is created with --compress=false for better Plakar deduplication.
+func (iops *InfrahubOps) backupNeo4jEnterpriseStream(backupMetadata string) (func() (io.ReadCloser, error), error) {
+	return func() (io.ReadCloser, error) {
+		// Create backup directory, run backup with --compress=false, then tar to stdout
+		cmd := fmt.Sprintf(
+			"rm -rf %s && mkdir -p %s && neo4j-admin database backup --expand-commands --include-metadata=%s --compress=false --to-path=%s %s && tar cf - -C /tmp infrahubops",
+			neo4jTempBackupDir, neo4jTempBackupDir, backupMetadata, neo4jTempBackupDir, iops.config.Neo4jDatabase,
+		)
+
+		stdout, wait, err := iops.ExecStreamPipe("database", []string{"sh", "-c", cmd}, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to start neo4j enterprise stream: %w", err)
+		}
+
+		// Return a ReadCloser that cleans up on close
+		return &execReadCloser{reader: stdout, wait: wait, idleTimeout: defaultStreamIdleTimeout, cleanup: func() {
+			if _, err := iops.Exec("database", []string{"rm", "-rf", neo4jTempBackupDir}, nil); err != nil {
+				logrus.Warnf("Failed to remove temporary Neo4j backup directory: %v", err)
+			}
+		}}, nil
+	}, nil
+}
+
+// backupNeo4jCommunityStream returns a data factory that streams the Neo4j Community dump
+// from the container via exec stdout. The dump is created first (requires process stop),
+// then cat'd to stdout.
+func (iops *InfrahubOps) backupNeo4jCommunityStream() (func() (io.ReadCloser, error), error) {
+	return func() (io.ReadCloser, error) {
+		// For community edition, the dump file is created by the backup flow
+		// (stopNeo4j + dump in backupNeo4jCommunity). The streaming variant
+		// runs the dump command inside container then cats the result.
+		dumpFile := fmt.Sprintf("%s/%s.dump", neo4jTempBackupDir, iops.config.Neo4jDatabase)
+		cmd := fmt.Sprintf(
+			"rm -rf %s && mkdir -p %s && neo4j-admin database dump --overwrite-destination=true --to-path=%s %s && cat %s",
+			neo4jTempBackupDir, neo4jTempBackupDir, neo4jTempBackupDir, iops.config.Neo4jDatabase, dumpFile,
+		)
+
+		stdout, wait, err := iops.ExecStreamPipe("database", []string{"sh", "-c", cmd}, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to start neo4j community stream: %w", err)
+		}
+
+		return &execReadCloser{reader: stdout, wait: wait, idleTimeout: defaultStreamIdleTimeout, cleanup: func() {
+			if _, err := iops.Exec("database", []string{"rm", "-rf", neo4jTempBackupDir}, nil); err != nil {
+				logrus.Warnf("Failed to remove temporary Neo4j dump directory: %v", err)
+			}
+		}}, nil
+	}, nil
+}
+
+// defaultStreamIdleTimeout is the default duration after which a streaming backup
+// is considered stalled if no data has been read.
+const defaultStreamIdleTimeout = 30 * time.Minute
+
+// execReadCloser wraps an exec stdout pipe with cleanup logic and idle timeout.
+type execReadCloser struct {
+	reader      io.ReadCloser
+	wait        func() error
+	cleanup     func()
+	closed      bool
+	timedOut    bool
+	idleTimeout time.Duration // 0 = no timeout
+	timer       *time.Timer   // reusable timer for idle timeout
+}
+
+var errStreamIdleTimeout = fmt.Errorf("stream idle timeout")
+
+func (e *execReadCloser) Read(p []byte) (int, error) {
+	if e.timedOut {
+		return 0, errStreamIdleTimeout
+	}
+	if e.idleTimeout <= 0 {
+		return e.reader.Read(p)
+	}
+
+	type readResult struct {
+		n   int
+		err error
+	}
+	ch := make(chan readResult, 1)
+	go func() {
+		n, err := e.reader.Read(p)
+		ch <- readResult{n, err}
+	}()
+
+	// Lazily create the timer on first use, reset on subsequent calls
+	if e.timer == nil {
+		e.timer = time.NewTimer(e.idleTimeout)
+	} else {
+		if !e.timer.Stop() {
+			select {
+			case <-e.timer.C:
+			default:
+			}
+		}
+		e.timer.Reset(e.idleTimeout)
+	}
+
+	select {
+	case res := <-ch:
+		return res.n, res.err
+	case <-e.timer.C:
+		e.timedOut = true
+		// Close the underlying reader to unblock the goroutine
+		e.reader.Close()
+		return 0, fmt.Errorf("stream idle timeout after %v with no data", e.idleTimeout)
+	}
+}
+
+func (e *execReadCloser) Close() error {
+	if e.closed {
+		return nil
+	}
+	e.closed = true
+
+	// Stop the idle timer if active
+	if e.timer != nil {
+		e.timer.Stop()
+	}
+
+	// Close the reader first (may signal EOF to the process)
+	readErr := e.reader.Close()
+
+	// Wait for the process to finish
+	var waitErr error
+	if e.wait != nil {
+		waitErr = e.wait()
+	}
+
+	// Run cleanup
+	if e.cleanup != nil {
+		e.cleanup()
+	}
+
+	if waitErr != nil {
+		return waitErr
+	}
+	return readErr
+}
 
 func (iops *InfrahubOps) backupDatabase(backupDir string, backupMetadata string, neo4jEdition string) error {
 	edition := strings.ToLower(neo4jEdition)

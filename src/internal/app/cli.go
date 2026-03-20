@@ -22,6 +22,10 @@ func ConfigureRootCommand(cmd *cobra.Command, app *InfrahubOps) {
 	cmd.PersistentFlags().String("backend", string(BackendTarball), "Backup backend: tarball or plakar")
 	cmd.PersistentFlags().StringVar(&cfg.Plakar.RepoPath, "repo", cfg.Plakar.RepoPath, "Plakar repository path or URI (required when backend=plakar)")
 
+	// Plakar restore flags
+	cmd.PersistentFlags().String("backup-id", "", "Plakar backup group ID to restore (latest complete if empty)")
+	cmd.PersistentFlags().String("snapshot", "", "Plakar snapshot ID for single-component restore")
+
 	// S3 configuration flags
 	cmd.PersistentFlags().StringVar(&cfg.S3.Bucket, "s3-bucket", cfg.S3.Bucket, "S3 bucket name for backup storage")
 	cmd.PersistentFlags().StringVar(&cfg.S3.Prefix, "s3-prefix", cfg.S3.Prefix, "S3 key prefix (path within bucket)")
@@ -40,15 +44,17 @@ func ConfigureRootCommand(cmd *cobra.Command, app *InfrahubOps) {
 	bind("log-format")
 	bind("backend")
 	bind("repo")
+	bind("backup-id")
+	bind("snapshot")
 	bind("s3-bucket")
 	bind("s3-prefix")
 	bind("s3-endpoint")
 	bind("s3-region")
 
 	cobra.OnInitialize(func() {
+		viper.SetEnvPrefix("INFRAHUB")
 		viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
 		viper.AutomaticEnv()
-		viper.SetEnvPrefix("INFRAHUB")
 
 		if viper.IsSet("project") {
 			cfg.DockerComposeProject = viper.GetString("project")
@@ -64,6 +70,9 @@ func ConfigureRootCommand(cmd *cobra.Command, app *InfrahubOps) {
 		}
 		if viper.IsSet("repo") {
 			cfg.Plakar.RepoPath = viper.GetString("repo")
+		}
+		if viper.IsSet("backup-id") {
+			cfg.Plakar.BackupID = viper.GetString("backup-id")
 		}
 		if viper.IsSet("snapshot") {
 			cfg.Plakar.SnapshotID = viper.GetString("snapshot")

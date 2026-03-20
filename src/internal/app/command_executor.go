@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"os/exec"
 	"strings"
@@ -62,6 +63,39 @@ func (ce *CommandExecutor) runCommand(name string, args ...string) (string, erro
 func (ce *CommandExecutor) runCommandQuiet(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	return cmd.Run()
+}
+
+// runCommandPipe starts a command and returns the stdout pipe, a wait function, and any startup error.
+// The caller must read from stdout and then call wait() to get the exit status.
+func (ce *CommandExecutor) runCommandPipe(name string, args ...string) (io.ReadCloser, func() error, error) {
+	cmd := exec.Command(name, args...)
+	logrus.Debugf("exec pipe: %s %s", name, strings.Join(args, " "))
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Capture stderr for error reporting
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
+	if err := cmd.Start(); err != nil {
+		return nil, nil, err
+	}
+
+	wait := func() error {
+		if err := cmd.Wait(); err != nil {
+			stderrStr := strings.TrimSpace(stderrBuf.String())
+			if stderrStr != "" {
+				return fmt.Errorf("%w: %s", err, stderrStr)
+			}
+			return err
+		}
+		return nil
+	}
+
+	return stdout, wait, nil
 }
 
 func (ce *CommandExecutor) runCommandWithStream(name string, args ...string) (string, error) {

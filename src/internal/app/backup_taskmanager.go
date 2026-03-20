@@ -2,11 +2,33 @@ package app
 
 import (
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 
 	"github.com/sirupsen/logrus"
 )
+
+// backupTaskManagerDBStream returns a data factory that streams the PostgreSQL dump
+// in custom format without compression (-Fc -Z0) from the container via exec stdout.
+func (iops *InfrahubOps) backupTaskManagerDBStream() (func() (io.ReadCloser, error), error) {
+	return func() (io.ReadCloser, error) {
+		opts := &ExecOptions{Env: map[string]string{
+			"PGPASSWORD": iops.config.PostgresPassword,
+		}}
+
+		stdout, wait, err := iops.ExecStreamPipe(
+			"task-manager-db",
+			[]string{"pg_dump", "-Fc", "-Z0", "-h", "localhost", "-U", iops.config.PostgresUsername, "-d", iops.config.PostgresDatabase},
+			opts,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to start postgres stream: %w", err)
+		}
+
+		return &execReadCloser{reader: stdout, wait: wait, idleTimeout: defaultStreamIdleTimeout}, nil
+	}, nil
+}
 
 func (iops *InfrahubOps) backupTaskManagerDB(backupDir string) error {
 	logrus.Info("Backing up PostgreSQL database...")
