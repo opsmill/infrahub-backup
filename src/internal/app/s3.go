@@ -10,7 +10,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
+	"github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/sirupsen/logrus"
 )
@@ -104,10 +104,10 @@ func (c *S3Client) Upload(ctx context.Context, localPath string) (string, error)
 	logrus.Infof("Uploading %s (%s) to s3://%s/%s",
 		filename, formatBytes(stat.Size()), c.config.Bucket, s3Key)
 
-	// Use the S3 manager for multipart uploads of large files
-	uploader := manager.NewUploader(c.client)
+	// Use the S3 transfer manager for multipart uploads of large files
+	tm := transfermanager.New(c.client)
 
-	_, err = uploader.Upload(ctx, &s3.PutObjectInput{
+	_, err = tm.UploadObject(ctx, &transfermanager.UploadObjectInput{
 		Bucket: aws.String(c.config.Bucket),
 		Key:    aws.String(s3Key),
 		Body:   file,
@@ -133,37 +133,43 @@ func (c *S3Client) Download(ctx context.Context, s3Key, localPath string) error 
 	}
 	defer file.Close()
 
-	// Use the S3 manager for efficient downloads
-	downloader := manager.NewDownloader(c.client, func(d *manager.Downloader) {
-		d.PartSize = 64 * 1024 * 1024 // 64MB parts
-		d.Concurrency = 4
+	// Use the S3 transfer manager for efficient downloads
+	tm := transfermanager.New(c.client, func(o *transfermanager.Options) {
+		o.PartSizeBytes = 64 * 1024 * 1024 // 64MB parts
+		o.Concurrency = 4
 	})
 
-	numBytes, err := downloader.Download(ctx, file, &s3.GetObjectInput{
-		Bucket: aws.String(c.config.Bucket),
-		Key:    aws.String(s3Key),
+	out, err := tm.DownloadObject(ctx, &transfermanager.DownloadObjectInput{
+		Bucket:   aws.String(c.config.Bucket),
+		Key:      aws.String(s3Key),
+		WriterAt: file,
 	})
 	if err != nil {
 		os.Remove(localPath) // Clean up partial download
 		return fmt.Errorf("failed to download from S3: %w", err)
 	}
 
-	logrus.Infof("Download complete: %s (%s)", localPath, formatBytes(numBytes))
+	logrus.Infof("Download complete: %s (%s)", localPath, formatBytes(aws.ToInt64(out.ContentLength)))
 
 	return nil
 }
 
-// DownloadToWriter downloads a file from S3 to an io.Writer
+// DownloadToWriter downloads a file from S3 to an io.WriterAt
 func (c *S3Client) DownloadToWriter(ctx context.Context, s3Key string, w io.WriterAt) (int64, error) {
-	downloader := manager.NewDownloader(c.client, func(d *manager.Downloader) {
-		d.PartSize = 64 * 1024 * 1024 // 64MB parts
-		d.Concurrency = 4
+	tm := transfermanager.New(c.client, func(o *transfermanager.Options) {
+		o.PartSizeBytes = 64 * 1024 * 1024 // 64MB parts
+		o.Concurrency = 4
 	})
 
-	return downloader.Download(ctx, w, &s3.GetObjectInput{
-		Bucket: aws.String(c.config.Bucket),
-		Key:    aws.String(s3Key),
+	out, err := tm.DownloadObject(ctx, &transfermanager.DownloadObjectInput{
+		Bucket:   aws.String(c.config.Bucket),
+		Key:      aws.String(s3Key),
+		WriterAt: w,
 	})
+	if err != nil {
+		return 0, err
+	}
+	return aws.ToInt64(out.ContentLength), nil
 }
 
 // ParseS3URI parses an s3://bucket/key URI into bucket and key components
