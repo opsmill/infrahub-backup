@@ -1,0 +1,120 @@
+# Minimal Infrahub Helm values for e2e testing in vcluster
+global:
+  imagePullPolicy: IfNotPresent
+
+redis:
+  enabled: true
+  nameOverride: cache
+  architecture: standalone
+  auth:
+    enabled: false
+  master:
+    persistence:
+      enabled: false
+
+neo4j:
+  enabled: true
+  nameOverride: database
+  neo4j:
+    name: "infrahub"
+    edition: "community"
+    password: "admin"
+    minimumClusterSize: 1
+    acceptLicenseAgreement: "no"
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "1Gi"
+      limits:
+        cpu: "2"
+        memory: "4Gi"
+  volumes:
+    data:
+      mode: "volume"
+      volume:
+        emptyDir: {}
+  config:
+    dbms.security.auth_minimum_password_length: "4"
+    dbms.security.procedures.unrestricted: apoc.*
+  logInitialPassword: false
+
+rabbitmq:
+  enabled: true
+  nameOverride: message-queue
+  auth:
+    username: infrahub
+    password: infrahub
+  persistence:
+    enabled: false
+
+prefect-server:
+  enabled: true
+  postgresql:
+    enabled: true
+    auth:
+      password: prefect
+    primary:
+      persistence:
+        enabled: false
+
+infrahub-backup:
+  enabled: false
+
+infrahubServer:
+  replicas: 1
+  ingress:
+    enabled: false
+  persistence:
+    enabled: false
+  infrahubServer:
+    imagePullPolicy: IfNotPresent
+    imageRegistry: registry.opsmill.io
+    env:
+      INFRAHUB_ALLOW_ANONYMOUS_ACCESS: "true"
+      INFRAHUB_CACHE_PORT: 6379
+      INFRAHUB_DB_TYPE: neo4j
+      INFRAHUB_LOG_LEVEL: INFO
+      INFRAHUB_PRODUCTION: "false"
+      INFRAHUB_INITIAL_ADMIN_TOKEN: "06438eb2-8019-4776-878c-0941b1f1d1ec"
+      INFRAHUB_SECURITY_SECRET_KEY: "327f747f-efac-42be-9e73-999f08f86b92"
+      INFRAHUB_WORKFLOW_ADDRESS: prefect-server
+      INFRAHUB_WORKFLOW_PORT: 4200
+      PREFECT_API_URL: "http://prefect-server:4200/api"
+    livenessProbe:
+      httpGet:
+        path: /api/config
+        port: 8000
+      failureThreshold: 30
+      initialDelaySeconds: 5
+      periodSeconds: 5
+      timeoutSeconds: 5
+    readinessProbe:
+      httpGet:
+        path: /api/config
+        port: 8000
+      failureThreshold: 30
+      initialDelaySeconds: 5
+      periodSeconds: 5
+      timeoutSeconds: 5
+
+infrahubTaskWorker:
+  replicas: 1
+  infrahubTaskWorker:
+    imagePullPolicy: IfNotPresent
+    imageRegistry: registry.opsmill.io
+    env:
+      INFRAHUB_CACHE_PORT: 6379
+      INFRAHUB_DB_TYPE: neo4j
+      INFRAHUB_LOG_LEVEL: DEBUG
+      INFRAHUB_PRODUCTION: "false"
+      INFRAHUB_API_TOKEN: "06438eb2-8019-4776-878c-0941b1f1d1ec"
+      INFRAHUB_TIMEOUT: "60"
+      INFRAHUB_WORKFLOW_ADDRESS: prefect-server
+      INFRAHUB_WORKFLOW_PORT: 4200
+      PREFECT_API_URL: "http://prefect-server:4200/api"
+
+upgrade:
+  enabled: false
+
+infrahubDemoData:
+  enabled: false
