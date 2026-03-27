@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -168,21 +169,33 @@ func (iops *InfrahubOps) CreatePlakarBackup(force bool, neo4jMetadata string, ex
 
 		// Create snapshot
 		tags := buildSnapshotTags(metadataObj, component, backupID, StatusComplete)
-		builder, err := snapshot.Create(repo, repository.DefaultType, os.TempDir(), objects.NilMac)
+		builderOpts := &snapshot.BuilderOptions{
+			Name: fmt.Sprintf("%s_%s", backupID, component),
+			Tags: tags,
+		}
+		builder, err := snapshot.Create(repo, repository.DefaultType, os.TempDir(), objects.NilMac, builderOpts)
 		if err != nil {
 			logIncompleteBackup(completed, len(components), backupID)
 			return fmt.Errorf("failed to create snapshot for %s: %w", component, err)
 		}
 
-		opts := &snapshot.BackupOptions{
-			Name: fmt.Sprintf("%s_%s", backupID, component),
-			Tags: tags,
+		source, err := snapshot.NewSource(context.Background(), 0, imp)
+		if err != nil {
+			builder.Close()
+			logIncompleteBackup(completed, len(components), backupID)
+			return fmt.Errorf("failed to create source for %s: %w", component, err)
 		}
 
-		if err := builder.Backup(imp, opts); err != nil {
+		if err := builder.Backup(source); err != nil {
 			builder.Close()
 			logIncompleteBackup(completed, len(components), backupID)
 			return fmt.Errorf("streaming backup failed for %s: %w", component, err)
+		}
+
+		if err := builder.Commit(); err != nil {
+			builder.Close()
+			logIncompleteBackup(completed, len(components), backupID)
+			return fmt.Errorf("failed to commit snapshot for %s: %w", component, err)
 		}
 
 		mac := builder.Header.Identifier

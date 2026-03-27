@@ -7,16 +7,17 @@ import (
 	"os"
 	"time"
 
+	"github.com/PlakarKorp/kloset/connectors"
+	"github.com/PlakarKorp/kloset/location"
 	"github.com/PlakarKorp/kloset/objects"
-	"github.com/PlakarKorp/kloset/snapshot/importer"
 )
 
 // StreamingImporter implements the kloset importer.Importer interface.
 // It produces a single Record from a streaming data source (e.g., exec stdout pipe).
 type StreamingImporter struct {
 	hostname string
-	pathname string                      // virtual path for the record (e.g., "/neo4j-backup.tar")
-	fi       objects.FileInfo            // file metadata (size can be 0 for streaming)
+	pathname string                        // virtual path for the record (e.g., "/neo4j-backup.tar")
+	fi       objects.FileInfo              // file metadata (size can be 0 for streaming)
 	dataFunc func() (io.ReadCloser, error) // lazy data factory — called on first Read
 }
 
@@ -32,41 +33,45 @@ func NewStreamingImporter(hostname, pathname string, fi objects.FileInfo, dataFu
 	}
 }
 
-func (imp *StreamingImporter) Origin(_ context.Context) (string, error) {
-	return imp.hostname, nil
+func (imp *StreamingImporter) Origin() string {
+	return imp.hostname
 }
 
-func (imp *StreamingImporter) Type(_ context.Context) (string, error) {
-	return "infrahub", nil
+func (imp *StreamingImporter) Type() string {
+	return "infrahub"
 }
 
-func (imp *StreamingImporter) Root(_ context.Context) (string, error) {
-	return "/", nil
+func (imp *StreamingImporter) Root() string {
+	return "/"
+}
+
+func (imp *StreamingImporter) Flags() location.Flags {
+	return 0
+}
+
+func (imp *StreamingImporter) Ping(_ context.Context) error {
+	return nil
 }
 
 func (imp *StreamingImporter) Close(_ context.Context) error {
 	return nil
 }
 
-// Scan returns a channel with a root directory record and a single file record.
-func (imp *StreamingImporter) Scan(_ context.Context) (<-chan *importer.ScanResult, error) {
-	ch := make(chan *importer.ScanResult, 2)
+// Import sends a root directory record and a single file record to the records channel.
+func (imp *StreamingImporter) Import(_ context.Context, records chan<- *connectors.Record, _ <-chan *connectors.Result) error {
+	defer close(records)
 
-	go func() {
-		defer close(ch)
+	// Root directory entry
+	now := time.Now()
+	dirInfo := objects.NewFileInfo("/", 0, os.ModeDir|0755, now, 0, 0, 0, 0, 0)
+	records <- connectors.NewRecord("/", "", dirInfo, nil, func() (io.ReadCloser, error) {
+		return nil, nil
+	})
 
-		// Root directory entry
-		now := time.Now()
-		dirInfo := objects.NewFileInfo("/", 0, os.ModeDir|0755, now, 0, 0, 0, 0, 0)
-		ch <- importer.NewScanRecord("/", "", dirInfo, nil, func() (io.ReadCloser, error) {
-			return io.NopCloser(&emptyReader{}), nil
-		})
+	// The single file record with lazy data factory
+	records <- connectors.NewRecord(imp.pathname, "", imp.fi, nil, imp.dataFunc)
 
-		// The single file record with lazy data factory
-		ch <- importer.NewScanRecord(imp.pathname, "", imp.fi, nil, imp.dataFunc)
-	}()
-
-	return ch, nil
+	return nil
 }
 
 // NewMemoryImporter creates an importer for in-memory data (e.g., metadata JSON).
@@ -77,7 +82,3 @@ func NewMemoryImporter(hostname, pathname string, data []byte) *StreamingImporte
 		return io.NopCloser(bytes.NewReader(data)), nil
 	})
 }
-
-type emptyReader struct{}
-
-func (emptyReader) Read([]byte) (int, error) { return 0, io.EOF }
