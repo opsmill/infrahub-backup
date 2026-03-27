@@ -44,13 +44,25 @@ def _dump_logs_on_failure(request):
         return
 
     # Docker Compose logs
-    infrahub_docker = request.getfixturevalue("infrahub_docker") if "infrahub_docker" in request.fixturenames else None
+    infrahub_docker = (
+        request.getfixturevalue("infrahub_docker")
+        if "infrahub_docker" in request.fixturenames
+        else None
+    )
     if infrahub_docker:
         _dump_docker_compose_logs(infrahub_docker["project"])
 
     # Kubernetes logs
-    vcluster = request.getfixturevalue("vcluster") if "vcluster" in request.fixturenames else None
-    infrahub_k8s = request.getfixturevalue("infrahub_k8s") if "infrahub_k8s" in request.fixturenames else None
+    vcluster = (
+        request.getfixturevalue("vcluster")
+        if "vcluster" in request.fixturenames
+        else None
+    )
+    infrahub_k8s = (
+        request.getfixturevalue("infrahub_k8s")
+        if "infrahub_k8s" in request.fixturenames
+        else None
+    )
     if vcluster and infrahub_k8s:
         _dump_namespace_logs(vcluster["kubeconfig_path"], infrahub_k8s["namespace"])
 
@@ -176,7 +188,17 @@ async def infrahub_docker(request: pytest.FixtureRequest) -> AsyncGenerator[dict
 
     def teardown():
         subprocess.run(
-            ["docker", "compose", "-f", compose_file, "-p", project, "down", "-v", "--remove-orphans"],
+            [
+                "docker",
+                "compose",
+                "-f",
+                compose_file,
+                "-p",
+                project,
+                "down",
+                "-v",
+                "--remove-orphans",
+            ],
             capture_output=True,
         )
 
@@ -209,24 +231,25 @@ async def infrahub_k8s(
     kubeconfig_path = vcluster["kubeconfig_path"]
     namespace = "infrahub"
 
-    # Update Helm dependencies
-    subprocess.run(
-        ["helm", "dependency", "update", str(INFRAHUB_HELM_CHART)],
-        check=True,
-    )
-
     # Install Infrahub via Helm
     subprocess.run(
         [
-            "helm", "upgrade", "--install", "infrahub",
+            "helm",
+            "upgrade",
+            "--install",
+            "infrahub",
             "--dependency-update",
             "--create-namespace",
-            "-n", namespace,
-            str(INFRAHUB_HELM_CHART),
-            "-f", str(FIXTURES_DIR / "helm" / "infrahub-values.yaml"),
-            "--kubeconfig", kubeconfig_path,
+            "-n",
+            namespace,
+            "oci://registry.opsmill.io/opsmill/chart/infrahub",
+            "-f",
+            str(FIXTURES_DIR / "helm" / "infrahub-values.yaml"),
+            "--kubeconfig",
+            kubeconfig_path,
             "--wait",
-            "--timeout", "10m",
+            "--timeout",
+            "10m",
         ],
         check=True,
     )
@@ -234,7 +257,7 @@ async def infrahub_k8s(
     # Port-forward infrahub-server
     kr8s_api = await kr8s.asyncio.api(kubeconfig=kubeconfig_path)
     service = await AsyncService.get(
-        "infrahub-server", namespace=namespace, api=kr8s_api
+        "infrahub-infrahub-server", namespace=namespace, api=kr8s_api
     )
     async with service.portforward(remote_port=8000, local_port="auto") as local_port:
         url = f"http://localhost:{local_port}"
