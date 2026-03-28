@@ -2,7 +2,6 @@ import asyncio
 import os
 import subprocess
 import time
-import uuid
 from pathlib import Path
 from typing import AsyncGenerator
 
@@ -11,6 +10,7 @@ import httpx
 import kr8s.asyncio
 import pytest
 import yaml
+from infrahub_testcontainers.container import InfrahubDockerCompose
 from kr8s.asyncio.objects import Service as AsyncService
 from kubernetes_asyncio import client as kubeclient
 from testcontainers.core.container import DockerContainer
@@ -20,9 +20,12 @@ from tests.helpers.utils import wait_for_http
 
 PROJECT_ROOT = Path(__file__).parent.resolve().parents[1]
 FIXTURES_DIR = Path(__file__).parent.resolve() / "fixtures"
-INFRAHUB_HELM_CHART = Path("/home/ubuntu/opsmill/git/infrahub-helm/charts/infrahub")
 
 INFRAHUB_ADMIN_TOKEN = "06438eb2-8019-4776-878c-0941b1f1d1ec"
+
+# Reduce resource usage for e2e tests
+os.environ.setdefault("INFRAHUB_TESTING_API_SERVER_COUNT", "1")
+os.environ.setdefault("INFRAHUB_TESTING_TASK_WORKER_COUNT", "1")
 
 
 # ---------------------------------------------------------------------------
@@ -181,40 +184,24 @@ def minio_docker(request: pytest.FixtureRequest) -> dict:
 # Fixture: infrahub_docker
 # ---------------------------------------------------------------------------
 @pytest.fixture(scope="session")
-async def infrahub_docker(request: pytest.FixtureRequest) -> AsyncGenerator[dict, None]:
-    """Start Infrahub via Docker Compose with a random project name."""
-    project = f"e2e-infrahub-{uuid.uuid4().hex[:8]}"
-    compose_file = str(FIXTURES_DIR / "docker-compose" / "docker-compose.yml")
+def infrahub_docker(request: pytest.FixtureRequest, tmp_path_factory) -> dict:
+    """Start Infrahub via infrahub-testcontainers."""
+    tmp_dir = tmp_path_factory.mktemp("infrahub-compose")
 
-    def teardown():
-        subprocess.run(
-            [
-                "docker",
-                "compose",
-                "-f",
-                compose_file,
-                "-p",
-                project,
-                "down",
-                "-v",
-                "--remove-orphans",
-            ],
-            capture_output=True,
-        )
-
-    request.addfinalizer(teardown)
-
-    subprocess.run(
-        ["docker", "compose", "-f", compose_file, "-p", project, "up", "-d", "--wait"],
-        check=True,
+    compose = InfrahubDockerCompose.init(
+        directory=tmp_dir,
+        deployment_type="default",
     )
 
-    # Wait for Infrahub server to be healthy
-    url = "http://localhost:8000"
-    await wait_for_http(f"{url}/api/config", timeout=300.0, interval=5.0)
+    request.addfinalizer(compose.stop)
 
-    yield {
-        "project": project,
+    ports = compose.start()
+    server_port = ports["server"]
+    url = f"http://localhost:{server_port}"
+
+    return {
+        "compose": compose,
+        "project": compose.project_name,
         "url": url,
         "token": INFRAHUB_ADMIN_TOKEN,
     }
