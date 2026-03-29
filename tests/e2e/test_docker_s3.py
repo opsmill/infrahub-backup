@@ -19,7 +19,9 @@ ADMIN_TOKEN = "06438eb2-8019-4776-878c-0941b1f1d1ec"
 @pytest.mark.e2e
 @pytest.mark.docker
 class TestDockerS3(TestInfrahubDockerClient):
-    async def test_backup_restore_s3_tarball(self, infrahub_compose, infrahub_port, backup_binary, minio_docker, tmp_path):
+    async def test_backup_restore_s3_tarball(
+        self, infrahub_compose, infrahub_port, backup_binary, minio_docker, tmp_path
+    ):
         """Create a tarball backup uploaded to S3, restore from S3, and verify."""
         url = f"http://localhost:{infrahub_port}"
         project = infrahub_compose.project_name
@@ -37,12 +39,19 @@ class TestDockerS3(TestInfrahubDockerClient):
         run_backup(
             backup_binary,
             [
-                "--project", project,
-                "--backup-dir", str(tmp_path),
-                "--s3-bucket", minio["bucket"],
-                "--s3-endpoint", minio["endpoint"],
-                "--s3-region", "us-east-1",
-                "create", "--force", "--s3-upload",
+                "--project",
+                project,
+                "--backup-dir",
+                str(tmp_path),
+                "--s3-bucket",
+                minio["bucket"],
+                "--s3-endpoint",
+                minio["endpoint"],
+                "--s3-region",
+                "us-east-1",
+                "create",
+                "--force",
+                "--s3-upload",
             ],
             env=s3_env,
         )
@@ -57,6 +66,9 @@ class TestDockerS3(TestInfrahubDockerClient):
         )
         s3_uri = f"s3://{minio['bucket']}/{s3_key}"
 
+        # 6. Wait for Infrahub to recover
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
+
         # 4. Modify data (delete the tag)
         await modify_infrahub_data(url, ADMIN_TOKEN, seed)
 
@@ -64,11 +76,16 @@ class TestDockerS3(TestInfrahubDockerClient):
         run_restore(
             backup_binary,
             [
-                "--project", project,
-                "--s3-bucket", minio["bucket"],
-                "--s3-endpoint", minio["endpoint"],
-                "--s3-region", "us-east-1",
-                "restore", s3_uri,
+                "--project",
+                project,
+                "--s3-bucket",
+                minio["bucket"],
+                "--s3-endpoint",
+                minio["endpoint"],
+                "--s3-region",
+                "us-east-1",
+                "restore",
+                s3_uri,
             ],
             env=s3_env,
         )

@@ -21,7 +21,9 @@ ADMIN_TOKEN = "06438eb2-8019-4776-878c-0941b1f1d1ec"
 @pytest.mark.e2e
 @pytest.mark.docker
 class TestDockerPlakarS3(TestInfrahubDockerClient):
-    async def test_backup_restore_plakar_s3(self, infrahub_compose, infrahub_port, backup_binary, minio_docker):
+    async def test_backup_restore_plakar_s3(
+        self, infrahub_compose, infrahub_port, backup_binary, minio_docker
+    ):
         """Create a plakar backup to S3, restore, and verify."""
         url = f"http://localhost:{infrahub_port}"
         project = infrahub_compose.project_name
@@ -37,9 +39,12 @@ class TestDockerPlakarS3(TestInfrahubDockerClient):
         }
 
         common_args = [
-            "--project", project,
-            "--backend", "plakar",
-            "--repo", repo_uri,
+            "--project",
+            project,
+            "--backend",
+            "plakar",
+            "--repo",
+            repo_uri,
         ]
 
         # 1. Seed test data
@@ -50,12 +55,17 @@ class TestDockerPlakarS3(TestInfrahubDockerClient):
 
         # 3. Verify snapshot list works with S3 repo
         result = subprocess.run(
-            [backup_binary] + common_args + ["--log-format", "json", "snapshots", "list"],
+            [backup_binary]
+            + common_args
+            + ["--log-format", "json", "snapshots", "list"],
             capture_output=True,
             text=True,
             env={**os.environ, **s3_env},
         )
         assert result.returncode == 0, f"snapshots list failed: {result.stderr}"
+
+        # 6. Wait for Infrahub to recover
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
 
         # 4. Modify data (delete the tag)
         await modify_infrahub_data(url, ADMIN_TOKEN, seed)
