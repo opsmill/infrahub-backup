@@ -31,6 +31,22 @@ upgrade:
 infrahubDemoData:
   enabled: false
 
+prefect-server:
+  postgresql:
+    primary:
+      startupProbe:
+        enabled: true
+        initialDelaySeconds: 1
+        periodSeconds: 1
+        timeoutSeconds: 1
+        failureThreshold: 120
+      readinessProbe:
+        initialDelaySeconds: 1
+        periodSeconds: 1
+        timeoutSeconds: 1
+        failureThreshold: 120
+      resourcesPreset: none
+
 rabbitmq:
   startupProbe:
     enabled: true
@@ -46,15 +62,16 @@ rabbitmq:
   resourcesPreset: none
 
 redis:
-  startupProbe:
-    enabled: true
-    initialDelaySeconds: 1
-    periodSeconds: 1
-    timeoutSeconds: 1
-    failureThreshold: 120
-  readinessProbe:
-    initialDelaySeconds: 1
-    periodSeconds: 1
-    timeoutSeconds: 1
-    failureThreshold: 120
-  resourcesPreset: none
+  master:
+    startupProbe:
+      enabled: true
+      initialDelaySeconds: 1
+      periodSeconds: 1
+      timeoutSeconds: 1
+      failureThreshold: 120
+    readinessProbe:
+      initialDelaySeconds: 1
+      periodSeconds: 1
+      timeoutSeconds: 1
+      failureThreshold: 120
+    resourcesPreset: none
