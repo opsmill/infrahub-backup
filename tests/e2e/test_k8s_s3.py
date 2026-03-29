@@ -2,6 +2,7 @@
 
 import pytest
 
+from tests.e2e.conftest import portforward_infrahub
 from tests.helpers.utils import (
     get_s3_backup_key,
     modify_infrahub_data,
@@ -9,7 +10,6 @@ from tests.helpers.utils import (
     run_restore,
     seed_infrahub_data,
     verify_infrahub_data,
-    wait_for_http,
 )
 
 
@@ -17,7 +17,6 @@ from tests.helpers.utils import (
 @pytest.mark.k8s
 async def test_backup_restore_k8s_s3_tarball(infrahub_k8s, backup_binary, minio_k8s, tmp_path):
     """K8s: Create a tarball backup uploaded to S3, restore from S3, and verify."""
-    url = infrahub_k8s["url"]
     token = infrahub_k8s["token"]
     namespace = infrahub_k8s["namespace"]
     kubeconfig = infrahub_k8s["kubeconfig_path"]
@@ -29,11 +28,11 @@ async def test_backup_restore_k8s_s3_tarball(infrahub_k8s, backup_binary, minio_
         "AWS_SECRET_ACCESS_KEY": minio["secret_key"],
     }
 
-    # 1. Seed test data
-    seed = await seed_infrahub_data(url, token)
+    # 1. Seed test data (fresh port-forward)
+    async with portforward_infrahub(kubeconfig, namespace) as url:
+        seed = await seed_infrahub_data(url, token)
 
     # 2. Create backup with S3 upload
-    # Use the local endpoint (port-forwarded) since the binary runs on host
     run_backup(
         backup_binary,
         [
@@ -57,10 +56,11 @@ async def test_backup_restore_k8s_s3_tarball(infrahub_k8s, backup_binary, minio_
     )
     s3_uri = f"s3://{minio['bucket']}/{s3_key}"
 
-    # 4. Modify data (delete the tag)
-    await modify_infrahub_data(url, token, seed)
+    # 4. Modify data (fresh port-forward)
+    async with portforward_infrahub(kubeconfig, namespace) as url:
+        await modify_infrahub_data(url, token, seed)
 
-    # 5. Restore from S3
+    # 5. Restore from S3 (may restart pods)
     run_restore(
         backup_binary,
         [
@@ -73,8 +73,6 @@ async def test_backup_restore_k8s_s3_tarball(infrahub_k8s, backup_binary, minio_
         env=env,
     )
 
-    # 6. Wait for Infrahub to recover
-    await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
-
-    # 7. Verify the tag is back
-    await verify_infrahub_data(url, token, seed)
+    # 6. Verify the tag is back (fresh port-forward after pod restart)
+    async with portforward_infrahub(kubeconfig, namespace) as url:
+        await verify_infrahub_data(url, token, seed)
