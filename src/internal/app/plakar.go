@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/PlakarKorp/kloset/caching"
@@ -77,6 +79,13 @@ func initPlakarContext(cfg *PlakarConfig) (*kcontext.KContext, error) {
 
 // storeConfig builds the storage configuration map for a given repo path.
 // Local paths are prefixed with fs:// for the integration-fs backend.
+// For s3:// URIs, credentials are resolved in order:
+//  1. URL userinfo (s3://access_key:secret_key@host/...) — also forces TLS off
+//  2. AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY environment variables
+//
+// TLS defaults to true (secure). It is disabled when:
+//   - URL contains userinfo (backward compat — typically local MinIO), or
+//   - INFRAHUB_S3_ENDPOINT starts with http://
 func storeConfig(repoPath string) map[string]string {
 	location := repoPath
 	if !strings.Contains(repoPath, "://") {
@@ -86,7 +95,40 @@ func storeConfig(repoPath string) map[string]string {
 		}
 		location = "fs://" + location
 	}
-	return map[string]string{"location": location}
+
+	cfg := map[string]string{"location": location}
+
+	if strings.HasPrefix(location, "s3://") {
+		// TLS: default true, override from INFRAHUB_S3_ENDPOINT scheme
+		useTLS := true
+		if ep := os.Getenv("INFRAHUB_S3_ENDPOINT"); strings.HasPrefix(ep, "http://") {
+			useTLS = false
+		}
+
+		if u, err := url.Parse(location); err == nil && u.User != nil {
+			// Credentials from URL userinfo (highest priority)
+			cfg["access_key"] = u.User.Username()
+			if secret, ok := u.User.Password(); ok {
+				cfg["secret_access_key"] = secret
+			}
+			// Strip userinfo from the location so the S3 backend only sees host/path
+			u.User = nil
+			cfg["location"] = u.String()
+			useTLS = false // embedded creds = local S3, backward compat
+		} else {
+			// Fallback: AWS environment variables
+			if ak := os.Getenv("AWS_ACCESS_KEY_ID"); ak != "" {
+				cfg["access_key"] = ak
+			}
+			if sk := os.Getenv("AWS_SECRET_ACCESS_KEY"); sk != "" {
+				cfg["secret_access_key"] = sk
+			}
+		}
+
+		cfg["use_tls"] = strconv.FormatBool(useTLS)
+	}
+
+	return cfg
 }
 
 // openRepo opens an existing Plakar repository. Returns an error if the repository does not exist.
