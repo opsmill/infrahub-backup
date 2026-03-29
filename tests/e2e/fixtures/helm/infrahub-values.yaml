@@ -34,14 +34,27 @@ infrahubDemoData:
 rabbitmq:
   startupProbe:
     enabled: true
-    periodSeconds: 5
-    timeoutSeconds: 5
-    failureThreshold: 20
+    initialDelaySeconds: 1
+    periodSeconds: 1
+    timeoutSeconds: 1
+    failureThreshold: 120
   readinessProbe:
-    periodSeconds: 5
-    timeoutSeconds: 5
-    failureThreshold: 20
+    initialDelaySeconds: 1
+    periodSeconds: 1
+    timeoutSeconds: 1
+    failureThreshold: 120
   resourcesPreset: none
 
 redis:
+  startupProbe:
+    enabled: true
+    initialDelaySeconds: 1
+    periodSeconds: 1
+    timeoutSeconds: 1
+    failureThreshold: 120
+  readinessProbe:
+    initialDelaySeconds: 1
+    periodSeconds: 1
+    timeoutSeconds: 1
+    failureThreshold: 120
   resourcesPreset: none

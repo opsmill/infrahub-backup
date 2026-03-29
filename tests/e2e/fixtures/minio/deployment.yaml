@@ -21,7 +21,7 @@ spec:
             - sh
           args:
             - -c
-            - "mkdir -p /data/infrahub-backups && minio server /data --console-address :9001"
+            - "mkdir -p /data/backups && minio server /data --console-address :9001"
           env:
             - name: MINIO_ROOT_USER
               value: "minioadmin"
