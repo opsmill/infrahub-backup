@@ -11,12 +11,11 @@ import httpx
 import kr8s.asyncio
 import pytest
 import yaml
-from infrahub_testcontainers.container import InfrahubDockerCompose
 from kr8s.asyncio.objects import Service as AsyncService
 from kubernetes_asyncio import client as kubeclient
 from testcontainers.core.container import DockerContainer
 
-from tests.conftest import _dump_docker_compose_logs, _dump_namespace_logs
+from tests.conftest import _dump_namespace_logs
 from tests.helpers.utils import wait_for_http
 
 PROJECT_ROOT = Path(__file__).parent.resolve().parents[1]
@@ -41,22 +40,15 @@ def pytest_runtest_makereport(item, call):
 
 @pytest.fixture(autouse=True)
 def _dump_logs_on_failure(request):
-    """Dump relevant logs when a test fails."""
+    """Dump Kubernetes logs when a test fails.
+
+    Docker Compose log dumping is handled by TestInfrahubDocker base class.
+    """
     yield
     rep_call = getattr(request.node, "rep_call", None)
     if rep_call is None or not rep_call.failed:
         return
 
-    # Docker Compose logs
-    infrahub_docker = (
-        request.getfixturevalue("infrahub_docker")
-        if "infrahub_docker" in request.fixturenames
-        else None
-    )
-    if infrahub_docker:
-        _dump_docker_compose_logs(infrahub_docker["project"])
-
-    # Kubernetes logs
     vcluster = (
         request.getfixturevalue("vcluster")
         if "vcluster" in request.fixturenames
@@ -178,33 +170,6 @@ def minio_docker(request: pytest.FixtureRequest) -> dict:
         "access_key": "minioadmin",
         "secret_key": "minioadmin",
         "bucket": "infrahub-backups",
-    }
-
-
-# ---------------------------------------------------------------------------
-# Fixture: infrahub_docker
-# ---------------------------------------------------------------------------
-@pytest.fixture(scope="session")
-def infrahub_docker(request: pytest.FixtureRequest, tmp_path_factory) -> dict:
-    """Start Infrahub via infrahub-testcontainers."""
-    tmp_dir = tmp_path_factory.mktemp("infrahub-compose")
-
-    compose = InfrahubDockerCompose.init(
-        directory=tmp_dir,
-        deployment_type="default",
-    )
-
-    request.addfinalizer(compose.stop)
-
-    ports = compose.start()
-    server_port = ports["server"]
-    url = f"http://localhost:{server_port}"
-
-    return {
-        "compose": compose,
-        "project": compose.project_name,
-        "url": url,
-        "token": INFRAHUB_ADMIN_TOKEN,
     }
 
 
