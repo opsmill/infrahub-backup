@@ -20,7 +20,9 @@ ADMIN_TOKEN = "06438eb2-8019-4776-878c-0941b1f1d1ec"
 @pytest.mark.e2e
 @pytest.mark.docker
 class TestDockerPlakar(TestInfrahubDockerClient):
-    async def test_backup_restore_plakar_local(self, infrahub_compose, infrahub_port, backup_binary, tmp_path):
+    async def test_backup_restore_plakar_local(
+        self, infrahub_compose, infrahub_port, backup_binary, tmp_path
+    ):
         """Create a plakar backup to local fs, restore, and verify."""
         url = f"http://localhost:{infrahub_port}"
         project = infrahub_compose.project_name
@@ -30,37 +32,57 @@ class TestDockerPlakar(TestInfrahubDockerClient):
         seed = await seed_infrahub_data(url, ADMIN_TOKEN)
 
         # 2. Create plakar backup
-        run_backup(backup_binary, [
-            "--project", project,
-            "--backend", "plakar",
-            "--repo", f"fs://{repo_path}",
-            "create", "--force",
-        ])
+        run_backup(
+            backup_binary,
+            [
+                "--project",
+                project,
+                "--backend",
+                "plakar",
+                "--repo",
+                f"fs://{repo_path}",
+                "create",
+                "--force",
+            ],
+        )
 
         # 3. Verify snapshot list shows the backup
         result = subprocess.run(
             [
                 backup_binary,
-                "--backend", "plakar",
-                "--repo", f"fs://{repo_path}",
-                "--log-format", "json",
-                "snapshots", "list",
+                "--backend",
+                "plakar",
+                "--repo",
+                f"fs://{repo_path}",
+                "--log-format",
+                "json",
+                "snapshots",
+                "list",
             ],
             capture_output=True,
             text=True,
         )
         assert result.returncode == 0, f"snapshots list failed: {result.stderr}"
 
+        # 6. Wait for Infrahub to recover
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
+
         # 4. Modify data (delete the tag)
         await modify_infrahub_data(url, ADMIN_TOKEN, seed)
 
         # 5. Restore from plakar
-        run_restore(backup_binary, [
-            "--project", project,
-            "--backend", "plakar",
-            "--repo", f"fs://{repo_path}",
-            "restore",
-        ])
+        run_restore(
+            backup_binary,
+            [
+                "--project",
+                project,
+                "--backend",
+                "plakar",
+                "--repo",
+                f"fs://{repo_path}",
+                "restore",
+            ],
+        )
 
         # 6. Wait for Infrahub to recover
         await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
@@ -68,15 +90,20 @@ class TestDockerPlakar(TestInfrahubDockerClient):
         # 7. Verify the tag is back
         await verify_infrahub_data(url, ADMIN_TOKEN, seed)
 
-    async def test_plakar_incremental_backup(self, infrahub_compose, backup_binary, tmp_path):
+    async def test_plakar_incremental_backup(
+        self, infrahub_compose, backup_binary, tmp_path
+    ):
         """Verify that a second plakar backup is incremental (deduplication)."""
         project = infrahub_compose.project_name
         repo_path = str(tmp_path / "plakar-repo-incr")
 
         common_args = [
-            "--project", project,
-            "--backend", "plakar",
-            "--repo", f"fs://{repo_path}",
+            "--project",
+            project,
+            "--backend",
+            "plakar",
+            "--repo",
+            f"fs://{repo_path}",
         ]
 
         # First backup
@@ -87,7 +114,9 @@ class TestDockerPlakar(TestInfrahubDockerClient):
 
         # Verify two backup groups exist
         result = subprocess.run(
-            [backup_binary] + common_args + ["--log-format", "json", "snapshots", "list"],
+            [backup_binary]
+            + common_args
+            + ["--log-format", "json", "snapshots", "list"],
             capture_output=True,
             text=True,
         )
