@@ -129,7 +129,9 @@ def minio_docker(request: pytest.FixtureRequest) -> dict:
         .with_exposed_ports(9000)
         .with_env("MINIO_ROOT_USER", "minioadmin")
         .with_env("MINIO_ROOT_PASSWORD", "minioadmin")
-        .with_command("server /data")
+        .with_command(
+            "sh -c 'mkdir -p /data/backups && minio server /data --console-address :9001'"
+        )
     )
 
     container.start()
@@ -155,21 +157,11 @@ def minio_docker(request: pytest.FixtureRequest) -> dict:
     else:
         raise TimeoutError(f"MinIO at {endpoint} did not become ready")
 
-    # Create the bucket
-    s3 = boto3.client(
-        "s3",
-        endpoint_url=endpoint,
-        aws_access_key_id="minioadmin",
-        aws_secret_access_key="minioadmin",
-        region_name="us-east-1",
-    )
-    s3.create_bucket(Bucket="infrahub-backups")
-
     return {
         "endpoint": endpoint,
         "access_key": "minioadmin",
         "secret_key": "minioadmin",
-        "bucket": "infrahub-backups",
+        "bucket": "backups",
     }
 
 
@@ -280,19 +272,10 @@ async def minio_k8s(
         local_endpoint = f"http://localhost:{local_port}"
         await wait_for_http(f"{local_endpoint}/minio/health/ready", timeout=30.0)
 
-        s3 = boto3.client(
-            "s3",
-            endpoint_url=local_endpoint,
-            aws_access_key_id="minioadmin",
-            aws_secret_access_key="minioadmin",
-            region_name="us-east-1",
-        )
-        s3.create_bucket(Bucket="infrahub-backups")
-
         yield {
             "cluster_endpoint": f"http://minio.{namespace}.svc:9000",
             "local_endpoint": local_endpoint,
             "access_key": "minioadmin",
             "secret_key": "minioadmin",
-            "bucket": "infrahub-backups",
+            "bucket": "backups",
         }
