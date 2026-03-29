@@ -2,6 +2,7 @@ import asyncio
 import os
 import subprocess
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncGenerator
 
@@ -208,6 +209,26 @@ def infrahub_docker(request: pytest.FixtureRequest, tmp_path_factory) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Helper: portforward_infrahub — fresh port-forward for each use
+# ---------------------------------------------------------------------------
+@asynccontextmanager
+async def portforward_infrahub(kubeconfig_path: str, namespace: str):
+    """Open a fresh port-forward to infrahub-server and yield the local URL.
+
+    Pods may be restarted by infrahub-backup during restore, which kills any
+    long-lived port-forward.  Call this each time you need to talk to Infrahub.
+    """
+    kr8s_api = await kr8s.asyncio.api(kubeconfig=kubeconfig_path)
+    service = await AsyncService.get(
+        "infrahub-infrahub-server", namespace=namespace, api=kr8s_api
+    )
+    async with service.portforward(remote_port=8000, local_port="auto") as local_port:
+        url = f"http://localhost:{local_port}"
+        await wait_for_http(f"{url}/api/config", timeout=300.0, interval=5.0)
+        yield url
+
+
+# ---------------------------------------------------------------------------
 # Fixture: infrahub_k8s
 # ---------------------------------------------------------------------------
 @pytest.fixture(scope="session")
@@ -241,21 +262,15 @@ async def infrahub_k8s(
         check=True,
     )
 
-    # Port-forward infrahub-server
-    kr8s_api = await kr8s.asyncio.api(kubeconfig=kubeconfig_path)
-    service = await AsyncService.get(
-        "infrahub-infrahub-server", namespace=namespace, api=kr8s_api
-    )
-    async with service.portforward(remote_port=8000, local_port="auto") as local_port:
-        url = f"http://localhost:{local_port}"
-        await wait_for_http(f"{url}/api/config", timeout=300.0, interval=5.0)
+    # Verify Infrahub is healthy with an initial port-forward
+    async with portforward_infrahub(kubeconfig_path, namespace):
+        pass  # health check happens inside the context manager
 
-        yield {
-            "namespace": namespace,
-            "kubeconfig_path": kubeconfig_path,
-            "url": url,
-            "token": INFRAHUB_ADMIN_TOKEN,
-        }
+    yield {
+        "namespace": namespace,
+        "kubeconfig_path": kubeconfig_path,
+        "token": INFRAHUB_ADMIN_TOKEN,
+    }
 
 
 # ---------------------------------------------------------------------------
