@@ -15,12 +15,12 @@ from tests.helpers.utils import (
 
 @pytest.mark.e2e
 @pytest.mark.k8s
-async def test_backup_restore_k8s_s3_tarball(infrahub_k8s, backup_binary, minio_k8s, tmp_path):
+async def test_backup_restore_k8s_s3_tarball(infrahub_k8s, backup_binary, minio_docker, tmp_path):
     """K8s: Create a tarball backup uploaded to S3, restore from S3, and verify."""
     token = infrahub_k8s["token"]
     namespace = infrahub_k8s["namespace"]
     kubeconfig = infrahub_k8s["kubeconfig_path"]
-    minio = minio_k8s
+    minio = minio_docker
 
     env = {
         "KUBECONFIG": kubeconfig,
@@ -39,7 +39,7 @@ async def test_backup_restore_k8s_s3_tarball(infrahub_k8s, backup_binary, minio_
             "--k8s-namespace", namespace,
             "--backup-dir", str(tmp_path),
             "--s3-bucket", minio["bucket"],
-            "--s3-endpoint", minio["local_endpoint"],
+            "--s3-endpoint", minio["endpoint"],
             "--s3-region", "us-east-1",
             "create", "--force", "--s3-upload",
         ],
@@ -50,7 +50,7 @@ async def test_backup_restore_k8s_s3_tarball(infrahub_k8s, backup_binary, minio_
     s3_key = get_s3_backup_key(
         bucket=minio["bucket"],
         prefix="",
-        endpoint=minio["local_endpoint"],
+        endpoint=minio["endpoint"],
         access_key=minio["access_key"],
         secret_key=minio["secret_key"],
     )
@@ -66,7 +66,7 @@ async def test_backup_restore_k8s_s3_tarball(infrahub_k8s, backup_binary, minio_
         [
             "--k8s-namespace", namespace,
             "--s3-bucket", minio["bucket"],
-            "--s3-endpoint", minio["local_endpoint"],
+            "--s3-endpoint", minio["endpoint"],
             "--s3-region", "us-east-1",
             "restore", s3_uri,
         ],
