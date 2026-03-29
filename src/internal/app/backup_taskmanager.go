@@ -99,8 +99,14 @@ func (iops *InfrahubOps) restorePostgreSQL(workDir string) error {
 	useUnixSocket := err == nil && !strings.Contains(strings.TrimSpace(containerUser), "cannot find name")
 	if useUnixSocket {
 		// Use Unix socket connection (no host, user, or password)
-		opts = nil
 		restoreCmd = []string{"pg_restore", "-d", "postgres", "--clean", "--create", dumpFile}
+		// On Docker, run as the postgres user so Unix socket auth succeeds
+		backend, backendErr := iops.ensureBackend()
+		if backendErr == nil && backend.Name() == "docker" {
+			opts = &ExecOptions{User: iops.config.PostgresUsername}
+		} else {
+			opts = nil
+		}
 	} else {
 		// Use TCP connection with credentials
 		opts = &ExecOptions{Env: map[string]string{
