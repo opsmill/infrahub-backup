@@ -10,11 +10,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PlakarKorp/kloset/connectors"
+	"github.com/PlakarKorp/kloset/connectors/exporter"
 	"github.com/PlakarKorp/kloset/kcontext"
 	"github.com/PlakarKorp/kloset/objects"
 	"github.com/PlakarKorp/kloset/repository"
 	"github.com/PlakarKorp/kloset/snapshot"
-	"github.com/PlakarKorp/kloset/snapshot/exporter"
 	"github.com/sirupsen/logrus"
 )
 
@@ -123,7 +124,7 @@ func (iops *InfrahubOps) restoreBackupGroup(kctx *kcontext.KContext, repo *repos
 			return fmt.Errorf("failed to create directory for %s: %w", snapInfo.Component, err)
 		}
 
-		exp, err := exporter.NewExporter(kctx, map[string]string{
+		exp, err := exporter.NewExporter(kctx, &connectors.Options{MaxConcurrency: kctx.MaxConcurrency}, map[string]string{
 			"location": "fs://" + componentDir,
 		})
 		if err != nil {
@@ -132,10 +133,10 @@ func (iops *InfrahubOps) restoreBackupGroup(kctx *kcontext.KContext, repo *repos
 		}
 
 		logrus.Infof("Extracting %s snapshot...", snapInfo.Component)
-		restoreOpts := &snapshot.RestoreOptions{
+		exportOpts := &snapshot.ExportOptions{
 			SkipPermissions: true,
 		}
-		if err := snap.Restore(exp, componentDir, "/", restoreOpts); err != nil {
+		if err := snap.Export(exp, "/", exportOpts); err != nil {
 			exp.Close(kctx.Context)
 			snap.Close()
 			return fmt.Errorf("failed to extract %s snapshot: %w", snapInfo.Component, err)
@@ -286,7 +287,7 @@ func (iops *InfrahubOps) restoreSingleSnapshot(kctx *kcontext.KContext, repo *re
 		return fmt.Errorf("failed to create export directory: %w", err)
 	}
 
-	exp, err := exporter.NewExporter(kctx, map[string]string{
+	exp, err := exporter.NewExporter(kctx, &connectors.Options{MaxConcurrency: kctx.MaxConcurrency}, map[string]string{
 		"location": "fs://" + exportDir,
 	})
 	if err != nil {
@@ -295,10 +296,10 @@ func (iops *InfrahubOps) restoreSingleSnapshot(kctx *kcontext.KContext, repo *re
 	defer exp.Close(kctx.Context)
 
 	logrus.Info("Extracting Plakar snapshot...")
-	restoreOpts := &snapshot.RestoreOptions{
+	exportOpts := &snapshot.ExportOptions{
 		SkipPermissions: true,
 	}
-	if err := snap.Restore(exp, exportDir, "/", restoreOpts); err != nil {
+	if err := snap.Export(exp, "/", exportOpts); err != nil {
 		return fmt.Errorf("failed to extract plakar snapshot: %w", err)
 	}
 
@@ -389,7 +390,7 @@ func (iops *InfrahubOps) restoreSingleSnapshot(kctx *kcontext.KContext, repo *re
 
 // snapshotLister is an interface for listing snapshots in a repository.
 type snapshotLister interface {
-	ListSnapshots() iter.Seq[objects.MAC]
+	ListSnapshots() iter.Seq2[objects.MAC, error]
 }
 
 // resolveSnapshotID resolves a snapshot identifier (partial hex or empty for latest).
@@ -398,7 +399,10 @@ func resolveSnapshotID(repo snapshotLister, snapshotID string) (objects.MAC, err
 		// Find the latest snapshot
 		var latest objects.MAC
 		found := false
-		for mac := range repo.ListSnapshots() {
+		for mac, err := range repo.ListSnapshots() {
+			if err != nil {
+				return objects.MAC{}, fmt.Errorf("failed to list snapshots: %w", err)
+			}
 			latest = mac
 			found = true
 		}
@@ -418,7 +422,10 @@ func resolveSnapshotID(repo snapshotLister, snapshotID string) (objects.MAC, err
 	var available []string
 	prefix := strings.ToLower(snapshotID)
 
-	for mac := range repo.ListSnapshots() {
+	for mac, err := range repo.ListSnapshots() {
+		if err != nil {
+			return objects.MAC{}, fmt.Errorf("failed to list snapshots: %w", err)
+		}
 		macHex := hex.EncodeToString(mac[:])
 		available = append(available, fmt.Sprintf("%x", mac[:8]))
 		if strings.HasPrefix(macHex, prefix) {

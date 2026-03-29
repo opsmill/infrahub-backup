@@ -1,0 +1,77 @@
+# Minimal Infrahub Helm values for e2e testing in vcluster
+global:
+  imagePullPolicy: IfNotPresent
+
+infrahub-backup:
+  enabled: false
+
+infrahubServer:
+  replicas: 1
+  infrahubServer:
+    livenessProbe:
+      failureThreshold: 120
+      initialDelaySeconds: 1
+      periodSeconds: 1
+      timeoutSeconds: 1
+    readinessProbe:
+      httpGet:
+        path: /api/config
+        port: 8000
+      failureThreshold: 120
+      initialDelaySeconds: 1
+      periodSeconds: 1
+      timeoutSeconds: 1
+
+infrahubTaskWorker:
+  replicas: 1
+
+upgrade:
+  enabled: false
+
+infrahubDemoData:
+  enabled: false
+
+prefect-server:
+  postgresql:
+    primary:
+      startupProbe:
+        enabled: true
+        initialDelaySeconds: 1
+        periodSeconds: 1
+        timeoutSeconds: 1
+        failureThreshold: 120
+      readinessProbe:
+        initialDelaySeconds: 1
+        periodSeconds: 1
+        timeoutSeconds: 1
+        failureThreshold: 120
+      resourcesPreset: none
+
+rabbitmq:
+  startupProbe:
+    enabled: true
+    initialDelaySeconds: 1
+    periodSeconds: 1
+    timeoutSeconds: 1
+    failureThreshold: 120
+  readinessProbe:
+    initialDelaySeconds: 1
+    periodSeconds: 1
+    timeoutSeconds: 1
+    failureThreshold: 120
+  resourcesPreset: none
+
+redis:
+  master:
+    startupProbe:
+      enabled: true
+      initialDelaySeconds: 1
+      periodSeconds: 1
+      timeoutSeconds: 1
+      failureThreshold: 120
+    readinessProbe:
+      initialDelaySeconds: 1
+      periodSeconds: 1
+      timeoutSeconds: 1
+      failureThreshold: 120
+    resourcesPreset: none

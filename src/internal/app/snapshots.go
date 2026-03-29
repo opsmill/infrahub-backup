@@ -62,7 +62,11 @@ type BackupGroupInfo struct {
 func collectBackupGroups(repo *repository.Repository) ([]BackupGroupInfo, error) {
 	groupMap := make(map[string]*BackupGroupInfo)
 
-	for mac := range repo.ListSnapshots() {
+	for mac, listErr := range repo.ListSnapshots() {
+		if listErr != nil {
+			logrus.Warnf("Failed to list snapshot: %v", listErr)
+			continue
+		}
 		snap, err := snapshot.Load(repo, mac)
 		if err != nil {
 			logrus.Warnf("Failed to load snapshot %x: %v", mac[:8], err)
