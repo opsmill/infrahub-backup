@@ -62,12 +62,17 @@ func (iops *InfrahubOps) backupNeo4jEnterpriseStream(backupMetadata string) (fun
 }
 
 // backupNeo4jCommunityStream returns a data factory that streams the Neo4j Community dump
-// from the container via exec stdout. The dump is created first, then cat'd to stdout.
-func (iops *InfrahubOps) backupNeo4jCommunityStream() (ret func() (io.ReadCloser, error), retErr error) {
+// directly from the container via exec stdout using --to-stdout.
+// Community edition requires stopping neo4j before dumping; the process is resumed
+// when the returned ReadCloser is closed.
+func (iops *InfrahubOps) backupNeo4jCommunityStream() (func() (io.ReadCloser, error), error) {
 	return func() (io.ReadCloser, error) {
-		cleanupDumpDir := func() {
-			if _, err := iops.Exec("database", []string{"rm", "-rf", neo4jTempBackupDir}, nil); err != nil {
-				logrus.Warnf("Failed to remove temporary Neo4j dump directory: %v", err)
+		restoreNeo4j := func(pidStr string) {
+			if _, err := iops.Exec("database", []string{"rm", "-f", neo4jRemoteWatchdogBinary, neo4jRemoteWatchdogReady, neo4jRemoteWatchdogLog}, nil); err != nil {
+				logrus.Debugf("Failed to remove watchdog artifacts: %v", err)
+			}
+			if _, err := iops.Exec("database", []string{"kill", "-CONT", pidStr}, nil); err != nil {
+				logrus.Errorf("Failed to send SIGCONT to neo4j (pid %s): %v", pidStr, err)
 			}
 		}
 
@@ -76,50 +81,25 @@ func (iops *InfrahubOps) backupNeo4jCommunityStream() (ret func() (io.ReadCloser
 			return nil, err
 		}
 
-		err = iops.stopNeo4jCommunity(pidStr)
-		if err != nil {
+		if err := iops.stopNeo4jCommunity(pidStr); err != nil {
 			return nil, err
 		}
 
-		defer func() {
-			if _, err := iops.Exec("database", []string{"rm", "-f", neo4jRemoteWatchdogBinary, neo4jRemoteWatchdogReady, neo4jRemoteWatchdogLog}, nil); err != nil {
-				logrus.Debugf("Failed to remove watchdog artifacts: %v", err)
-			}
-			if _, err := iops.Exec("database", []string{"kill", "-CONT", pidStr}, nil); err != nil {
-				logrus.Errorf("Failed to send SIGCONT to neo4j (pid %s): %v", pidStr, err)
-				if retErr == nil {
-					retErr = fmt.Errorf("failed to resume neo4j process: %w", err)
-				}
-			}
-		}()
-
-		// Prepare dump directory
-		if _, err := iops.Exec("database", []string{"sh", "-c",
-			fmt.Sprintf("rm -rf %s && mkdir -p %s", neo4jTempBackupDir, neo4jTempBackupDir),
-		}, nil); err != nil {
-			return nil, fmt.Errorf("failed to prepare neo4j dump directory: %w", err)
-		}
-
-		// Run dump command separately so its stdout logs don't contaminate the data stream
-		if output, err := iops.Exec("database", []string{
+		// Stream the dump directly to stdout — no temp files needed
+		stdout, wait, err := iops.ExecStreamPipe("database", []string{
 			"neo4j-admin", "database", "dump",
-			"--overwrite-destination=true",
-			"--to-path=" + neo4jTempBackupDir,
+			"--to-stdout",
 			iops.config.Neo4jDatabase,
-		}, nil); err != nil {
-			cleanupDumpDir()
-			return nil, fmt.Errorf("failed to dump neo4j database: %w\nOutput: %v", err, output)
-		}
-
-		// Stream only the dump file — no other command output in the pipe
-		dumpFile := fmt.Sprintf("%s/%s.dump", neo4jTempBackupDir, iops.config.Neo4jDatabase)
-		stdout, wait, err := iops.ExecStreamPipe("database", []string{"cat", dumpFile}, nil)
+		}, nil)
 		if err != nil {
-			cleanupDumpDir()
+			restoreNeo4j(pidStr)
 			return nil, fmt.Errorf("failed to start neo4j community stream: %w", err)
 		}
 
-		return &execReadCloser{reader: stdout, wait: wait, idleTimeout: defaultStreamIdleTimeout, cleanup: cleanupDumpDir}, nil
+		// Neo4j is resumed when the stream is closed (after reading completes)
+		return &execReadCloser{reader: stdout, wait: wait, idleTimeout: defaultStreamIdleTimeout, cleanup: func() {
+			restoreNeo4j(pidStr)
+		}}, nil
 	}, nil
 }
 
