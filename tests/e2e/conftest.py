@@ -1,4 +1,3 @@
-import asyncio
 import os
 import subprocess
 import time
@@ -10,9 +9,7 @@ import boto3
 import httpx
 import kr8s.asyncio
 import pytest
-import yaml
 from kr8s.asyncio.objects import Service as AsyncService
-from kubernetes_asyncio import client as kubeclient
 from testcontainers.core.container import DockerContainer
 
 from tests.conftest import _dump_namespace_logs
@@ -64,49 +61,6 @@ def _dump_logs_on_failure(request):
 
 
 # ---------------------------------------------------------------------------
-# Wait helpers
-# ---------------------------------------------------------------------------
-async def _wait_for_service_ready(
-    core_api: kubeclient.CoreV1Api,
-    *,
-    name: str,
-    namespace: str = "default",
-    label_selector: str,
-    pod_timeout: float = 120.0,
-    endpoint_timeout: float = 60.0,
-) -> None:
-    """Wait for pods to be ready and service to have endpoints."""
-    deadline = time.time() + pod_timeout
-    while time.time() < deadline:
-        pods = await core_api.list_namespaced_pod(
-            namespace=namespace, label_selector=label_selector
-        )
-        if pods.items and all(
-            c.ready
-            for pod in pods.items
-            if pod.status and pod.status.container_statuses
-            for c in pod.status.container_statuses
-        ):
-            break
-        await asyncio.sleep(2)
-    else:
-        msg = f"pods matching '{label_selector}' in {namespace} did not become ready"
-        raise TimeoutError(msg)
-
-    deadline = time.time() + endpoint_timeout
-    while time.time() < deadline:
-        endpoints = await core_api.read_namespaced_endpoints(
-            name=name, namespace=namespace
-        )
-        if endpoints.subsets and any(subset.addresses for subset in endpoints.subsets):
-            break
-        await asyncio.sleep(2)
-    else:
-        msg = f"service {name} in {namespace} has no ready endpoints"
-        raise TimeoutError(msg)
-
-
-# ---------------------------------------------------------------------------
 # Fixture: backup_binary
 # ---------------------------------------------------------------------------
 @pytest.fixture(scope="session")
@@ -129,8 +83,9 @@ def minio_docker(request: pytest.FixtureRequest) -> dict:
         .with_exposed_ports(9000)
         .with_env("MINIO_ROOT_USER", "minioadmin")
         .with_env("MINIO_ROOT_PASSWORD", "minioadmin")
+        .with_kwargs(entrypoint="sh")
         .with_command(
-            "sh -c 'mkdir -p /data/backups && minio server /data --console-address :9001'"
+            "-c 'mkdir -p /data/backups && minio server /data --console-address :9001'"
         )
     )
 
@@ -228,54 +183,3 @@ async def infrahub_k8s(
         "kubeconfig_path": kubeconfig_path,
         "token": INFRAHUB_ADMIN_TOKEN,
     }
-
-
-# ---------------------------------------------------------------------------
-# Fixture: minio_k8s
-# ---------------------------------------------------------------------------
-@pytest.fixture(scope="session")
-async def minio_k8s(
-    vcluster: dict,
-    infrahub_k8s: dict,
-) -> AsyncGenerator[dict, None]:
-    """Deploy MinIO into vcluster for S3 testing."""
-    kubeconfig_path = vcluster["kubeconfig_path"]
-    api: kubeclient.ApiClient = vcluster["api"]
-    namespace = infrahub_k8s["namespace"]
-
-    # Deploy MinIO from manifest
-    manifest_path = FIXTURES_DIR / "minio" / "deployment.yaml"
-    with open(manifest_path) as f:
-        docs = list(yaml.safe_load_all(f))
-
-    apps_api = kubeclient.AppsV1Api(api)
-    core_api = kubeclient.CoreV1Api(api)
-
-    for doc in docs:
-        if doc["kind"] == "Deployment":
-            await apps_api.create_namespaced_deployment(namespace=namespace, body=doc)
-        elif doc["kind"] == "Service":
-            await core_api.create_namespaced_service(namespace=namespace, body=doc)
-
-    await _wait_for_service_ready(
-        core_api,
-        name="minio",
-        namespace=namespace,
-        label_selector="app=minio",
-        pod_timeout=120.0,
-    )
-
-    # Port-forward to create bucket
-    kr8s_api = await kr8s.asyncio.api(kubeconfig=kubeconfig_path)
-    service = await AsyncService.get("minio", namespace=namespace, api=kr8s_api)
-    async with service.portforward(remote_port=9000, local_port="auto") as local_port:
-        local_endpoint = f"http://localhost:{local_port}"
-        await wait_for_http(f"{local_endpoint}/minio/health/ready", timeout=30.0)
-
-        yield {
-            "cluster_endpoint": f"http://minio.{namespace}.svc:9000",
-            "local_endpoint": local_endpoint,
-            "access_key": "minioadmin",
-            "secret_key": "minioadmin",
-            "bucket": "backups",
-        }
