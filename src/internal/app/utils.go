@@ -184,6 +184,75 @@ func extractTarball(filename, destDir string) error {
 	return nil
 }
 
+// extractUncompressedTar extracts an uncompressed tar archive to destDir,
+// optionally stripping leading path components (like tar --strip-components).
+func extractUncompressedTar(filename, destDir string, stripComponents int) error {
+	file, err := os.Open(filename)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	tr := tar.NewReader(file)
+
+	destDir, err = filepath.Abs(destDir)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute path for destination: %w", err)
+	}
+
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+
+		name := header.Name
+		if stripComponents > 0 {
+			parts := strings.SplitN(name, "/", stripComponents+1)
+			if len(parts) <= stripComponents {
+				continue // entry is entirely within the stripped prefix
+			}
+			name = parts[stripComponents]
+			if name == "" {
+				continue
+			}
+		}
+
+		target := filepath.Join(destDir, name)
+		target = filepath.Clean(target)
+		if !isPathWithinDirectory(target, destDir) {
+			return fmt.Errorf("illegal file path in archive: %s (attempts to escape destination directory)", header.Name)
+		}
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(target, 0755); err != nil {
+				return err
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+				return err
+			}
+
+			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY, os.FileMode(header.Mode))
+			if err != nil {
+				return err
+			}
+
+			if _, err := io.Copy(f, tr); err != nil {
+				f.Close()
+				return err
+			}
+			f.Close()
+		}
+	}
+
+	return nil
+}
+
 // isPathWithinDirectory checks if path is within dir (prevents directory traversal attacks)
 func isPathWithinDirectory(path, dir string) bool {
 	rel, err := filepath.Rel(dir, path)
