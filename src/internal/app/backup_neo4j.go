@@ -575,6 +575,63 @@ func (iops *InfrahubOps) restoreNeo4jCommunity(restoreMigrateFormat bool) (retEr
 	return nil
 }
 
+// restoreNeo4jCommunityStream restores a Neo4j Community dump by streaming the data
+// directly from the provided reader into `neo4j-admin database load --from-stdin`.
+// This avoids copying dump files to a temporary directory on the container.
+func (iops *InfrahubOps) restoreNeo4jCommunityStream(reader io.ReadCloser, restoreMigrateFormat bool) (retErr error) {
+	logrus.Info("Restoring Neo4j database (Community Edition streamed load)...")
+
+	pidStr, err := iops.readNeo4jPID()
+	if err != nil {
+		return err
+	}
+
+	if err := iops.stopNeo4jCommunity(pidStr); err != nil {
+		return err
+	}
+
+	defer func() {
+		if _, err := iops.Exec("database", []string{"rm", "-f", neo4jRemoteWatchdogBinary, neo4jRemoteWatchdogReady, neo4jRemoteWatchdogLog}, nil); err != nil {
+			logrus.Debugf("Failed to remove watchdog artifacts: %v", err)
+		}
+		if _, err := iops.Exec("database", []string{"kill", "-CONT", pidStr}, nil); err != nil {
+			logrus.Errorf("Failed to send SIGCONT to neo4j (pid %s): %v", pidStr, err)
+			if retErr == nil {
+				retErr = fmt.Errorf("failed to resume neo4j process: %w", err)
+			}
+		}
+	}()
+
+	opts := iops.getNeo4jExecOptions()
+
+	wait, err := iops.ExecWritePipe(
+		"database",
+		[]string{"neo4j-admin", "database", "load", "--from-stdin", "--overwrite-destination=true", iops.config.Neo4jDatabase},
+		opts,
+		reader,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to start neo4j streamed load: %w", err)
+	}
+
+	if err := wait(); err != nil {
+		return fmt.Errorf("failed to load neo4j dump from stream: %w", err)
+	}
+
+	if restoreMigrateFormat {
+		if output, err := iops.Exec(
+			"database",
+			[]string{"neo4j-admin", "database", "migrate", "--to-format=block", iops.config.Neo4jDatabase},
+			opts,
+		); err != nil {
+			return fmt.Errorf("failed to migrate neo4j to block format: %w\nOutput: %v", err, output)
+		}
+	}
+
+	logrus.Info("Neo4j streamed restore completed successfully")
+	return nil
+}
+
 func (iops *InfrahubOps) readNeo4jPID() (string, error) {
 	output, err := iops.Exec("database", []string{"cat", neo4jPIDFile}, nil)
 	if err != nil {

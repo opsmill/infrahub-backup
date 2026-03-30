@@ -92,6 +92,7 @@ func (iops *InfrahubOps) RestorePlakarBackup(excludeTaskManager bool, restoreMig
 }
 
 // restoreBackupGroup exports each component snapshot to a temp directory and restores.
+// Neo4j community dumps are streamed directly from Plakar into the container.
 func (iops *InfrahubOps) restoreBackupGroup(kctx *kcontext.KContext, repo *repository.Repository, group *BackupGroupInfo, excludeTaskManager bool, restoreMigrateFormat bool) error {
 	// Create temp directory for extraction
 	workDir, err := os.MkdirTemp("", "infrahub_plakar_restore_*")
@@ -105,45 +106,22 @@ func (iops *InfrahubOps) restoreBackupGroup(kctx *kcontext.KContext, repo *repos
 		return fmt.Errorf("failed to create backup directory: %w", err)
 	}
 
-	// Export each component snapshot
+	// Export each component snapshot, deferring neo4j for potential streaming
+	var neo4jSnapInfo *SnapshotInfo
 	for _, snapInfo := range group.Snapshots {
+		if snapInfo.Component == ComponentNeo4j {
+			si := snapInfo
+			neo4jSnapInfo = &si
+			continue
+		}
 		if excludeTaskManager && snapInfo.Component == ComponentPostgres {
 			logrus.Info("Skipping postgres component restore as requested")
 			continue
 		}
 
-		snap, err := snapshot.Load(repo, snapInfo.MAC)
-		if err != nil {
-			return fmt.Errorf("failed to load %s snapshot: %w", snapInfo.Component, err)
+		if err := iops.exportSnapshotToDir(kctx, repo, snapInfo, backupDir); err != nil {
+			return err
 		}
-
-		// Export to component-specific subdirectory
-		componentDir := filepath.Join(backupDir, snapInfo.Component)
-		if err := os.MkdirAll(componentDir, 0755); err != nil {
-			snap.Close()
-			return fmt.Errorf("failed to create directory for %s: %w", snapInfo.Component, err)
-		}
-
-		exp, err := exporter.NewExporter(kctx, &connectors.Options{MaxConcurrency: kctx.MaxConcurrency}, map[string]string{
-			"location": "fs://" + componentDir,
-		})
-		if err != nil {
-			snap.Close()
-			return fmt.Errorf("failed to create exporter for %s: %w", snapInfo.Component, err)
-		}
-
-		logrus.Infof("Extracting %s snapshot...", snapInfo.Component)
-		exportOpts := &snapshot.ExportOptions{
-			SkipPermissions: true,
-		}
-		if err := snap.Export(exp, "/", exportOpts); err != nil {
-			exp.Close(kctx.Context)
-			snap.Close()
-			return fmt.Errorf("failed to extract %s snapshot: %w", snapInfo.Component, err)
-		}
-
-		exp.Close(kctx.Context)
-		snap.Close()
 	}
 
 	// Read metadata from the metadata component
@@ -181,12 +159,17 @@ func (iops *InfrahubOps) restoreBackupGroup(kctx *kcontext.KContext, repo *repos
 	}
 	editionInfo.LogDetection("restore")
 
-	// Restructure exported files for existing restore functions:
-	// Neo4j expects workDir/backup/database/ — move neo4j component files there
-	neo4jComponentDir := filepath.Join(backupDir, "neo4j")
-	databaseDir := filepath.Join(backupDir, "database")
-	if err := os.Rename(neo4jComponentDir, databaseDir); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to restructure neo4j export: %w", err)
+	// For enterprise, export neo4j snapshot now and restructure for file-based restore
+	isCommunity := strings.EqualFold(neo4jEdition, neo4jEditionCommunity)
+	if neo4jSnapInfo != nil && !isCommunity {
+		if err := iops.exportSnapshotToDir(kctx, repo, *neo4jSnapInfo, backupDir); err != nil {
+			return err
+		}
+		neo4jComponentDir := filepath.Join(backupDir, "neo4j")
+		databaseDir := filepath.Join(backupDir, "database")
+		if err := os.Rename(neo4jComponentDir, databaseDir); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to restructure neo4j export: %w", err)
+		}
 	}
 
 	// PostgreSQL expects workDir/backup/prefect.dump — move from postgres component
@@ -240,8 +223,27 @@ func (iops *InfrahubOps) restoreBackupGroup(kctx *kcontext.KContext, repo *repos
 	}
 
 	// Restore Neo4j
-	if err := iops.restoreNeo4j(workDir, neo4jEdition, restoreMigrateFormat); err != nil {
-		return err
+	if neo4jSnapInfo != nil && isCommunity {
+		// Stream community dump directly from Plakar into the container
+		snap, err := snapshot.Load(repo, neo4jSnapInfo.MAC)
+		if err != nil {
+			return fmt.Errorf("failed to load neo4j snapshot for streaming: %w", err)
+		}
+		reader, err := snap.NewReader("/neo4j.dump")
+		if err != nil {
+			snap.Close()
+			return fmt.Errorf("failed to open neo4j dump stream from snapshot: %w", err)
+		}
+		err = iops.restoreNeo4jCommunityStream(reader, restoreMigrateFormat)
+		reader.Close()
+		snap.Close()
+		if err != nil {
+			return err
+		}
+	} else if neo4jSnapInfo != nil {
+		if err := iops.restoreNeo4j(workDir, neo4jEdition, restoreMigrateFormat); err != nil {
+			return err
+		}
 	}
 
 	// Restart all services
@@ -253,6 +255,39 @@ func (iops *InfrahubOps) restoreBackupGroup(kctx *kcontext.KContext, repo *repos
 	logrus.Info("Restore from Plakar backup group completed successfully")
 	logrus.Info("Infrahub should be available shortly")
 
+	return nil
+}
+
+// exportSnapshotToDir extracts a single component snapshot to a subdirectory of backupDir.
+func (iops *InfrahubOps) exportSnapshotToDir(kctx *kcontext.KContext, repo *repository.Repository, snapInfo SnapshotInfo, backupDir string) error {
+	snap, err := snapshot.Load(repo, snapInfo.MAC)
+	if err != nil {
+		return fmt.Errorf("failed to load %s snapshot: %w", snapInfo.Component, err)
+	}
+	defer snap.Close()
+
+	componentDir := filepath.Join(backupDir, snapInfo.Component)
+	if err := os.MkdirAll(componentDir, 0755); err != nil {
+		return fmt.Errorf("failed to create directory for %s: %w", snapInfo.Component, err)
+	}
+
+	exp, err := exporter.NewExporter(kctx, &connectors.Options{MaxConcurrency: kctx.MaxConcurrency}, map[string]string{
+		"location": "fs://" + componentDir,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create exporter for %s: %w", snapInfo.Component, err)
+	}
+
+	logrus.Infof("Extracting %s snapshot...", snapInfo.Component)
+	exportOpts := &snapshot.ExportOptions{
+		SkipPermissions: true,
+	}
+	if err := snap.Export(exp, "/", exportOpts); err != nil {
+		exp.Close(kctx.Context)
+		return fmt.Errorf("failed to extract %s snapshot: %w", snapInfo.Component, err)
+	}
+
+	exp.Close(kctx.Context)
 	return nil
 }
 
@@ -275,7 +310,52 @@ func (iops *InfrahubOps) restoreSingleSnapshot(kctx *kcontext.KContext, repo *re
 		"name":        snap.Header.Name,
 	}).Info("Restoring from single Plakar snapshot")
 
-	// Create temp directory for extraction
+	// Determine component type and edition from tags before deciding export strategy
+	tags := parseSnapshotTags(snap.Header.Tags)
+	component := tags[TagComponent]
+	neo4jEdition := tags[TagNeo4jEdition]
+
+	logrus.Infof("Restoring single component: %s", component)
+
+	// Detect Neo4j edition for restore
+	detectedEdition, detectionErr := iops.detectNeo4jEdition()
+	editionInfo := NewNeo4jEditionInfo(detectedEdition, detectionErr)
+	if neo4jEdition != "" {
+		resolvedEdition, err := editionInfo.ResolveRestoreEdition(neo4jEdition)
+		if err != nil {
+			return err
+		}
+		neo4jEdition = resolvedEdition
+	}
+
+	// Neo4j community: stream directly from snapshot without exporting to disk
+	if component == ComponentNeo4j && strings.EqualFold(neo4jEdition, neo4jEditionCommunity) {
+		reader, err := snap.NewReader("/neo4j.dump")
+		if err != nil {
+			return fmt.Errorf("failed to open neo4j dump stream from snapshot: %w", err)
+		}
+		defer reader.Close()
+
+		if _, err := iops.stopAppContainers(); err != nil {
+			return err
+		}
+		if err := iops.restartDependencies(); err != nil {
+			return err
+		}
+		if err := iops.restoreNeo4jCommunityStream(reader, restoreMigrateFormat); err != nil {
+			return err
+		}
+
+		logrus.Info("Restarting Infrahub services...")
+		if err := iops.StartServices("infrahub-server", "task-worker"); err != nil {
+			return fmt.Errorf("failed to restart infrahub services: %w", err)
+		}
+
+		logrus.Info("Restore from Plakar snapshot completed successfully")
+		return nil
+	}
+
+	// All other components: export to temp directory first
 	workDir, err := os.MkdirTemp("", "infrahub_plakar_restore_*")
 	if err != nil {
 		return fmt.Errorf("failed to create temp directory: %w", err)
@@ -303,32 +383,13 @@ func (iops *InfrahubOps) restoreSingleSnapshot(kctx *kcontext.KContext, repo *re
 		return fmt.Errorf("failed to extract plakar snapshot: %w", err)
 	}
 
-	// Determine component type from tags
-	tags := parseSnapshotTags(snap.Header.Tags)
-	component := tags[TagComponent]
-	neo4jEdition := tags[TagNeo4jEdition]
-
-	logrus.Infof("Restoring single component: %s", component)
-
-	// Detect Neo4j edition for restore
-	detectedEdition, detectionErr := iops.detectNeo4jEdition()
-	editionInfo := NewNeo4jEditionInfo(detectedEdition, detectionErr)
-	if neo4jEdition != "" {
-		resolvedEdition, err := editionInfo.ResolveRestoreEdition(neo4jEdition)
-		if err != nil {
-			return err
-		}
-		neo4jEdition = resolvedEdition
-	}
-
 	switch component {
 	case ComponentNeo4j:
-		// Restructure: exported files are at backup/<filename> — move to backup/database/
+		// Enterprise: restructure exported files at backup/<filename> → backup/database/
 		databaseDir := filepath.Join(exportDir, "database")
 		if err := os.MkdirAll(databaseDir, 0755); err != nil {
 			return err
 		}
-		// Move all files from exportDir to database/ (except the database dir itself)
 		entries, err := os.ReadDir(exportDir)
 		if err != nil {
 			return fmt.Errorf("failed to read export directory: %w", err)

@@ -105,6 +105,17 @@ func (k *KubernetesBackend) ExecStreamPipe(service string, command []string, opt
 	return k.executor.runCommandPipe("kubectl", args...)
 }
 
+func (k *KubernetesBackend) ExecWritePipe(service string, command []string, opts *ExecOptions, stdin io.Reader) (func() error, error) {
+	pod, err := k.getPodForService(service)
+	if err != nil {
+		return nil, err
+	}
+	finalCmd := k.prepareCommand(command, opts)
+	args := []string{"exec", "-i", "-n", k.namespace, pod, "--"}
+	args = append(args, finalCmd...)
+	return k.executor.runCommandWritePipe(stdin, "kubectl", args...)
+}
+
 func (k *KubernetesBackend) CopyTo(service, src, dest string) error {
 	pod, err := k.getPodForService(service)
 	if err != nil {

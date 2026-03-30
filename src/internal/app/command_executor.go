@@ -98,6 +98,36 @@ func (ce *CommandExecutor) runCommandPipe(name string, args ...string) (io.ReadC
 	return stdout, wait, nil
 }
 
+// runCommandWritePipe starts a command with stdin connected to the provided reader.
+// The caller must call wait() after the reader is fully consumed to get the exit status.
+func (ce *CommandExecutor) runCommandWritePipe(stdin io.Reader, name string, args ...string) (func() error, error) {
+	cmd := exec.Command(name, args...)
+	logrus.Debugf("exec write-pipe: %s %s", name, strings.Join(args, " "))
+
+	cmd.Stdin = stdin
+
+	// Capture stderr for error reporting
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	wait := func() error {
+		if err := cmd.Wait(); err != nil {
+			stderrStr := strings.TrimSpace(stderrBuf.String())
+			if stderrStr != "" {
+				return fmt.Errorf("%w: %s", err, stderrStr)
+			}
+			return err
+		}
+		return nil
+	}
+
+	return wait, nil
+}
+
 func (ce *CommandExecutor) runCommandWithStream(name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
 

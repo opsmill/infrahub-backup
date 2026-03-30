@@ -230,6 +230,14 @@ func (iops *InfrahubOps) ExecStreamPipe(service string, command []string, opts *
 	return backend.ExecStreamPipe(service, command, opts)
 }
 
+func (iops *InfrahubOps) ExecWritePipe(service string, command []string, opts *ExecOptions, stdin io.Reader) (func() error, error) {
+	backend, err := iops.ensureBackend()
+	if err != nil {
+		return nil, err
+	}
+	return backend.ExecWritePipe(service, command, opts, stdin)
+}
+
 func (iops *InfrahubOps) ExecStream(service string, command []string, opts *ExecOptions) (string, error) {
 	backend, err := iops.ensureBackend()
 	if err != nil {
