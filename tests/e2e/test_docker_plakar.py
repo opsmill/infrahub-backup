@@ -1,6 +1,7 @@
 """E2E tests: Docker Compose + plakar local-fs backup/restore."""
 
 import subprocess
+from pathlib import Path
 
 import pytest
 from infrahub_sdk.testing.docker import TestInfrahubDockerClient
@@ -90,12 +91,13 @@ class TestDockerPlakar(TestInfrahubDockerClient):
         # 7. Verify the tag is back
         await verify_infrahub_data(url, ADMIN_TOKEN, seed)
 
-    async def test_plakar_incremental_backup(
+    async def test_plakar_dedup_logical_vs_physical(
         self, infrahub_compose, backup_binary, tmp_path
     ):
-        """Verify that a second plakar backup is incremental (deduplication)."""
+        """Verify plakar deduplication: repo physical size after two identical
+        backups should be much less than 2x the size after one backup."""
         project = infrahub_compose.project_name
-        repo_path = str(tmp_path / "plakar-repo-incr")
+        repo_path = str(tmp_path / "plakar-repo-dedup")
 
         common_args = [
             "--project",
@@ -106,11 +108,31 @@ class TestDockerPlakar(TestInfrahubDockerClient):
             f"fs://{repo_path}",
         ]
 
-        # First backup
-        run_backup(backup_binary, common_args + ["create", "--force"])
+        def repo_size_bytes() -> int:
+            """Return total size of all files in the plakar repository."""
+            return sum(
+                f.stat().st_size for f in Path(repo_path).rglob("*") if f.is_file()
+            )
 
-        # Second backup (should be mostly deduplicated)
+        # First backup – establishes baseline physical size
         run_backup(backup_binary, common_args + ["create", "--force"])
+        size_after_first = repo_size_bytes()
+        assert size_after_first > 0, "Repository should not be empty after first backup"
+
+        # Second backup of identical data – should be mostly deduplicated
+        run_backup(backup_binary, common_args + ["create", "--force"])
+        size_after_second = repo_size_bytes()
+
+        # The growth from the second backup should be well under 50% of the
+        # first backup's size, proving that deduplication is effective.
+        # With identical data the overhead is mostly snapshot metadata.
+        growth = size_after_second - size_after_first
+        max_allowed_growth = size_after_first * 0.5
+        assert growth < max_allowed_growth, (
+            f"Deduplication check failed: first backup {size_after_first} bytes, "
+            f"second added {growth} bytes ({growth / size_after_first:.1%}), "
+            f"expected < 50% growth"
+        )
 
         # Verify two backup groups exist
         result = subprocess.run(
