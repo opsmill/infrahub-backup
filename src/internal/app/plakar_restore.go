@@ -159,17 +159,20 @@ func (iops *InfrahubOps) restoreBackupGroup(kctx *kcontext.KContext, repo *repos
 	}
 	editionInfo.LogDetection("restore")
 
-	// For enterprise, export neo4j snapshot now and restructure for file-based restore
+	// For enterprise, export neo4j snapshot and extract the tar archive for file-based restore
 	isCommunity := strings.EqualFold(neo4jEdition, neo4jEditionCommunity)
 	if neo4jSnapInfo != nil && !isCommunity {
 		if err := iops.exportSnapshotToDir(kctx, repo, *neo4jSnapInfo, backupDir); err != nil {
 			return err
 		}
-		neo4jComponentDir := filepath.Join(backupDir, "neo4j")
+		// The exported snapshot contains neo4j-backup.tar; extract it
+		// into backupDir/database/ with the infrahubops/ prefix stripped.
+		tarPath := filepath.Join(backupDir, "neo4j", "neo4j-backup.tar")
 		databaseDir := filepath.Join(backupDir, "database")
-		if err := os.Rename(neo4jComponentDir, databaseDir); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("failed to restructure neo4j export: %w", err)
+		if err := extractNeo4jEnterpriseTar(tarPath, databaseDir); err != nil {
+			return fmt.Errorf("failed to extract neo4j enterprise backup: %w", err)
 		}
+		os.RemoveAll(filepath.Join(backupDir, "neo4j"))
 	}
 
 	// PostgreSQL expects workDir/backup/prefect.dump — move from postgres component
@@ -256,6 +259,16 @@ func (iops *InfrahubOps) restoreBackupGroup(kctx *kcontext.KContext, repo *repos
 	logrus.Info("Infrahub should be available shortly")
 
 	return nil
+}
+
+// extractNeo4jEnterpriseTar extracts the neo4j enterprise backup tar archive
+// (created by backupNeo4jEnterpriseStream) into databaseDir.
+// The tar contains files under an "infrahubops/" prefix which is stripped.
+func extractNeo4jEnterpriseTar(tarPath, databaseDir string) error {
+	if err := os.MkdirAll(databaseDir, 0755); err != nil {
+		return fmt.Errorf("failed to create database directory: %w", err)
+	}
+	return extractUncompressedTar(tarPath, databaseDir, 1)
 }
 
 // exportSnapshotToDir extracts a single component snapshot to a subdirectory of backupDir.
@@ -385,23 +398,14 @@ func (iops *InfrahubOps) restoreSingleSnapshot(kctx *kcontext.KContext, repo *re
 
 	switch component {
 	case ComponentNeo4j:
-		// Enterprise: restructure exported files at backup/<filename> → backup/database/
+		// Enterprise: the exported snapshot contains neo4j-backup.tar;
+		// extract it into exportDir/database/ with infrahubops/ prefix stripped.
+		tarPath := filepath.Join(exportDir, "neo4j-backup.tar")
 		databaseDir := filepath.Join(exportDir, "database")
-		if err := os.MkdirAll(databaseDir, 0755); err != nil {
-			return err
+		if err := extractNeo4jEnterpriseTar(tarPath, databaseDir); err != nil {
+			return fmt.Errorf("failed to extract neo4j enterprise backup: %w", err)
 		}
-		entries, err := os.ReadDir(exportDir)
-		if err != nil {
-			return fmt.Errorf("failed to read export directory: %w", err)
-		}
-		for _, e := range entries {
-			if e.Name() == "database" {
-				continue
-			}
-			if err := os.Rename(filepath.Join(exportDir, e.Name()), filepath.Join(databaseDir, e.Name())); err != nil {
-				return fmt.Errorf("failed to move %s to database directory: %w", e.Name(), err)
-			}
-		}
+		os.Remove(tarPath)
 
 		// Stop services and restore
 		if _, err := iops.stopAppContainers(); err != nil {
