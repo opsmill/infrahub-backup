@@ -107,6 +107,10 @@ func (d *DockerBackend) ExecStreamPipe(service string, command []string, opts *E
 	return d.executor.runCommandPipe("docker", d.buildExecArgs(service, command, opts)...)
 }
 
+func (d *DockerBackend) ExecWritePipe(service string, command []string, opts *ExecOptions, stdin io.Reader) (func() error, error) {
+	return d.executor.runCommandWritePipe(stdin, "docker", d.buildExecArgs(service, command, opts)...)
+}
+
 func (d *DockerBackend) CopyTo(service, src, dest string) error {
 	target := fmt.Sprintf("%s:%s", service, dest)
 	cmd := d.composeArgs("cp", "-a", src, target)
