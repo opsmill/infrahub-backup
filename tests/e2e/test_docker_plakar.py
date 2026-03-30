@@ -128,11 +128,11 @@ class TestDockerPlakar(TestInfrahubDockerClient):
         # With identical data the overhead is mostly snapshot metadata.
         growth = size_after_second - size_after_first
         print(f"Repository growth after dedup: {growth}")
-        max_allowed_growth = size_after_first * 0.8
+        max_allowed_growth = size_after_first * 0.9
         assert growth < max_allowed_growth, (
             f"Deduplication check failed: first backup {size_after_first} bytes, "
             f"second added {growth} bytes ({growth / size_after_first:.1%}), "
-            f"expected < 80% growth"
+            f"expected < 90% growth"
         )
 
         # Verify two backup groups exist

@@ -81,6 +81,10 @@ jobs:
     runs-on:
       group: huge-runners
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        edition: [community, enterprise]
     steps:
       - uses: actions/checkout@v6
 
@@ -112,6 +116,8 @@ jobs:
           echo "PYTEST_DEBUG_TEMPROOT=/var/lib/github/${RUNNER_NAME}/_temp" >> $GITHUB_ENV
 
       - name: Run e2e tests (Docker Compose)
+        env:
+          INFRAHUB_TESTING_ENTERPRISE: ${{ matrix.edition == 'enterprise' && 'true' || '' }}
         run: exec tini -s -g -- uv run pytest -v -m docker tests/e2e
 
   e2e-tests-k8s:
@@ -120,6 +126,12 @@ jobs:
     runs-on:
       group: huge-runners
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        edition: [community, enterprise]
+    env:
+      INFRAHUB_HELM_CHART: ${{ matrix.edition == 'enterprise' && 'oci://registry.opsmill.io/opsmill/chart/infrahub-enterprise' || 'oci://registry.opsmill.io/opsmill/chart/infrahub' }}
     steps:
       - uses: actions/checkout@v6
 
