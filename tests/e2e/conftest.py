@@ -162,7 +162,7 @@ async def infrahub_k8s(
             "--create-namespace",
             "-n",
             namespace,
-            "oci://registry.opsmill.io/opsmill/chart/infrahub",
+            os.environ.get("INFRAHUB_HELM_CHART", "oci://registry.opsmill.io/opsmill/chart/infrahub"),
             "-f",
             str(FIXTURES_DIR / "helm" / "infrahub-values.yaml"),
             "--kubeconfig",
