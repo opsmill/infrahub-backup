@@ -127,6 +127,7 @@ class TestDockerPlakar(TestInfrahubDockerClient):
         # first backup's size, proving that deduplication is effective.
         # With identical data the overhead is mostly snapshot metadata.
         growth = size_after_second - size_after_first
+        print(f"Repository growth after dedup: {growth}")
         max_allowed_growth = size_after_first * 0.5
         assert growth < max_allowed_growth, (
             f"Deduplication check failed: first backup {size_after_first} bytes, "
