@@ -5,6 +5,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncGenerator
 
+import yaml
+
 import boto3
 import httpx
 import kr8s.asyncio
@@ -211,10 +213,22 @@ async def reset_database_pod(infrahub_k8s):
 @pytest.fixture(scope="session")
 async def infrahub_k8s(
     vcluster: dict,
+    tmp_path_factory,
 ) -> AsyncGenerator[dict, None]:
     """Deploy Infrahub via Helm into vcluster."""
     kubeconfig_path = vcluster["kubeconfig_path"]
     namespace = "infrahub"
+
+    # Prepare Helm values — enterprise wraps community values under "infrahub" key
+    values_path = FIXTURES_DIR / "helm" / "infrahub-values.yaml"
+    if _is_enterprise():
+        with open(values_path) as f:
+            values = yaml.safe_load(f)
+        global_values = values.pop("global", {})
+        wrapped = {"infrahub": values, "global": global_values}
+        values_path = tmp_path_factory.mktemp("helm") / "infrahub-values.yaml"
+        with open(values_path, "w") as f:
+            yaml.dump(wrapped, f)
 
     # Install Infrahub via Helm
     subprocess.run(
@@ -232,7 +246,7 @@ async def infrahub_k8s(
                 "oci://registry.opsmill.io/opsmill/chart/infrahub",
             ),
             "-f",
-            str(FIXTURES_DIR / "helm" / "infrahub-values.yaml"),
+            str(values_path),
             "--kubeconfig",
             kubeconfig_path,
             "--wait",
