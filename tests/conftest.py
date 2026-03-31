@@ -20,7 +20,6 @@ def pytest_collection_modifyitems(items):
 
 @pytest.fixture(scope="session")
 async def vcluster(
-    request: pytest.FixtureRequest,
     tmp_path_factory,
 ) -> AsyncGenerator[dict, None]:
     """Create a vCluster and yield connection details."""
@@ -28,14 +27,6 @@ async def vcluster(
     cluster_name = f"pytest-{uuid.uuid4()}"
 
     vcluster_dir = os.environ.get("VCLUSTER_DIR")
-
-    def teardown():
-        delete_cmd = ["vcluster", "delete", cluster_name, "--driver=docker"]
-        if vcluster_dir:
-            delete_cmd.extend(["--config", vcluster_dir])
-        subprocess.run(delete_cmd, check=True)
-
-    request.addfinalizer(teardown)
 
     create_cmd = [
         "vcluster",
@@ -62,6 +53,12 @@ async def vcluster(
             "cluster_name": cluster_name,
             "kubeconfig_path": kubeconfig_path,
         }
+
+    # Teardown: delete vcluster AFTER all dependent fixtures have torn down
+    delete_cmd = ["vcluster", "delete", cluster_name, "--driver=docker"]
+    if vcluster_dir:
+        delete_cmd.extend(["--config", vcluster_dir])
+    subprocess.run(delete_cmd, check=True)
 
 
 # ---------------------------------------------------------------------------

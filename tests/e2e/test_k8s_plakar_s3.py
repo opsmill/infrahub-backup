@@ -17,7 +17,9 @@ from tests.helpers.utils import (
 
 @pytest.mark.e2e
 @pytest.mark.k8s
-async def test_backup_restore_k8s_plakar_s3(infrahub_k8s, backup_binary, minio_docker):
+async def test_backup_restore_k8s_plakar_s3(
+    reset_database_pod, infrahub_k8s, backup_binary, minio_docker
+):
     """K8s: Create a plakar backup to S3, restore, and verify."""
     token = infrahub_k8s["token"]
     namespace = infrahub_k8s["namespace"]
@@ -35,9 +37,12 @@ async def test_backup_restore_k8s_plakar_s3(infrahub_k8s, backup_binary, minio_d
     }
 
     common_args = [
-        "--k8s-namespace", namespace,
-        "--backend", "plakar",
-        "--repo", repo_uri,
+        "--k8s-namespace",
+        namespace,
+        "--backend",
+        "plakar",
+        "--repo",
+        repo_uri,
     ]
 
     # 1. Seed test data (fresh port-forward)
