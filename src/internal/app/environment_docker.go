@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 )
@@ -71,7 +72,8 @@ func (d *DockerBackend) composeArgs(args ...string) []string {
 	return cmd
 }
 
-func (d *DockerBackend) Exec(service string, command []string, opts *ExecOptions) (string, error) {
+// buildExecArgs constructs the docker compose exec arguments for a service command.
+func (d *DockerBackend) buildExecArgs(service string, command []string, opts *ExecOptions) []string {
 	args := []string{"exec", "-T"}
 	if opts != nil {
 		if opts.User != "" {
@@ -90,31 +92,19 @@ func (d *DockerBackend) Exec(service string, command []string, opts *ExecOptions
 	}
 	args = append(args, service)
 	args = append(args, command...)
-	full := d.composeArgs(args...)
-	return d.executor.runCommand("docker", full...)
+	return d.composeArgs(args...)
+}
+
+func (d *DockerBackend) Exec(service string, command []string, opts *ExecOptions) (string, error) {
+	return d.executor.runCommand("docker", d.buildExecArgs(service, command, opts)...)
 }
 
 func (d *DockerBackend) ExecStream(service string, command []string, opts *ExecOptions) (string, error) {
-	args := []string{"exec", "-T"}
-	if opts != nil {
-		if opts.User != "" {
-			args = append(args, "-u", opts.User)
-		}
-		if len(opts.Env) > 0 {
-			keys := make([]string, 0, len(opts.Env))
-			for k := range opts.Env {
-				keys = append(keys, k)
-			}
-			sort.Strings(keys)
-			for _, key := range keys {
-				args = append(args, "-e", fmt.Sprintf("%s=%s", key, opts.Env[key]))
-			}
-		}
-	}
-	args = append(args, service)
-	args = append(args, command...)
-	full := d.composeArgs(args...)
-	return d.executor.runCommandWithStream("docker", full...)
+	return d.executor.runCommandWithStream("docker", d.buildExecArgs(service, command, opts)...)
+}
+
+func (d *DockerBackend) ExecStreamPipe(service string, command []string, opts *ExecOptions) (io.ReadCloser, func() error, error) {
+	return d.executor.runCommandPipe("docker", d.buildExecArgs(service, command, opts)...)
 }
 
 func (d *DockerBackend) CopyTo(service, src, dest string) error {
