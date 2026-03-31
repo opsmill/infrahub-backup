@@ -61,6 +61,13 @@ rabbitmq:
     failureThreshold: 120
   resourcesPreset: none
 
+neo4j:
+  volumes:
+    data:
+      mode: dynamic
+      dynamic:
+        storageClassName: "local-path"
+
 redis:
   master:
     startupProbe:
