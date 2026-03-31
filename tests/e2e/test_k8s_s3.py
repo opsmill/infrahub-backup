@@ -15,7 +15,9 @@ from tests.helpers.utils import (
 
 @pytest.mark.e2e
 @pytest.mark.k8s
-async def test_backup_restore_k8s_s3_tarball(infrahub_k8s, backup_binary, minio_docker, tmp_path):
+async def test_backup_restore_k8s_s3_tarball(
+    reset_database_pod, infrahub_k8s, backup_binary, minio_docker, tmp_path
+):
     """K8s: Create a tarball backup uploaded to S3, restore from S3, and verify."""
     token = infrahub_k8s["token"]
     namespace = infrahub_k8s["namespace"]
@@ -36,12 +38,19 @@ async def test_backup_restore_k8s_s3_tarball(infrahub_k8s, backup_binary, minio_
     run_backup(
         backup_binary,
         [
-            "--k8s-namespace", namespace,
-            "--backup-dir", str(tmp_path),
-            "--s3-bucket", minio["bucket"],
-            "--s3-endpoint", minio["endpoint"],
-            "--s3-region", "us-east-1",
-            "create", "--force", "--s3-upload",
+            "--k8s-namespace",
+            namespace,
+            "--backup-dir",
+            str(tmp_path),
+            "--s3-bucket",
+            minio["bucket"],
+            "--s3-endpoint",
+            minio["endpoint"],
+            "--s3-region",
+            "us-east-1",
+            "create",
+            "--force",
+            "--s3-upload",
         ],
         env=env,
     )
@@ -64,11 +73,16 @@ async def test_backup_restore_k8s_s3_tarball(infrahub_k8s, backup_binary, minio_
     run_restore(
         backup_binary,
         [
-            "--k8s-namespace", namespace,
-            "--s3-bucket", minio["bucket"],
-            "--s3-endpoint", minio["endpoint"],
-            "--s3-region", "us-east-1",
-            "restore", s3_uri,
+            "--k8s-namespace",
+            namespace,
+            "--s3-bucket",
+            minio["bucket"],
+            "--s3-endpoint",
+            minio["endpoint"],
+            "--s3-region",
+            "us-east-1",
+            "restore",
+            s3_uri,
         ],
         env=env,
     )

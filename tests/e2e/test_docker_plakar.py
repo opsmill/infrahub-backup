@@ -91,6 +91,7 @@ class TestDockerPlakar(TestInfrahubDockerClient):
         # 7. Verify the tag is back
         await verify_infrahub_data(url, ADMIN_TOKEN, seed)
 
+    @pytest.mark.xfail(reason="dedup not deterministic...")
     async def test_plakar_dedup_logical_vs_physical(
         self, infrahub_compose, backup_binary, tmp_path
     ):

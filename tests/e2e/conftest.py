@@ -9,6 +9,7 @@ import boto3
 import httpx
 import kr8s.asyncio
 import pytest
+from kr8s.asyncio.objects import Pod as AsyncPod
 from kr8s.asyncio.objects import Service as AsyncService
 from testcontainers.core.container import DockerContainer
 
@@ -16,6 +17,15 @@ from tests.conftest import _dump_namespace_logs
 from tests.helpers.utils import wait_for_http
 
 PROJECT_ROOT = Path(__file__).parent.resolve().parents[1]
+
+
+def _is_enterprise() -> bool:
+    """Return True if the current test run targets Infrahub Enterprise."""
+    if os.environ.get("INFRAHUB_TESTING_ENTERPRISE"):
+        return True
+    return "enterprise" in os.environ.get("INFRAHUB_HELM_CHART", "")
+
+
 FIXTURES_DIR = Path(__file__).parent.resolve() / "fixtures"
 
 INFRAHUB_ADMIN_TOKEN = "06438eb2-8019-4776-878c-0941b1f1d1ec"
@@ -141,6 +151,61 @@ async def portforward_infrahub(kubeconfig_path: str, namespace: str):
 
 
 # ---------------------------------------------------------------------------
+# Helper: delete database pod to reset CrashLoopBackOff
+# ---------------------------------------------------------------------------
+async def _delete_and_wait_for_database_pod(
+    kubeconfig_path: str, namespace: str, timeout: float = 300.0
+) -> None:
+    """Delete the database pod and wait for its replacement to be ready."""
+    import asyncio
+
+    api = await kr8s.asyncio.api(kubeconfig=kubeconfig_path)
+    pods = [
+        pod
+        async for pod in AsyncPod.list(
+            namespace=namespace,
+            label_selector="infrahub/service=database",
+            api=api,
+        )
+    ]
+    old_uids = {pod.metadata.get("uid") for pod in pods}
+    for pod in pods:
+        await pod.async_delete()
+
+    # Wait for a new ready pod (skip old pods that haven't terminated yet)
+    start = asyncio.get_event_loop().time()
+    while asyncio.get_event_loop().time() - start < timeout:
+        async for pod in AsyncPod.list(
+            namespace=namespace,
+            label_selector="infrahub/service=database",
+            api=api,
+        ):
+            if pod.metadata.get("uid") in old_uids:
+                continue
+            phase = pod.raw.get("status", {}).get("phase")
+            containers = pod.raw.get("status", {}).get("containerStatuses", [])
+            if phase == "Running" and all(c.get("ready") for c in containers):
+                return
+        await asyncio.sleep(5)
+    raise TimeoutError(f"Database pod not ready after {timeout}s")
+
+
+# ---------------------------------------------------------------------------
+# Fixture: reset_database_pod
+# ---------------------------------------------------------------------------
+@pytest.fixture()
+async def reset_database_pod(infrahub_k8s):
+    """Delete the database pod after test to reset CrashLoopBackOff (community only)."""
+    yield
+    if _is_enterprise():
+        return
+    await _delete_and_wait_for_database_pod(
+        infrahub_k8s["kubeconfig_path"],
+        infrahub_k8s["namespace"],
+    )
+
+
+# ---------------------------------------------------------------------------
 # Fixture: infrahub_k8s
 # ---------------------------------------------------------------------------
 @pytest.fixture(scope="session")
@@ -162,7 +227,10 @@ async def infrahub_k8s(
             "--create-namespace",
             "-n",
             namespace,
-            os.environ.get("INFRAHUB_HELM_CHART", "oci://registry.opsmill.io/opsmill/chart/infrahub"),
+            os.environ.get(
+                "INFRAHUB_HELM_CHART",
+                "oci://registry.opsmill.io/opsmill/chart/infrahub",
+            ),
             "-f",
             str(FIXTURES_DIR / "helm" / "infrahub-values.yaml"),
             "--kubeconfig",
