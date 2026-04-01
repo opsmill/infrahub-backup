@@ -6,7 +6,7 @@ require (
 	github.com/PlakarKorp/integration-fs v1.1.0-beta.5
 	github.com/PlakarKorp/integration-s3 v1.1.0-beta.5
 	github.com/PlakarKorp/kloset v1.1.0-beta.6
-	github.com/aws/aws-sdk-go-v2 v1.41.4
+	github.com/aws/aws-sdk-go-v2 v1.41.5
 	github.com/aws/aws-sdk-go-v2/config v1.32.12
 	github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager v0.1.10
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.97.1
