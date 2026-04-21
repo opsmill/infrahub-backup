@@ -28,20 +28,20 @@ const (
 
 // Plakar snapshot tag keys.
 const (
-	TagBackupID         = "infrahub.backup-id"
-	TagComponent        = "infrahub.component"
-	TagBackupStatus     = "infrahub.backup-status"
-	TagVersion          = "infrahub.version"
-	TagToolVersion      = "infrahub.backup-tool-version"
-	TagNeo4jEdition     = "infrahub.neo4j-edition"
-	TagComponents       = "infrahub.components"
-	TagRedacted         = "infrahub.redacted"
+	TagBackupID     = "infrahub.backup-id"
+	TagComponent    = "infrahub.component"
+	TagBackupStatus = "infrahub.backup-status"
+	TagVersion      = "infrahub.version"
+	TagToolVersion  = "infrahub.backup-tool-version"
+	TagNeo4jEdition = "infrahub.neo4j-edition"
+	TagComponents   = "infrahub.components"
+	TagRedacted     = "infrahub.redacted"
 )
 
 // SnapshotInfo holds displayable information about a single Plakar snapshot.
 type SnapshotInfo struct {
-	SnapshotID string `json:"snapshot_id"`
-	Component  string `json:"component"`
+	SnapshotID string      `json:"snapshot_id"`
+	Component  string      `json:"component"`
 	MAC        objects.MAC `json:"-"`
 }
 

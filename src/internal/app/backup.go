@@ -222,9 +222,9 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 }
 
 // RestoreBackup restores an Infrahub deployment from a backup archive
-func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager bool, restoreMigrateFormat bool, sleepDuration time.Duration, decryptKey string, force bool) error {
+func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager bool, restoreMigrateFormat bool, sleepDuration time.Duration, decryptKey string, force bool, resetDeploymentID bool) error {
 	if iops.config.Backend == BackendPlakar {
-		return iops.RestorePlakarBackup(excludeTaskManager, restoreMigrateFormat, sleepDuration, force)
+		return iops.RestorePlakarBackup(excludeTaskManager, restoreMigrateFormat, sleepDuration, force, resetDeploymentID)
 	}
 
 	actualBackupFile := backupFile
@@ -406,6 +406,14 @@ func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager boo
 	// Restore Neo4j
 	if err := iops.restoreNeo4j(workDir, neo4jEdition, restoreMigrateFormat); err != nil {
 		return err
+	}
+
+	// Reset deployment ID before the app containers come back up so they never
+	// observe the source deployment's UUID.
+	if resetDeploymentID {
+		if err := iops.resetDeploymentID(); err != nil {
+			return err
+		}
 	}
 
 	// Restart all services

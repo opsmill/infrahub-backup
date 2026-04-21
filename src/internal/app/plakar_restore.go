@@ -22,7 +22,7 @@ import (
 // RestorePlakarBackup restores an Infrahub deployment from Plakar snapshots.
 // Supports: backup-group restore (--backup-id), single snapshot (--snapshot),
 // or latest complete group (default).
-func (iops *InfrahubOps) RestorePlakarBackup(excludeTaskManager bool, restoreMigrateFormat bool, sleepDuration time.Duration, force bool) error {
+func (iops *InfrahubOps) RestorePlakarBackup(excludeTaskManager bool, restoreMigrateFormat bool, sleepDuration time.Duration, force bool, resetDeploymentID bool) error {
 	// Sleep if requested (for K8s users to transfer backup file into pod)
 	if sleepDuration > 0 {
 		logrus.Infof("Sleeping for %v to allow backup file transfer...", sleepDuration)
@@ -55,7 +55,7 @@ func (iops *InfrahubOps) RestorePlakarBackup(excludeTaskManager bool, restoreMig
 	// Route based on restore mode
 	if cfg.SnapshotID != "" {
 		// Single-component restore via --snapshot
-		return iops.restoreSingleSnapshot(kctx, repo, cfg.SnapshotID, excludeTaskManager, restoreMigrateFormat)
+		return iops.restoreSingleSnapshot(kctx, repo, cfg.SnapshotID, excludeTaskManager, restoreMigrateFormat, resetDeploymentID)
 	}
 
 	// Backup-group restore (--backup-id or latest complete)
@@ -88,12 +88,12 @@ func (iops *InfrahubOps) RestorePlakarBackup(excludeTaskManager bool, restoreMig
 		"components": len(group.Snapshots),
 	}).Info("Restoring from backup group")
 
-	return iops.restoreBackupGroup(kctx, repo, group, excludeTaskManager, restoreMigrateFormat)
+	return iops.restoreBackupGroup(kctx, repo, group, excludeTaskManager, restoreMigrateFormat, resetDeploymentID)
 }
 
 // restoreBackupGroup exports each component snapshot to a temp directory and restores.
 // Neo4j community dumps are streamed directly from Plakar into the container.
-func (iops *InfrahubOps) restoreBackupGroup(kctx *kcontext.KContext, repo *repository.Repository, group *BackupGroupInfo, excludeTaskManager bool, restoreMigrateFormat bool) error {
+func (iops *InfrahubOps) restoreBackupGroup(kctx *kcontext.KContext, repo *repository.Repository, group *BackupGroupInfo, excludeTaskManager bool, restoreMigrateFormat bool, resetDeploymentID bool) error {
 	// Create temp directory for extraction
 	workDir, err := os.MkdirTemp("", "infrahub_plakar_restore_*")
 	if err != nil {
@@ -249,6 +249,18 @@ func (iops *InfrahubOps) restoreBackupGroup(kctx *kcontext.KContext, repo *repos
 		}
 	}
 
+	// Reset deployment ID before app containers restart so they never observe
+	// the source deployment's UUID. Skip when no neo4j component was restored.
+	if resetDeploymentID {
+		if neo4jSnapInfo == nil {
+			logrus.Warn("--reset-deployment-id ignored: no Neo4j component in this backup group")
+		} else {
+			if err := iops.resetDeploymentID(); err != nil {
+				return err
+			}
+		}
+	}
+
 	// Restart all services
 	logrus.Info("Restarting Infrahub services...")
 	if err := iops.StartServices("infrahub-server", "task-worker"); err != nil {
@@ -305,7 +317,7 @@ func (iops *InfrahubOps) exportSnapshotToDir(kctx *kcontext.KContext, repo *repo
 }
 
 // restoreSingleSnapshot restores from a single snapshot (--snapshot flag).
-func (iops *InfrahubOps) restoreSingleSnapshot(kctx *kcontext.KContext, repo *repository.Repository, snapshotID string, excludeTaskManager bool, restoreMigrateFormat bool) error {
+func (iops *InfrahubOps) restoreSingleSnapshot(kctx *kcontext.KContext, repo *repository.Repository, snapshotID string, excludeTaskManager bool, restoreMigrateFormat bool, resetDeploymentID bool) error {
 	snapshotMAC, err := resolveSnapshotID(repo, snapshotID)
 	if err != nil {
 		return err
@@ -357,6 +369,12 @@ func (iops *InfrahubOps) restoreSingleSnapshot(kctx *kcontext.KContext, repo *re
 		}
 		if err := iops.restoreNeo4jCommunityStream(reader, restoreMigrateFormat); err != nil {
 			return err
+		}
+
+		if resetDeploymentID {
+			if err := iops.resetDeploymentID(); err != nil {
+				return err
+			}
 		}
 
 		logrus.Info("Restarting Infrahub services...")
@@ -418,7 +436,16 @@ func (iops *InfrahubOps) restoreSingleSnapshot(kctx *kcontext.KContext, repo *re
 			return err
 		}
 
+		if resetDeploymentID {
+			if err := iops.resetDeploymentID(); err != nil {
+				return err
+			}
+		}
+
 	case ComponentPostgres:
+		if resetDeploymentID {
+			logrus.Warn("--reset-deployment-id ignored: this snapshot is Postgres-only (no Neo4j)")
+		}
 		if excludeTaskManager {
 			logrus.Info("Skipping postgres restore as requested")
 			return nil
@@ -436,6 +463,9 @@ func (iops *InfrahubOps) restoreSingleSnapshot(kctx *kcontext.KContext, repo *re
 		}
 
 	case ComponentMetadata:
+		if resetDeploymentID {
+			logrus.Warn("--reset-deployment-id ignored: this snapshot is metadata-only (no Neo4j)")
+		}
 		logrus.Info("Metadata-only snapshot — nothing to restore to containers")
 		return nil
 
