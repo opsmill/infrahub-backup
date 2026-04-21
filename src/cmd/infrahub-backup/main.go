@@ -66,6 +66,7 @@ func main() {
 	var encryptKey string
 	var restoreExcludeTaskManagerDB bool
 	var restoreMigrateFormat bool
+	var restoreResetDeploymentID bool
 	var restoreDecryptKey string
 	var s3Upload bool
 	var s3KeepLocal bool
@@ -161,9 +162,9 @@ func main() {
 			}
 			forceRestore, _ := cmd.Flags().GetBool("force")
 			if iops.Config().Backend == app.BackendPlakar {
-				return iops.RestoreBackup("", restoreExcludeTaskManagerDB, restoreMigrateFormat, restoreSleepDuration, restoreDecryptKey, forceRestore)
+				return iops.RestoreBackup("", restoreExcludeTaskManagerDB, restoreMigrateFormat, restoreSleepDuration, restoreDecryptKey, forceRestore, restoreResetDeploymentID)
 			}
-			return iops.RestoreBackup(args[0], restoreExcludeTaskManagerDB, restoreMigrateFormat, restoreSleepDuration, restoreDecryptKey, forceRestore)
+			return iops.RestoreBackup(args[0], restoreExcludeTaskManagerDB, restoreMigrateFormat, restoreSleepDuration, restoreDecryptKey, forceRestore, restoreResetDeploymentID)
 		},
 	}
 	restoreCmd.Flags().BoolVar(&restoreExcludeTaskManagerDB, "exclude-taskmanager", false, "Skip restoring the task manager database even if present in the archive")
@@ -171,7 +172,9 @@ func main() {
 	restoreCmd.Flags().DurationVar(&restoreSleepDuration, "sleep", 0, "Sleep duration before restore begins (e.g., 5m, 300s) for manual file transfer")
 	restoreCmd.Flags().StringVar(&restoreDecryptKey, "decrypt-key", "", "Path to private key PEM file for decrypting an encrypted backup")
 	restoreCmd.Flags().Bool("force", false, "Force restore of incomplete backup group")
+	restoreCmd.Flags().BoolVar(&restoreResetDeploymentID, "reset-deployment-id", false, "Generate a new Root node UUID after restore to detach this instance from the source deployment ID")
 	viper.BindPFlag("decrypt-key", restoreCmd.Flags().Lookup("decrypt-key"))
+	viper.BindPFlag("reset-deployment-id", restoreCmd.Flags().Lookup("reset-deployment-id"))
 
 	rootCmd.AddCommand(createCmd)
 	rootCmd.AddCommand(restoreCmd)
@@ -180,9 +183,9 @@ func main() {
 	var keygenOutput string
 
 	keygenCmd := &cobra.Command{
-		Use:   "keygen",
-		Short: "Generate an ECIES keypair for backup encryption",
-		Long:  "Generate a P-256 ECIES keypair. The private key is written to a PEM file. The public key is written to a .pub file and printed to stdout.",
+		Use:          "keygen",
+		Short:        "Generate an ECIES keypair for backup encryption",
+		Long:         "Generate a P-256 ECIES keypair. The private key is written to a PEM file. The public key is written to a .pub file and printed to stdout.",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			privPEM, pubB64, err := app.GenerateKeyPair()

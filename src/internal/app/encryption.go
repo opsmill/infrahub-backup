@@ -24,7 +24,7 @@ import (
 const (
 	eciesVersion    byte   = 0x02
 	eciesChunkSize  uint32 = 4 * 1024 * 1024 // 4 MiB plaintext per chunk
-	eciesHeaderSize int    = 86               // 1 + 65 + 4 + 8 + 8
+	eciesHeaderSize int    = 86              // 1 + 65 + 4 + 8 + 8
 	eciesIVSize     int    = 12
 	eciesHKDFInfo   string = "opsmill-upload-ecies"
 
