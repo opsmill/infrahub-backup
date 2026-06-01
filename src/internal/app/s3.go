@@ -4,14 +4,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/feature/s3/transfermanager"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/sirupsen/logrus"
 )
 
@@ -23,9 +22,18 @@ type S3Config struct {
 	Region   string
 }
 
-// S3Client wraps the AWS S3 client
+// S3Client wraps the minio S3 client.
+//
+// We use minio-go rather than aws-sdk-go-v2 here because the AWS SDK is
+// incompatible with Google Cloud Storage's S3-compatible API: it signs the
+// Accept-Encoding header (which GCS rewrites in transit, breaking the
+// signature -- aws/aws-sdk-go-v2#1816) and forces aws-chunked CRC32 checksum
+// trailers on multipart uploads that GCS rejects (aws/aws-sdk-go-v2#3007).
+// minio-go avoids both, and with SendContentMd5 uses a portable Content-MD5
+// integrity check. This is the same client the Plakar integration-s3 backend
+// already uses successfully against GCS-style providers.
 type S3Client struct {
-	client *s3.Client
+	client *minio.Client
 	config *S3Config
 }
 
@@ -36,30 +44,52 @@ func NewS3Client(cfg *S3Config) (*S3Client, error) {
 		region = "us-east-1"
 	}
 
-	opts := []func(*config.LoadOptions) error{
-		config.WithRegion(region),
-	}
+	// Default to AWS S3; a custom endpoint targets MinIO, GCS, or other
+	// S3-compatible storage.
+	host := "s3.amazonaws.com"
+	secure := true
+	pathStyle := false
 
-	awsCfg, err := config.LoadDefaultConfig(context.Background(), opts...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load AWS config: %w", err)
-	}
-
-	s3Opts := []func(*s3.Options){}
-
-	// Custom endpoint for S3-compatible storage (MinIO, etc.)
 	if cfg.Endpoint != "" {
-		s3Opts = append(s3Opts, func(o *s3.Options) {
-			o.BaseEndpoint = aws.String(cfg.Endpoint)
-			o.UsePathStyle = true // Required for MinIO and most S3-compatible services
-			// https://github.com/aws/aws-sdk-go-v2/discussions/2960
-			o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
-			o.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
-		})
+		u, err := url.Parse(cfg.Endpoint)
+		if err != nil || u.Host == "" {
+			return nil, fmt.Errorf("invalid S3 endpoint %q (expected a URL like https://storage.googleapis.com): %w", cfg.Endpoint, err)
+		}
+		host = u.Host
+		secure = u.Scheme != "http"
+		// Path-style addressing is required for MinIO and most S3-compatible services.
+		pathStyle = true
 		logrus.Debugf("Using custom S3 endpoint: %s", cfg.Endpoint)
 	}
 
-	client := s3.NewFromConfig(awsCfg, s3Opts...)
+	transport, err := minio.DefaultTransport(secure)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create S3 transport: %w", err)
+	}
+
+	bucketLookup := minio.BucketLookupAuto
+	if pathStyle {
+		bucketLookup = minio.BucketLookupPath
+	}
+
+	// Resolve credentials from the standard AWS sources (environment variables,
+	// ~/.aws/credentials, and instance/role metadata).
+	creds := credentials.NewChainCredentials([]credentials.Provider{
+		&credentials.EnvAWS{},
+		&credentials.FileAWSCredentials{},
+		&credentials.IAM{},
+	})
+
+	client, err := minio.New(host, &minio.Options{
+		Creds:        creds,
+		Secure:       secure,
+		Region:       region,
+		BucketLookup: bucketLookup,
+		Transport:    transport,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create S3 client: %w", err)
+	}
 
 	return &S3Client{
 		client: client,
@@ -95,7 +125,7 @@ func (c *S3Client) Upload(ctx context.Context, localPath string) (string, error)
 	filename := filepath.Base(localPath)
 	s3Key := c.buildS3Key(filename)
 
-	// Get file size for progress logging
+	// Get file size for progress logging and the multipart uploader.
 	stat, err := file.Stat()
 	if err != nil {
 		return "", fmt.Errorf("failed to stat file: %w", err)
@@ -104,13 +134,11 @@ func (c *S3Client) Upload(ctx context.Context, localPath string) (string, error)
 	logrus.Infof("Uploading %s (%s) to s3://%s/%s",
 		filename, formatBytes(stat.Size()), c.config.Bucket, s3Key)
 
-	// Use the S3 transfer manager for multipart uploads of large files
-	tm := transfermanager.New(c.client)
-
-	_, err = tm.UploadObject(ctx, &transfermanager.UploadObjectInput{
-		Bucket: aws.String(c.config.Bucket),
-		Key:    aws.String(s3Key),
-		Body:   file,
+	// minio handles multipart uploads automatically for large files.
+	_, err = c.client.PutObject(ctx, c.config.Bucket, s3Key, file, stat.Size(), minio.PutObjectOptions{
+		// GCS/Backblaze reject aws-chunked checksum trailers; Content-MD5 is the
+		// portable integrity check. Matches the integration-s3 storage backend.
+		SendContentMd5: true,
 	})
 	if err != nil {
 		return "", fmt.Errorf("failed to upload to S3: %w", err)
@@ -133,43 +161,22 @@ func (c *S3Client) Download(ctx context.Context, s3Key, localPath string) error 
 	}
 	defer file.Close()
 
-	// Use the S3 transfer manager for efficient downloads
-	tm := transfermanager.New(c.client, func(o *transfermanager.Options) {
-		o.PartSizeBytes = 64 * 1024 * 1024 // 64MB parts
-		o.Concurrency = 4
-	})
+	obj, err := c.client.GetObject(ctx, c.config.Bucket, s3Key, minio.GetObjectOptions{})
+	if err != nil {
+		os.Remove(localPath)
+		return fmt.Errorf("failed to download from S3: %w", err)
+	}
+	defer obj.Close()
 
-	out, err := tm.DownloadObject(ctx, &transfermanager.DownloadObjectInput{
-		Bucket:   aws.String(c.config.Bucket),
-		Key:      aws.String(s3Key),
-		WriterAt: file,
-	})
+	written, err := io.Copy(file, obj)
 	if err != nil {
 		os.Remove(localPath) // Clean up partial download
 		return fmt.Errorf("failed to download from S3: %w", err)
 	}
 
-	logrus.Infof("Download complete: %s (%s)", localPath, formatBytes(aws.ToInt64(out.ContentLength)))
+	logrus.Infof("Download complete: %s (%s)", localPath, formatBytes(written))
 
 	return nil
-}
-
-// DownloadToWriter downloads a file from S3 to an io.WriterAt
-func (c *S3Client) DownloadToWriter(ctx context.Context, s3Key string, w io.WriterAt) (int64, error) {
-	tm := transfermanager.New(c.client, func(o *transfermanager.Options) {
-		o.PartSizeBytes = 64 * 1024 * 1024 // 64MB parts
-		o.Concurrency = 4
-	})
-
-	out, err := tm.DownloadObject(ctx, &transfermanager.DownloadObjectInput{
-		Bucket:   aws.String(c.config.Bucket),
-		Key:      aws.String(s3Key),
-		WriterAt: w,
-	})
-	if err != nil {
-		return 0, err
-	}
-	return aws.ToInt64(out.ContentLength), nil
 }
 
 // ParseS3URI parses an s3://bucket/key URI into bucket and key components
