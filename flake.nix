@@ -24,7 +24,7 @@
           inherit version;
           src = ./.;
 
-          vendorHash = "sha256-W7KHeb9vue1Z9pCi00q174yHi0RtbVLjYlSGdVSRo7s=";
+          vendorHash = "sha256-LGJU/M76UzT2XPI7mQUYE2yHwgAVnVPyrHiK5BIX8Z8=";
 
           # Don't run preBuild (watchdog compilation) in the go-modules
           # derivation — it only needs to fetch/vendor dependencies.
