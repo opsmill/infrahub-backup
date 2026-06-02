@@ -48,7 +48,7 @@ jobs:
       - name: Login to Docker Hub
         uses: docker/login-action@v4
         with:
-          registry: registry.opsmill.io
+          registry: ${{ secrets.HARBOR_HOST }}
           username: ${{ secrets.HARBOR_USERNAME }}
           password: ${{ secrets.HARBOR_PASSWORD }}
 
@@ -65,8 +65,8 @@ jobs:
           build-args: |
             VERSION=${{ github.event.release.tag_name }}
           tags: |
-            registry.opsmill.io/opsmill/infrahub-backup:${{ steps.version.outputs.VERSION }}
-            registry.opsmill.io/opsmill/infrahub-backup:latest
+            ${{ secrets.HARBOR_HOST }}/opsmill/infrahub-backup:${{ steps.version.outputs.VERSION }}
+            ${{ secrets.HARBOR_HOST }}/opsmill/infrahub-backup:latest
 
   homebrew:
     needs: publish
