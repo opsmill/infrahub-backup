@@ -61,6 +61,14 @@ func (iops *InfrahubOps) flushTaskRuns(config flushConfig, daysToKeep, batchSize
 		batchSize = defaultBatchSize
 	}
 
+	// Clamp the batch size to the task-manager cap so a large --batch-size cannot be
+	// rejected by Prefect with a 422. The cleanup scripts pass batchSize straight to
+	// read_flow_runs, so clamping up front is simpler than a reactive retry.
+	if maxLimit, ok := iops.discoverPrefectPaginationLimit(); ok && batchSize > maxLimit {
+		logrus.Warnf("Requested batch size %d exceeds the task-manager cap of %d; clamping to %d", batchSize, maxLimit, maxLimit)
+		batchSize = maxLimit
+	}
+
 	logrus.Infof("Flushing Prefect flow runs older than %d days (batch size %d)...", daysToKeep, batchSize)
 
 	primaryCmd := []string{"infrahub", "tasks", "flush", config.commandType, "--days-to-keep", strconv.Itoa(daysToKeep), "--batch-size", strconv.Itoa(batchSize)}

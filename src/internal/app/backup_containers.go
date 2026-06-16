@@ -3,20 +3,79 @@ package app
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
 )
 
+// defaultPrefectPaginationSize is the pagination size used for the running-tasks
+// check when the task-manager cap cannot be discovered. It matches Prefect's
+// built-in PREFECT_API_DEFAULT_LIMIT default.
+const defaultPrefectPaginationSize = 200
+
 type tasksOutput struct {
 	Id   string `json:"id"`
 	Name string `json:"title"`
 }
 
+// prefectLimitRe extracts the pagination cap from a task-manager 422 response,
+// e.g. "Invalid limit: must be less than or equal to 200.". The captured number
+// is Prefect's effective PREFECT_API_DEFAULT_LIMIT.
+var prefectLimitRe = regexp.MustCompile(`must be less than or equal to (\d+)`)
+
+// parsePrefectMaxLimit returns the server-enforced pagination cap reported in a
+// task-manager limit error, scanning each provided string (error text, command
+// output).
+func parsePrefectMaxLimit(parts ...string) (int, bool) {
+	for _, part := range parts {
+		if match := prefectLimitRe.FindStringSubmatch(part); match != nil {
+			if limit, err := strconv.Atoi(match[1]); err == nil && limit > 0 {
+				return limit, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// discoverPrefectPaginationLimit reads PREFECT_API_DEFAULT_LIMIT from the
+// task-manager container so the running-tasks check can request a valid
+// pagination size on the first try. Returns false when the value is unset,
+// invalid, or the container cannot be reached (the caller then falls back to the
+// default and the reactive retry).
+func (iops *InfrahubOps) discoverPrefectPaginationLimit() (int, bool) {
+	output, err := iops.Exec("task-manager", []string{"sh", "-c", `printf %s "$PREFECT_API_DEFAULT_LIMIT"`}, nil)
+	if err != nil {
+		logrus.Debugf("Could not read PREFECT_API_DEFAULT_LIMIT from task-manager: %v", err)
+		return 0, false
+	}
+	value := strings.TrimSpace(output)
+	if value == "" {
+		return 0, false
+	}
+	limit, err := strconv.Atoi(value)
+	if err != nil || limit <= 0 {
+		logrus.Debugf("Ignoring invalid PREFECT_API_DEFAULT_LIMIT value %q from task-manager", value)
+		return 0, false
+	}
+	return limit, true
+}
+
 func (iops *InfrahubOps) waitForRunningTasks() error {
 	useInfrahubctl := true
 	var scriptContent string
+
+	// Layer 1 (proactive): discover the task-manager cap so the first request is
+	// valid. Layer 2 (default): fall back to Prefect's built-in default otherwise.
+	// The value never exceeds the default, since a larger page is unnecessary for an
+	// existence check and must stay within the server cap.
+	paginationSize := defaultPrefectPaginationSize
+	if discovered, ok := iops.discoverPrefectPaginationLimit(); ok && discovered < paginationSize {
+		paginationSize = discovered
+		logrus.Debugf("Using task-manager pagination cap of %d for the running-tasks check", discovered)
+	}
 
 	loadScriptContent := func() error {
 		if scriptContent != "" {
@@ -42,13 +101,30 @@ func (iops *InfrahubOps) waitForRunningTasks() error {
 		return strings.Contains(outputLower, "no such command")
 	}
 
+	// adaptPaginationLimit (Layer 3, reactive): when the task-manager rejects the
+	// request, lower the pagination size to the cap reported in the error and signal
+	// a retry. Only lowers the size, so retries converge and cannot loop.
+	adaptPaginationLimit := func(parts ...string) bool {
+		maxLimit, ok := parsePrefectMaxLimit(parts...)
+		if !ok || maxLimit >= paginationSize {
+			return false
+		}
+		logrus.Warnf("task-manager rejected pagination size %d; retrying with %d", paginationSize, maxLimit)
+		paginationSize = maxLimit
+		return true
+	}
+
 	for {
 		var (
 			output string
 			err    error
 		)
 
-		execOpts := iops.buildTaskWorkerExecOpts(nil)
+		// Layer 0 (clamp): inject the bounded pagination size into the exec so the
+		// deployment's INFRAHUB_PAGINATION_SIZE cannot exceed the server cap.
+		execOpts := iops.buildTaskWorkerExecOpts(&ExecOptions{
+			Env: map[string]string{"INFRAHUB_PAGINATION_SIZE": strconv.Itoa(paginationSize)},
+		})
 
 		if useInfrahubctl {
 			output, err = iops.Exec("task-worker", []string{"infrahubctl", "task", "list", "--json", "--state", "running", "--state", "pending"}, execOpts)
@@ -61,6 +137,9 @@ func (iops *InfrahubOps) waitForRunningTasks() error {
 					}
 					continue
 				}
+				if adaptPaginationLimit(err.Error(), output) {
+					continue
+				}
 				return fmt.Errorf("failed to check running tasks: %w\n%s", err, output)
 			}
 		} else {
@@ -69,6 +148,9 @@ func (iops *InfrahubOps) waitForRunningTasks() error {
 			}
 			output, err = iops.executeScriptWithOpts("task-worker", scriptContent, "/tmp/get_running_tasks.py", execOpts, "python", "-u", "/tmp/get_running_tasks.py")
 			if err != nil {
+				if adaptPaginationLimit(err.Error(), output) {
+					continue
+				}
 				return fmt.Errorf("failed to check running tasks: %w", err)
 			}
 		}
