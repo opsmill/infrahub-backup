@@ -5,12 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/sirupsen/logrus"
 )
+
+// maxPrefectPaginationSize is the largest pagination size the task-manager accepts.
+const maxPrefectPaginationSize = 200
 
 // scriptsFS holds the embedded maintenance scripts.
 //
@@ -195,7 +200,8 @@ func (iops *InfrahubOps) getInfrahubInternalAddress() string {
 
 // buildTaskWorkerExecOpts creates ExecOptions for task-worker commands with INFRAHUB_ADDRESS
 // set to INFRAHUB_INTERNAL_ADDRESS and the SDK pagination size capped to the task-manager
-// maximum. Existing options are merged with precedence to user values.
+// maximum. Existing options are merged with precedence to user values, then the pagination
+// cap is enforced last so neither a caller nor the inherited deployment value can exceed it.
 func (iops *InfrahubOps) buildTaskWorkerExecOpts(existingOpts *ExecOptions) *ExecOptions {
 	internalAddr := iops.getInfrahubInternalAddress()
 
@@ -204,20 +210,15 @@ func (iops *InfrahubOps) buildTaskWorkerExecOpts(existingOpts *ExecOptions) *Exe
 		opts.User = existingOpts.User
 	}
 
-	// Cap the SDK pagination size to the Prefect flow_runs/filter maximum (200).
-	// infrahubctl inherits INFRAHUB_PAGINATION_SIZE from the deployment environment,
-	// which may exceed 200 and cause the task-manager API to reject the request with
-	// a 422 ("Invalid limit: must be less than or equal to 200.").
-	opts.Env["INFRAHUB_PAGINATION_SIZE"] = "200"
-
-	// Set INFRAHUB_ADDRESS if available, then merge user env vars (user values override)
 	if internalAddr != "" {
 		opts.Env["INFRAHUB_ADDRESS"] = internalAddr
 	}
 	if existingOpts != nil {
-		for k, v := range existingOpts.Env {
-			opts.Env[k] = v
-		}
+		maps.Copy(opts.Env, existingOpts.Env)
+	}
+
+	if size, err := strconv.Atoi(opts.Env["INFRAHUB_PAGINATION_SIZE"]); err != nil || size <= 0 || size > maxPrefectPaginationSize {
+		opts.Env["INFRAHUB_PAGINATION_SIZE"] = strconv.Itoa(maxPrefectPaginationSize)
 	}
 
 	return opts
