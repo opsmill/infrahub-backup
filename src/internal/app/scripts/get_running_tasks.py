@@ -1,11 +1,12 @@
 import json
 
 from infrahub_sdk import InfrahubClientSync
-from infrahub_sdk.config import Config
 
 from infrahub_sdk.task.models import TaskFilter, TaskState
 
-client = InfrahubClientSync(config=Config(pagination_size=200))
+# pagination_size is supplied via the INFRAHUB_PAGINATION_SIZE environment
+# variable, which the backup tool clamps to the task-manager (Prefect) cap.
+client = InfrahubClientSync()
 tasks = client.task.filter(
     filter=TaskFilter(state=[TaskState.PENDING, TaskState.RUNNING])
 )

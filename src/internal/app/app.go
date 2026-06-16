@@ -194,17 +194,21 @@ func (iops *InfrahubOps) getInfrahubInternalAddress() string {
 }
 
 // buildTaskWorkerExecOpts creates ExecOptions for task-worker commands with INFRAHUB_ADDRESS
-// set to INFRAHUB_INTERNAL_ADDRESS. Existing options are merged with precedence to user values.
+// set to INFRAHUB_INTERNAL_ADDRESS and the SDK pagination size capped to the task-manager
+// maximum. Existing options are merged with precedence to user values.
 func (iops *InfrahubOps) buildTaskWorkerExecOpts(existingOpts *ExecOptions) *ExecOptions {
 	internalAddr := iops.getInfrahubInternalAddress()
-	if internalAddr == "" && existingOpts == nil {
-		return nil
-	}
 
 	opts := &ExecOptions{Env: make(map[string]string)}
 	if existingOpts != nil {
 		opts.User = existingOpts.User
 	}
+
+	// Cap the SDK pagination size to the Prefect flow_runs/filter maximum (200).
+	// infrahubctl inherits INFRAHUB_PAGINATION_SIZE from the deployment environment,
+	// which may exceed 200 and cause the task-manager API to reject the request with
+	// a 422 ("Invalid limit: must be less than or equal to 200.").
+	opts.Env["INFRAHUB_PAGINATION_SIZE"] = "200"
 
 	// Set INFRAHUB_ADDRESS if available, then merge user env vars (user values override)
 	if internalAddr != "" {
@@ -216,9 +220,6 @@ func (iops *InfrahubOps) buildTaskWorkerExecOpts(existingOpts *ExecOptions) *Exe
 		}
 	}
 
-	if len(opts.Env) == 0 {
-		opts.Env = nil
-	}
 	return opts
 }
 
