@@ -27,6 +27,7 @@ func main() {
 
 	app.ConfigureRootCommand(rootCmd, iops)
 	app.AttachEnvironmentCommands(rootCmd, iops)
+	app.AttachUpdateCommand(rootCmd, "infrahub-taskmanager")
 
 	flushCmd := &cobra.Command{
 		Use:   "flush",

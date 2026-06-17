@@ -1,8 +1,11 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"strings"
+
+	"infrahub-ops/src/internal/updater"
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -152,4 +155,89 @@ func AttachEnvironmentCommands(rootCmd *cobra.Command, app *InfrahubOps) {
 	envCmd.AddCommand(detectCmd)
 	envCmd.AddCommand(listCmd)
 	rootCmd.AddCommand(envCmd)
+}
+
+// AttachUpdateCommand wires the `update` self-update subcommand onto a root
+// command. binaryName is the name of the invoked binary (e.g. "infrahub-backup")
+// and is used to select the matching release asset.
+func AttachUpdateCommand(rootCmd *cobra.Command, binaryName string) {
+	var check bool
+	var assumeYes bool
+	var targetVersion string
+
+	updateCmd := &cobra.Command{
+		Use:   "update",
+		Short: "Update this binary to the latest release",
+		Long: "Download and install the latest release of " + binaryName + " in place of the running binary.\n" +
+			"Use --check to see whether an update is available without installing it.",
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if check && assumeYes {
+				return fmt.Errorf("--check and --yes cannot be used together")
+			}
+
+			opts := updater.Options{
+				BinaryName:     binaryName,
+				CurrentVersion: BuildRevision(),
+				TargetVersion:  targetVersion,
+			}
+
+			if check {
+				return runUpdateCheck(cmd.Context(), opts)
+			}
+			return runUpdate(cmd.Context(), opts, assumeYes)
+		},
+	}
+
+	updateCmd.Flags().BoolVar(&check, "check", false, "Report whether an update is available without installing it")
+	updateCmd.Flags().BoolVarP(&assumeYes, "yes", "y", false, "Skip the confirmation prompt (required for non-interactive use)")
+	updateCmd.Flags().StringVar(&targetVersion, "version", "", "Install a specific release version (e.g. v1.7.2) instead of the latest")
+
+	rootCmd.AddCommand(updateCmd)
+}
+
+func runUpdateCheck(ctx context.Context, opts updater.Options) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	res, err := updater.Check(ctx, opts)
+	if err != nil {
+		return err
+	}
+	switch res.Action {
+	case updater.ActionAvailable:
+		logrus.Infof("update available: %s → %s (%s)", res.FromVersion, res.ToVersion, res.DetailsURL)
+	case updater.ActionAlreadyCurrent:
+		logrus.Infof("already up to date (%s)", res.FromVersion)
+	case updater.ActionRefused:
+		logrus.Infof("update check: %s", res.RefusedReason)
+	}
+	return nil
+}
+
+func runUpdate(ctx context.Context, opts updater.Options, assumeYes bool) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	proceed := func(from, to string) (bool, error) {
+		return updater.Proceed(assumeYes, from, to)
+	}
+
+	res, err := updater.Update(ctx, opts, proceed)
+	if err != nil {
+		return err
+	}
+	switch res.Action {
+	case updater.ActionUpdated:
+		logrus.Infof("updated %s → %s", res.FromVersion, res.ToVersion)
+	case updater.ActionAlreadyCurrent:
+		logrus.Infof("already up to date (%s)", res.FromVersion)
+	case updater.ActionRefused:
+		if res.RefusedReason == "update cancelled" {
+			logrus.Info("update cancelled")
+			return nil
+		}
+		return fmt.Errorf("%s", res.RefusedReason)
+	}
+	return nil
 }

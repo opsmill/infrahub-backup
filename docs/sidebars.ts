@@ -15,6 +15,7 @@ const sidebars: SidebarsConfig = {
       label: 'How-to Guides',
       items: [
         'guides/install',
+        'guides/self-update',
         'guides/backup-instance',
         'guides/restore-backup',
         'guides/kubernetes-backup',
