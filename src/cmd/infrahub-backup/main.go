@@ -57,6 +57,7 @@ func main() {
 
 	app.ConfigureRootCommand(rootCmd, iops)
 	app.AttachEnvironmentCommands(rootCmd, iops)
+	app.AttachUpdateCommand(rootCmd, "infrahub-backup")
 
 	var force bool
 	var redact bool
