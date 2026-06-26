@@ -19,6 +19,20 @@ const (
 	defaultPostgresPassword = "prefect"
 )
 
+// prefectConnectionEnvVars lists the environment variables that may carry the
+// task-manager PostgreSQL connection string, newest Prefect naming first.
+// Prefect 3.x (and current prefect-helm) exposes
+// PREFECT_SERVER_DATABASE_CONNECTION_URL, while Prefect 2.x used
+// PREFECT_API_DATABASE_CONNECTION_URL. The connection string carries the
+// database owner (e.g. the unprivileged "prefect" user) and its password, which
+// is what pg_dump must authenticate as — the "postgres" superuser is not
+// guaranteed to have a usable password (prefect-helm sets
+// auth.enablePostgresUser=false by default).
+var prefectConnectionEnvVars = []string{
+	"PREFECT_SERVER_DATABASE_CONNECTION_URL",
+	"PREFECT_API_DATABASE_CONNECTION_URL",
+}
+
 // fetchDatabaseCredentials retrieves database credentials from environment or containers
 func (iops *InfrahubOps) fetchDatabaseCredentials() error {
 	if _, err := iops.ensureBackend(); err != nil {
@@ -59,7 +73,12 @@ func (iops *InfrahubOps) loadCredentialsFromEnvironment() {
 		iops.config.Neo4jPassword = value
 	}
 
-	iops.applyPrefectConnection(os.Getenv("PREFECT_API_DATABASE_CONNECTION_URL"))
+	for _, name := range prefectConnectionEnvVars {
+		if value := os.Getenv(name); value != "" {
+			iops.applyPrefectConnection(value)
+			break
+		}
+	}
 }
 
 // hasNeo4jCredentials checks if all Neo4j credentials are configured
@@ -105,9 +124,20 @@ func (iops *InfrahubOps) fetchPostgresCredentials() error {
 		return err
 	}
 
+	connections := map[string]string{}
 	for _, line := range strings.Split(envOut, "\n") {
-		if after, ok := strings.CutPrefix(line, "PREFECT_API_DATABASE_CONNECTION_URL="); ok {
-			iops.applyPrefectConnection(after)
+		for _, name := range prefectConnectionEnvVars {
+			if after, ok := strings.CutPrefix(line, name+"="); ok {
+				connections[name] = after
+			}
+		}
+	}
+
+	// Apply the first match in preference order so newer Prefect naming wins
+	// regardless of the order the container reports its environment.
+	for _, name := range prefectConnectionEnvVars {
+		if conn := connections[name]; conn != "" {
+			iops.applyPrefectConnection(conn)
 			break
 		}
 	}
