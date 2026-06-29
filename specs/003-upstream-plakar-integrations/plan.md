@@ -73,8 +73,9 @@ src/
     ├── snapshots.go                    # retained (tags & grouping)
     ├── environment_docker.go           # ADD: RunEphemeralContainer + mount/network discovery
     ├── environment_kubernetes.go       # ADD: CreateEphemeralJob + PVC/mount discovery
-    ├── runner.go                       # NEW: runner abstraction (launch, env/cred injection, repo mount)
-    └── connectors.go                   # NEW (in-process path): register postgres/neo4j connectors
+    ├── runner.go                       # NEW: runner abstraction (launch, env/cred injection, repo mount, orphan reaping)
+    ├── connectors.go                   # NEW (in-process path): register postgres/neo4j connectors
+    └── run_connector.go                # NEW: dependency-light "__run-connector" entrypoint (E1) — opens repo + runs one connector op; NO docker/kubectl deps
 
 # Runner image (new build artifact)
 build/runner/Dockerfile                 # NEW: our binary (or plakar+plugins) + pg client + neo4j-admin + JRE
@@ -95,6 +96,18 @@ tests/                                  # E2E (Compose) for both editions + Post
 ```
 
 **Structure Decision**: Single Go CLI project for the tool rework (Deliverable B), modifying `src/internal/app` in place and adding a `build/runner/` image. The generic Neo4j integration (Deliverable A) is a **separate Go module** developed in a fork worktree of `PlakarKorp/integrations` (so it can be contributed upstream) and consumed via `go.mod replace` (in-process) or `plakar pkg build` (fallback). The two deliverables map to the two implementation plans the spec calls for; `/speckit.tasks` will phase them so Deliverable A (+ the Task 0 spike) precedes the parts of Deliverable B that depend on it.
+
+## Risks & Mitigations (from critique)
+
+| ID | Risk | Mitigation (in scope for tasks) |
+|----|------|---------------------------------|
+| E1 | The in-process runner reuses the tool binary, which also embeds host orchestration (docker/kubectl). Run **inside** the DB container it must not need those. | Add a **dependency-light `__run-connector` entrypoint** (`run_connector.go`) that only opens the kloset repo and runs one connector op. The runner image carries this path + client tools, not the orchestration backends. Keep its flag/env surface minimal and explicit. |
+| E2 | Ephemeral runners (containers/Jobs) can leak on tool crash; an offline neo4j dump against a not-fully-stopped writer risks store inconsistency. | Label ephemeral runners and reap orphans on start/abort; add a writer-stopped verification gate before the community offline dump (extends FR-009). |
+| E7 / X2 | Consuming `integration-postgresql` at a **beta** (v1.1.0-beta.7) to back up production data risks format/behaviour changes. | Pin the exact version; gate adoption on a backup→restore **round-trip validation test** (treated as a release gate); track the stable release for upgrade. The neo4j integration is ours, so its quality is under our control. |
+| E3 | Credentials injected as `-e`/Job env are visible via `docker inspect`/pod spec. | Prefer stdin/file/K8s-Secret injection where feasible; never log credential values. |
+| E5 | K8s E2E parity (SC-008) and testcontainers need cluster/Docker infra in CI. | Provision kind/k3d for K8s E2E and Docker for testcontainers; gate the heaviest E2E as a nightly/optional job if runtime is prohibitive. |
+
+Full findings: [critiques/critique-20260629-220508.md](./critiques/critique-20260629-220508.md).
 
 ## Complexity Tracking
 
