@@ -1,0 +1,33 @@
+name: neo4j
+display_name: Neo4j
+description: Integration providing backup and restore for Neo4j databases — Enterprise online backup (neo4j://) and Community offline dump (neo4j+offline://).
+api_version: v1.1.0
+homepage: https://github.com/PlakarKorp/integration-neo4j
+license: ISC
+tier: official
+contact: mailto:help@plakar.io
+connectors:
+  - type: importer
+    executable: neo4jImporter
+    protocols: [neo4j]
+    validator: ./importer/schema.json
+    class: database
+    subclass: neo4j
+  - type: importer
+    executable: neo4jOfflineImporter
+    protocols: [neo4j+offline]
+    validator: ./importer/schema.json
+    class: database
+    subclass: neo4j
+  - type: exporter
+    executable: neo4jExporter
+    protocols: [neo4j]
+    validator: ./exporter/schema.json
+    class: database
+    subclass: neo4j
+  - type: exporter
+    executable: neo4jOfflineExporter
+    protocols: [neo4j+offline]
+    validator: ./exporter/schema.json
+    class: database
+    subclass: neo4j

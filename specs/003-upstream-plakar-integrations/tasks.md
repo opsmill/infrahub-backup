@@ -68,14 +68,16 @@ description: "Task list for feature 003 — rework Plakar backend onto upstream 
 
 **Independent Test**: With only Plakar + the integration (no Infrahub), back up & restore a standalone Neo4j for both editions; the integration's own test suite passes (SC-005).
 
-- [ ] T020 [US4] Implement `neo4j/neo4jconn/conn.go`: parse `neo4j://` and `neo4j+offline://` URIs + config map; locate/invoke `neo4j-admin`.
-- [ ] T021 [US4] Implement `neo4j/importer/importer.go` online path: register `neo4j` (`FLAG_STREAM`); run `neo4j-admin database backup --compress=false --to-path …`; emit `/manifest.json` then artifact records.
-- [ ] T022 [US4] Implement the offline path: register `neo4j+offline`; run `neo4j-admin database dump`; emit `/manifest.json` + `/<db>.dump`; fail fast if the DB appears running (precondition; FR-010).
-- [ ] T023 [US4] Implement `neo4j/manifest/{manifest,metadata}.go` (`/manifest.json`: version, edition, db, store format; Bolt node/relationship counts when online, omitted offline).
-- [ ] T024 [US4] Implement `neo4j/exporter/exporter.go`: dispatch restore (`database restore --from-path`) vs load (`database load`) by snapshot layout (`neo4j://` / `neo4j+offline://`).
-- [ ] T025 [P] [US4] Add `neo4j/manifest.yaml` (connector declarations for `[neo4j]`/`[neo4j+offline]` importers + exporters) + `neo4j/plugin/*/main.go` SDK entrypoints + importer/exporter `schema.json`.
-- [ ] T026 [P] [US4] testcontainers tests in `neo4j/tests/`: enterprise online round-trip; community offline round-trip; offline-against-running fail-fast (SC-005).
-- [ ] T027 [P] [US4] Write `neo4j/README.md`, `neo4j/neo4j.1`, `neo4j/Makefile`.
+> **🟡 DRAFT STATUS (2026-06-30):** A compile-verified, `go vet`-clean draft of the library packages exists at `contrib/integration-neo4j/` (module `github.com/PlakarKorp/integration-neo4j`, builds against kloset v1.1.0). The kloset connector wiring is verified; the `neo4j-admin` flags/output-layout, edition/Bolt-count manifest, plugin (`.ptar`) entrypoints, and the testcontainers suite are **NOT yet behavior-verified** (need Docker + a real Neo4j). The upstream PR is **not** opened (outward action, pending review + green tests).
+
+- [x] T020 [US4] `neo4jconn/conn.go` — parse `neo4j://`/`neo4j+offline://` URIs + config; locate `neo4j-admin`. **DRAFT (compile-verified).**
+- [x] T021 [US4] `importer/importer.go` online path: init-register `neo4j` (`FLAG_STREAM`); `neo4j-admin database backup --compress=false --to-path …`; emit `/manifest.json` + artifact records (temp-dir walk + refcounted cleanup). **DRAFT (compile-verified; flags/layout need real-neo4j test).**
+- [x] T022 [US4] offline path: init-register `neo4j+offline`; `neo4j-admin database dump --to-path …`. **DRAFT.** ⚠️ TODO: explicit fail-fast when the DB appears running (precondition; FR-010) — currently relies on neo4j-admin erroring.
+- [x] T023 [US4] `manifest/manifest.go` (`/manifest.json`: version, db, host, backup mode). **DRAFT.** ⚠️ TODO: edition detection + Bolt node/relationship counts (online).
+- [x] T024 [US4] `exporter/exporter.go`: stage records → dispatch `database restore` (online) vs `database load` (offline). **DRAFT (compile-verified).**
+- [x] T025 [P] [US4] `manifest.yaml` + importer/exporter `schema.json` done. ⚠️ TODO: `plugin/*/main.go` SDK entrypoints + `go-kloset-sdk` version alignment for `.ptar` packaging (not needed for in-process; needed for upstream).
+- [ ] T026 [P] [US4] testcontainers tests (`tests/`): enterprise online round-trip; community offline round-trip; offline-against-running fail-fast (SC-005). **BLOCKED: needs Docker + a real Neo4j.**
+- [x] T027 [P] [US4] `README.md` done (with status + TODO checklist). ⚠️ TODO: `neo4j.1` man page, `Makefile`.
 
 **Checkpoint**: integration-neo4j builds and its tests pass standalone; consumable via fork build (`go.mod replace` or `plakar pkg build`).
 

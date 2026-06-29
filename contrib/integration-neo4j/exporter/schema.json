@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Neo4j exporter options",
+  "type": "object",
+  "properties": {
+    "location": { "type": "string", "description": "neo4j://[user:pass@]host/<db> or neo4j+offline:///<datadir>?database=<db>" },
+    "host": { "type": "string" },
+    "port": { "type": "string" },
+    "username": { "type": "string" },
+    "password": { "type": "string" },
+    "database": { "type": "string", "description": "Target database name (default: neo4j)" },
+    "overwrite": { "type": "string", "description": "true to pass --overwrite-destination" },
+    "neo4j_admin_path": { "type": "string" },
+    "neo4j_bin_dir": { "type": "string" }
+  },
+  "additionalProperties": false
+}
