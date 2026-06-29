@@ -21,6 +21,8 @@ This document resolves the unknowns flagged in the spec's Assumptions & Dependen
 
 **Spike definition (Task 0, gating)**: in a throwaway module, add `integration-postgresql` (latest, currently `v1.1.0-beta.7`) + this repo's `kloset`, blank-import its `importer`/`exporter`, build, and confirm the `postgres` connector registers. Pass → in-process; fail → Plakar-CLI fallback. Record the outcome in plan.md before the runner work commits to an approach.
 
+**✅ SPIKE RESULT (2026-06-30 — PASSED)**: A throwaway module requiring `integration-postgresql@v1.1.0-beta.7` + `kloset@v1.1.0` with blank imports of its `importer` and `exporter` packages **builds cleanly** (`go build` success). MVS resolved `kloset` to the stable `v1.1.0` (higher than the integration's `beta.2` requirement), confirming the connector API surface is compatible — **no shims needed**. **Decision locked: in-process Go-import.** The runner artifact is therefore our own binary (already embeds kloset + fs/s3) extended to register the `postgres`/`neo4j` connectors, plus DB client tools — no separate `plakar` binary or `.ptar` plugins. The Plakar-CLI fallback is not needed.
+
 ---
 
 ## R2. Plakar invocation (CLI reference, used by the fallback and for restore semantics)

@@ -22,7 +22,7 @@ description: "Task list for feature 003 — rework Plakar backend onto upstream 
 
 **Purpose**: Resolve the gating spike, align versions, scaffold the new artifacts.
 
-- [ ] T001 Run the consumption-model spike (gating): in a throwaway module, add `integration-postgresql@latest` + `kloset@v1.1.0`, blank-import its `importer`/`exporter`, `go build`, and confirm the `postgres` connector registers. Record PASS (in-process) / FAIL (plakar-CLI fallback) in `plan.md`. (See quickstart.md "consumption spike".)
+- [x] T001 Run the consumption-model spike (gating): in a throwaway module, add `integration-postgresql@latest` + `kloset@v1.1.0`, blank-import its `importer`/`exporter`, `go build`, and confirm the `postgres` connector registers. Record PASS (in-process) / FAIL (plakar-CLI fallback) in `plan.md`. **✅ DONE 2026-06-30 — PASSED: builds clean against kloset v1.1.0; decision = in-process (see research.md R1).**
 - [ ] T002 Align module versions in `go.mod`: `kloset` → `v1.1.0`, `integration-fs`/`integration-s3` to the matching line; then run `scripts/update-vendor-hash.sh` (never hand-edit `flake.nix`).
 - [ ] T003 [P] Add the pinned `integration-postgresql` dependency to `go.mod` (exact version); run `scripts/update-vendor-hash.sh`.
 - [ ] T004 [P] Scaffold the runner image at `build/runner/Dockerfile` (base image + `pg_dump`/`pg_restore`/`psql` + `neo4j-admin` + JRE; binary/plakar layer filled per the T001 decision).
