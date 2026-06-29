@@ -107,6 +107,13 @@ description: "Task list for feature 003 — rework Plakar backend onto upstream 
 
 ---
 
+## Phase 6b: Restore selector (cross-story; closes FR-024)
+
+- [ ] T043 Implement the restore selector in `src/internal/app/plakar_restore.go` + the backup CLI (`src/cmd/infrahub-backup/main.go`): full-group restore (all components of a `backup-id`) and selective per-component restore via `--component neo4j|postgres` (FR-024). Depends on T018/T030/T034.
+- [ ] T044 [P] Test the restore selector (`tests/e2e_restore_selector_test.go`): full-group restore vs Neo4j-only vs Postgres-only on the same backup group (FR-024).
+
+---
+
 ## Phase 7: Polish & Cross-Cutting Concerns
 
 - [ ] T036 [P] Finalize `build/runner/Dockerfile` per the T001 decision (our binary OR plakar+plugins) + all client tools; add a `make runner-image` target, flake output, and CI build.
@@ -116,6 +123,7 @@ description: "Task list for feature 003 — rework Plakar backend onto upstream 
 - [ ] T040 Open the upstream PR for `integration-neo4j` against base branch `integration/neo4j` in `PlakarKorp/integrations` (FR-017, FR-021).
 - [ ] T041 Run `scripts/update-vendor-hash.sh` after final `go.mod` changes; `make fmt lint vet test` all green; remove dead references to the deleted importer/watchdog.
 - [ ] T042 Verify SC-001…SC-008 across BOTH Compose and Kubernetes; confirm SC-004 (custom dump/restore removed) and SC-007 (legacy rejection message).
+- [ ] T045 Retain & regression-test the orchestration behaviors that survive the rework: task drain `waitForRunningTasks` (FR-008), `--redact` (FR-011), and group complete/incomplete status (FR-014) — add/keep targeted tests so the rework does not silently drop them.
 
 ---
 
@@ -148,4 +156,4 @@ Setup → Foundational → ┬→ US1 (MVP) ────────────
 - **Increment 3** = **US3** (Community offline) + Polish.
 - Maps to the spec's two plans: Deliverable A (Phase 4 + its polish) and Deliverable B (Phases 1–3, 5–7).
 
-**Total tasks**: 42 · US1: 4 · US4/Deliverable A: 8 · US2: 4 · US3: 4 · Setup/Foundational/Polish: 22.
+**Total tasks**: 45 · US1: 4 · US4/Deliverable A: 8 · US2: 4 · US3: 4 · restore-selector (FR-024): 2 · Setup/Foundational/Polish: 23.
