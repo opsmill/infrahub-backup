@@ -2,3 +2,6 @@
 bin/
 infrahub_backups/
 src/internal/app/embedded/neo4jwatchdog/*watchdog*
+
+# spec-kit extension catalog cache
+.specify/extensions/.cache/

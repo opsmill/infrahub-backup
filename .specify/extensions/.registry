@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "extensions": {
+    "opsmill": {
+      "version": "1.1.0",
+      "source": "local",
+      "manifest_hash": "sha256:e4681b338e7176e0ad5e85af4bcfbd31e6a457432ce3a9fbeedeb6ce62e12e0e",
+      "enabled": true,
+      "priority": 10,
+      "registered_commands": {},
+      "registered_skills": [],
+      "installed_at": "2026-06-29T19:55:42.907660+00:00"
+    },
+    "critique": {
+      "version": "1.0.0",
+      "source": "local",
+      "manifest_hash": "sha256:0b63a1835415df730cbd487c90c1252b294980176c10c14a3fa9c31a7cb882e0",
+      "enabled": true,
+      "priority": 10,
+      "registered_commands": {},
+      "registered_skills": [],
+      "installed_at": "2026-06-29T19:55:43.567283+00:00"
+    },
+    "review": {
+      "version": "1.0.1",
+      "source": "local",
+      "manifest_hash": "sha256:3f9eedfc8079662edfb8d1f9c07a161be4e66111ea57621061f1658e91710d83",
+      "enabled": true,
+      "priority": 10,
+      "registered_commands": {},
+      "registered_skills": [],
+      "installed_at": "2026-06-29T19:55:44.269386+00:00"
+    }
+  }
+}
