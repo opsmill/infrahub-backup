@@ -1,7 +1,22 @@
 # Deliverable B — tool rework: implementation plan (E2E-informed)
 
 **Feature**: `003-upstream-plakar-integrations` · **Date**: 2026-06-30
-**Status**: foundation started (runner Dockerfile landed); Go core rework pending.
+**Status**: foundation + orchestration primitive DONE and tested against the live Infrahub; create/restore-flow wiring + lifecycle pending.
+
+### Progress (green + tested, committed)
+
+- [x] **Step 1** deps: kloset → v1.1.0; integration-postgresql + integration-neo4j (replace) added. (`make build` green; only break was the 1-line `NewSource` fix.) ⚠️ `flake.nix` vendorHash stale — `update-vendor-hash.sh` uses `grep -P` (fails on macOS); refresh in CI/Linux.
+- [x] **Step 3** `connectors.go` — postgres + neo4j registered in-process.
+- [x] **Step 4** `run_connector.go` — `__run-connector` worker; **tested**: tool's own worker backs up live neo4j → tagged snapshot → `snapshots list` reads it.
+- [x] **Step 5 (partial)** `runner.go` — `LaunchComposeBackup`/`LaunchComposeRestore`: one-shot runner = DB's own image + tool binary + repo bind-mount, on the DB network. **Tested through the tool**: host tool launches the co-located runner → snapshot in the HOST repo.
+- [ ] **Step 2** delete `importer.go` + `backup_neo4j_watchdog.go` (do with the create-flow rewrite, so the old path stays building until replaced).
+- [ ] **Steps 6–7** wire `LaunchComposeBackup/Restore` into `plakar_backup.go`/`plakar_restore.go`: discovered creds → URIs (`neo4j://…@database:6362/neo4j`, `postgres://…@task-manager-db:5432/prefect`), service names, `mountDBVolumes` for community; metadata snapshot written in-process by the host tool (it can reach the repo directly); clean-break guard (FR-016) + restore selector (FR-024).
+- [ ] **Step 8** community lifecycle: stop app + **stop the writer container** then `--volumes-from` for the offline dump; restart after.
+- [ ] **Step 9** Kubernetes `CreateEphemeralJob` equivalent.
+- [ ] **restore-online lifecycle** (open items below) — needs iterative live testing.
+- [ ] **K8s** + delete old path + `make lint` green + vendor hash.
+
+
 
 This plan encodes the architecture **validated end-to-end against the live Infrahub** (see the E2E commits) and sequences the build-breaking Go rework so each landing is green.
 
