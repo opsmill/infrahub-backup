@@ -84,6 +84,7 @@ func composeRunnerArgs(project, dbService, repoPath string, mountDBVolumes bool)
 		"--network", network,
 		"--user", "root", // neo4j-admin/pg tools; online backup tolerates root
 		"-e", "HOME=/tmp",
+		"-w", "/tmp", // kloset writes a relative "<ver>/store" cache under CWD — keep it writable
 		"-v", bin + ":/usr/local/bin/infrahub-backup:ro",
 	}
 	if !strings.Contains(repoPath, "://") {
