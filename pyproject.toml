@@ -1,6 +1,9 @@
 [project]
 name = "infrahub-backup-e2e"
 version = "0.1.0"
+description = "End-to-end test suite for the infrahub-backup CLI tooling"
+authors = [{ name = "OpsMill", email = "info@opsmill.com" }]
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "pytest>=9",
@@ -14,6 +17,15 @@ dependencies = [
     "infrahub-testcontainers>=1.8",
 ]
 
+[dependency-groups]
+dev = [
+    "ruff",
+    "mypy",
+    "yamllint",
+    "rumdl",
+    "invoke",
+]
+
 [tool.pytest.ini_options]
 asyncio_default_fixture_loop_scope = "session"
 asyncio_mode = "auto"
@@ -23,3 +35,25 @@ markers = [
     "docker: tests requiring Docker Compose Infrahub deployment",
     "k8s: tests requiring Kubernetes (vcluster) Infrahub deployment",
 ]
+
+[tool.ruff]
+line-length = 120
+exclude = [".venv", "bin", "docs"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.mypy]
+pretty = true
+ignore_missing_imports = true
+
+[tool.rumdl]
+# MD013 line-length (prose wraps naturally), MD033 inline HTML (MDX components),
+# MD041 first-line heading (files use frontmatter), MD029 ordered-list prefix
+# (manual numbering), MD060 table column style (flexible alignment).
+disable = ["MD013", "MD033", "MD041", "MD029", "MD060"]
+exclude = ["node_modules", "docs/node_modules", "specs", ".specify", ".claude"]
