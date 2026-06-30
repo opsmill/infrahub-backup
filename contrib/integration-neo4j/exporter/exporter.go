@@ -144,9 +144,13 @@ func (e *Exporter) load(ctx context.Context, stage string) error {
 		return fmt.Errorf("no staged backup artifact found in %s", stage)
 	}
 
+	// VERIFIED finding (2026-06-30): `database restore` (Enterprise) accepts the
+	// artifact FILE in --from-path (and a directory would match artifacts by the
+	// target db name); `database load` (Community) requires --from-path to be the
+	// DIRECTORY containing <db>.dump, not the file. Dispatch accordingly.
 	var args []string
 	if e.conn.Offline() {
-		args = []string{"database", "load", "--from-path=" + artifact, db}
+		args = []string{"database", "load", "--from-path=" + stage, db}
 	} else {
 		args = []string{"database", "restore", "--from-path=" + artifact, db}
 	}
