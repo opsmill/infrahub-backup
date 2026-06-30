@@ -8,10 +8,19 @@ go: &go
 go_all:
   - *go
 
+python: &python
+  - "**/*.py"
+  - "pyproject.toml"
+  - "uv.lock"
+
+python_all:
+  - *python
+
 yaml: &yaml
   - "**/*.yml"
   - "**/*.yaml"
   - "!docs/node_modules/**"
+  - "!docs/pnpm-lock.yaml"
 
 yaml_all:
   - *yaml

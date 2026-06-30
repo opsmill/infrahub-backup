@@ -57,9 +57,7 @@ async def verify_infrahub_data(infrahub_url: str, token: str, expected: dict) ->
     client = InfrahubClient(config=config)
 
     tag = await client.get(kind="BuiltinTag", name__value=expected["tag_name"])
-    assert tag.name.value == expected["tag_name"], (
-        f"Expected tag '{expected['tag_name']}' but got '{tag.name.value}'"
-    )
+    assert tag.name.value == expected["tag_name"], f"Expected tag '{expected['tag_name']}' but got '{tag.name.value}'"
 
 
 async def modify_infrahub_data(infrahub_url: str, token: str, data: dict) -> None:
@@ -75,9 +73,7 @@ async def modify_infrahub_data(infrahub_url: str, token: str, data: dict) -> Non
 
     # Verify deletion
     tags = await client.all(kind="BuiltinTag")
-    assert all(t.name.value != data["tag_name"] for t in tags), (
-        f"Tag '{data['tag_name']}' still exists after deletion"
-    )
+    assert all(t.name.value != data["tag_name"] for t in tags), f"Tag '{data['tag_name']}' still exists after deletion"
 
 
 def run_backup(
@@ -91,9 +87,7 @@ def run_backup(
     result = subprocess.run(cmd, capture_output=True, text=True, env=run_env)
     if result.returncode != 0:
         raise RuntimeError(
-            f"Backup failed (exit {result.returncode}):\n"
-            f"stdout: {result.stdout}\n"
-            f"stderr: {result.stderr}"
+            f"Backup failed (exit {result.returncode}):\nstdout: {result.stdout}\nstderr: {result.stderr}"
         )
     return result
 
@@ -109,9 +103,7 @@ def run_restore(
     result = subprocess.run(cmd, capture_output=True, text=True, env=run_env)
     if result.returncode != 0:
         raise RuntimeError(
-            f"Restore failed (exit {result.returncode}):\n"
-            f"stdout: {result.stdout}\n"
-            f"stderr: {result.stderr}"
+            f"Restore failed (exit {result.returncode}):\nstdout: {result.stdout}\nstderr: {result.stderr}"
         )
     return result
 

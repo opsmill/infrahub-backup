@@ -15,9 +15,7 @@ from tests.helpers.utils import (
 
 @pytest.mark.e2e
 @pytest.mark.k8s
-async def test_backup_restore_k8s_s3_tarball(
-    reset_database_pod, infrahub_k8s, backup_binary, minio_docker, tmp_path
-):
+async def test_backup_restore_k8s_s3_tarball(reset_database_pod, infrahub_k8s, backup_binary, minio_docker, tmp_path):
     """K8s: Create a tarball backup uploaded to S3, restore from S3, and verify."""
     token = infrahub_k8s["token"]
     namespace = infrahub_k8s["namespace"]

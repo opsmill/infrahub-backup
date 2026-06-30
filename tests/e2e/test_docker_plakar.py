@@ -21,9 +21,7 @@ ADMIN_TOKEN = "06438eb2-8019-4776-878c-0941b1f1d1ec"
 @pytest.mark.e2e
 @pytest.mark.docker
 class TestDockerPlakar(TestInfrahubDockerClient):
-    async def test_backup_restore_plakar_local(
-        self, infrahub_compose, infrahub_port, backup_binary, tmp_path
-    ):
+    async def test_backup_restore_plakar_local(self, infrahub_compose, infrahub_port, backup_binary, tmp_path):
         """Create a plakar backup to local fs, restore, and verify."""
         url = f"http://localhost:{infrahub_port}"
         project = infrahub_compose.project_name
@@ -92,9 +90,7 @@ class TestDockerPlakar(TestInfrahubDockerClient):
         await verify_infrahub_data(url, ADMIN_TOKEN, seed)
 
     @pytest.mark.xfail(reason="dedup not deterministic...")
-    async def test_plakar_dedup_logical_vs_physical(
-        self, infrahub_compose, backup_binary, tmp_path
-    ):
+    async def test_plakar_dedup_logical_vs_physical(self, infrahub_compose, backup_binary, tmp_path):
         """Verify plakar deduplication: repo physical size after two identical
         backups should be much less than 2x the size after one backup."""
         project = infrahub_compose.project_name
@@ -111,9 +107,7 @@ class TestDockerPlakar(TestInfrahubDockerClient):
 
         def repo_size_bytes() -> int:
             """Return total size of all files in the plakar repository."""
-            return sum(
-                f.stat().st_size for f in Path(repo_path).rglob("*") if f.is_file()
-            )
+            return sum(f.stat().st_size for f in Path(repo_path).rglob("*") if f.is_file())
 
         # First backup – establishes baseline physical size
         run_backup(backup_binary, common_args + ["create", "--force"])
@@ -138,9 +132,7 @@ class TestDockerPlakar(TestInfrahubDockerClient):
 
         # Verify two backup groups exist
         result = subprocess.run(
-            [backup_binary]
-            + common_args
-            + ["--log-format", "json", "snapshots", "list"],
+            [backup_binary] + common_args + ["--log-format", "json", "snapshots", "list"],
             capture_output=True,
             text=True,
         )

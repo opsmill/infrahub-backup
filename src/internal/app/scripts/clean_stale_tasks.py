@@ -1,17 +1,17 @@
 import asyncio
 import sys
-
 from datetime import datetime, timedelta, timezone
-from prefect.logging.loggers import get_logger
+
+from prefect import State
 from prefect.client.orchestration import get_client
 from prefect.client.schemas.filters import (
     FlowRunFilter,
+    FlowRunFilterStartTime,
     FlowRunFilterState,
     FlowRunFilterStateType,
-    FlowRunFilterStartTime,
 )
 from prefect.client.schemas.objects import StateType
-from prefect import State
+from prefect.logging.loggers import get_logger
 
 
 async def delete_stale_flow_runs(days_to_keep: int = 2, batch_size: int = 100):
@@ -25,15 +25,11 @@ async def delete_stale_flow_runs(days_to_keep: int = 2, batch_size: int = 100):
         # Note: Using start_time because created time filtering is not available
         flow_run_filter = FlowRunFilter(
             start_time=FlowRunFilterStartTime(before_=cutoff),
-            state=FlowRunFilterState(
-                type=FlowRunFilterStateType(any_=[StateType.RUNNING])
-            ),
+            state=FlowRunFilterState(type=FlowRunFilterStateType(any_=[StateType.RUNNING])),
         )
 
         # Get flow runs to delete
-        flow_runs = await client.read_flow_runs(
-            flow_run_filter=flow_run_filter, limit=batch_size
-        )
+        flow_runs = await client.read_flow_runs(flow_run_filter=flow_run_filter, limit=batch_size)
 
         deleted_total = 0
 
@@ -52,25 +48,19 @@ async def delete_stale_flow_runs(days_to_keep: int = 2, batch_size: int = 100):
                     deleted_total += 1
                     batch_deleted += 1
                 except Exception as e:
-                    logger.warning(
-                        f"Failed to set flow run {flow_run.id} to CRASHED: {e}"
-                    )
+                    logger.warning(f"Failed to set flow run {flow_run.id} to CRASHED: {e}")
                     failed_deletes.append(flow_run.id)
 
                 # Rate limiting - adjust based on your API capacity
                 if batch_deleted % 10 == 0:
                     await asyncio.sleep(0.5)
 
-            logger.info(
-                f"Set {batch_deleted}/{len(flow_runs)} flow runs to CRASHED (total: {deleted_total})"
-            )
+            logger.info(f"Set {batch_deleted}/{len(flow_runs)} flow runs to CRASHED (total: {deleted_total})")
             if failed_deletes:
                 logger.warning(f"Failed to set {len(failed_deletes)} CRASHED flow runs")
 
             # Get next batch
-            flow_runs = await client.read_flow_runs(
-                flow_run_filter=flow_run_filter, limit=batch_size
-            )
+            flow_runs = await client.read_flow_runs(flow_run_filter=flow_run_filter, limit=batch_size)
 
             # Delay between batches to avoid overwhelming the API
             await asyncio.sleep(1.0)
@@ -78,6 +68,4 @@ async def delete_stale_flow_runs(days_to_keep: int = 2, batch_size: int = 100):
         logger.info(f"Retention complete. Total CRASHED: {deleted_total}")
 
 
-asyncio.run(
-    delete_stale_flow_runs(days_to_keep=int(sys.argv[1]), batch_size=int(sys.argv[2]))
-)
+asyncio.run(delete_stale_flow_runs(days_to_keep=int(sys.argv[1]), batch_size=int(sys.argv[2])))

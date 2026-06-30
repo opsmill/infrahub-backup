@@ -152,7 +152,7 @@ The codebase uses explicit error wrapping with `fmt.Errorf` for context. All com
 
 - Documentation guidelines: `docs/docs/development/docs.mdx`
 - Vale styles: `.vale/styles/`
-- Markdown linting: `.markdownlint.yaml`
+- Markdown linting: `[tool.rumdl]` in `pyproject.toml`
 
 ### Document Structure Patterns (Following Diataxis)
 

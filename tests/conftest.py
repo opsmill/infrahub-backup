@@ -123,9 +123,15 @@ def _dump_namespace_logs(kubeconfig: str, namespace: str) -> None:
         print(f"{'=' * 60}")
         log_result = subprocess.run(
             [
-                "kubectl", "--kubeconfig", kubeconfig,
-                "logs", pod, "-n", namespace,
-                "--all-containers", "--tail=200",
+                "kubectl",
+                "--kubeconfig",
+                kubeconfig,
+                "logs",
+                pod,
+                "-n",
+                namespace,
+                "--all-containers",
+                "--tail=200",
             ],
             capture_output=True,
             text=True,

@@ -23,6 +23,7 @@ jobs:
       documentation: ${{ steps.changes.outputs.documentation_all }}
       go: ${{ steps.changes.outputs.go_all }}
       nix: ${{ steps.changes.outputs.nix_all }}
+      python: ${{ steps.changes.outputs.python_all }}
       yaml: ${{ steps.changes.outputs.yaml_all }}
       markdown: ${{ steps.changes.outputs.markdown_all }}
     steps:
@@ -186,6 +187,25 @@ jobs:
       - name: Verify if nix build succeeds
         run: nix build --no-link
 
+  python-lint:
+    if: needs.files-changed.outputs.python == 'true'
+    needs: ["files-changed"]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - run: uv sync --only-group dev
+      - name: Check code formatting
+        run: |
+          uv run --no-sync ruff format --check --diff
+          uv run --no-sync ruff check --select I .
+      - name: Run linters
+        run: uv run --no-sync ruff check
+      - name: Run type checks
+        run: uv run --no-sync mypy .
+
   yaml-lint:
     if: needs.files-changed.outputs.yaml == 'true'
     needs: ["files-changed"]
@@ -193,10 +213,11 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
-      - name: Install yamllint
-        run: pip install yamllint
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - run: uv sync --only-group dev
       - name: Run yamllint
-        run: yamllint -s .
+        run: uv run --no-sync yamllint -s .
 
   markdown-lint:
     if: needs.files-changed.outputs.markdown == 'true'
@@ -205,13 +226,11 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 20
-      - name: Install markdownlint-cli
-        run: npm install -g markdownlint-cli
-      - name: Run markdownlint
-        run: markdownlint "**/*.md" --ignore node_modules --ignore docs/node_modules --ignore specs
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - run: uv sync --only-group dev
+      - name: Run rumdl
+        run: uv run --no-sync rumdl check .
 
   validate-documentation-style:
     if: |
@@ -247,12 +266,16 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
       - uses: actions/setup-node@v6
         with:
           node-version: 20
-          cache: 'npm'
-          cache-dependency-path: docs/package-lock.json
+          cache: 'pnpm'
+          cache-dependency-path: docs/pnpm-lock.yaml
       - name: Install Node dependencies
-        run: npm install
+        run: pnpm install --frozen-lockfile
       - name: Build docs website
-        run: npm run build
+        run: pnpm run build

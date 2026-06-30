@@ -21,9 +21,7 @@ ADMIN_TOKEN = "06438eb2-8019-4776-878c-0941b1f1d1ec"
 @pytest.mark.e2e
 @pytest.mark.docker
 class TestDockerPlakarS3(TestInfrahubDockerClient):
-    async def test_backup_restore_plakar_s3(
-        self, infrahub_compose, infrahub_port, backup_binary, minio_docker
-    ):
+    async def test_backup_restore_plakar_s3(self, infrahub_compose, infrahub_port, backup_binary, minio_docker):
         """Create a plakar backup to S3, restore, and verify."""
         url = f"http://localhost:{infrahub_port}"
         project = infrahub_compose.project_name
@@ -55,9 +53,7 @@ class TestDockerPlakarS3(TestInfrahubDockerClient):
 
         # 3. Verify snapshot list works with S3 repo
         result = subprocess.run(
-            [backup_binary]
-            + common_args
-            + ["--log-format", "json", "snapshots", "list"],
+            [backup_binary] + common_args + ["--log-format", "json", "snapshots", "list"],
             capture_output=True,
             text=True,
             env={**os.environ, **s3_env},
