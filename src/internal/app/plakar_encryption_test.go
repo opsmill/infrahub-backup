@@ -198,6 +198,35 @@ func TestEncryptWithoutPassphraseRefused(t *testing.T) {
 	}
 }
 
+// Regression (F1): resolvePassphrase must normalize the env var the same way it
+// normalizes a file and the way the runner normalizes stdin (firstLine), so the
+// host-stamped canary and the runner-derived data key always agree. A trailing
+// newline on the env value must not change the derived passphrase.
+func TestResolvePassphraseNormalizesEnv(t *testing.T) {
+	t.Setenv(passphraseEnvVar, "secret-passphrase-123\n")
+	got, err := resolvePassphrase("")
+	if err != nil {
+		t.Fatalf("resolvePassphrase: %v", err)
+	}
+	if got != "secret-passphrase-123" {
+		t.Fatalf("env passphrase not first-line normalized: got %q", got)
+	}
+
+	// A file with a trailing newline must resolve to the identical value.
+	f := filepath.Join(t.TempDir(), "pass")
+	if err := os.WriteFile(f, []byte("secret-passphrase-123\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(passphraseEnvVar, "")
+	fromFile, err := resolvePassphrase(f)
+	if err != nil {
+		t.Fatalf("resolvePassphrase(file): %v", err)
+	}
+	if fromFile != got {
+		t.Fatalf("env (%q) and file (%q) passphrases disagree after normalization", got, fromFile)
+	}
+}
+
 // T013 / VR-6 / FR-013: a passphrase shorter than the minimum is rejected.
 func TestValidatePassphraseMinLength(t *testing.T) {
 	if err := validatePassphrase("short"); err == nil {
@@ -210,6 +239,7 @@ func TestValidatePassphraseMinLength(t *testing.T) {
 
 // VR-7: --encrypt-key with the plakar backend is rejected, never silently ignored.
 func TestEncryptKeyRejectedOnPlakar(t *testing.T) {
+	t.Setenv(passphraseEnvVar, "") // hermetic: don't read an ambient passphrase
 	iops := NewInfrahubOps()
 	err := iops.PreparePlakarEncryption(false, "/path/to/key.pub", "")
 	if !errors.Is(err, errEncryptKeyOnPlakar) {

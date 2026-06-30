@@ -169,9 +169,18 @@ func inspectEncryption(configBytes []byte) (*encryption.Configuration, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading repository configuration: %w", err)
 	}
-	raw, _ := io.ReadAll(rd) // hmac mismatch expected for encrypted repos; payload is still valid
+	// The reader reports an HMAC mismatch at EOF for an encrypted repo (we used
+	// the plaintext hasher), but the payload is fully delivered before that
+	// check — so a non-nil readErr is expected and the config still parses. If
+	// the config ALSO fails to parse, the read error is the more informative one:
+	// it points at a truncated/corrupt CONFIG (e.g. a short read) rather than a
+	// benign HMAC mismatch.
+	raw, readErr := io.ReadAll(rd)
 	cfg, err := storage.NewConfigurationFromBytes(version, raw)
 	if err != nil {
+		if readErr != nil {
+			return nil, fmt.Errorf("reading repository configuration (possibly truncated or corrupt): %w", readErr)
+		}
 		return nil, fmt.Errorf("parsing repository configuration: %w", err)
 	}
 	return cfg.Encryption, nil
@@ -340,7 +349,7 @@ func closeRepo(repo *repository.Repository) {
 	}
 }
 
-// preparePlakarEncryption resolves and validates the encryption inputs for a
+// PreparePlakarEncryption resolves and validates the encryption inputs for a
 // plakar create, storing them on the Plakar config. It rejects the legacy
 // tarball --encrypt-key flag, resolves the passphrase (env/file), and — when
 // --encrypt is set — refuses an absent or too-short passphrase BEFORE any
@@ -349,13 +358,12 @@ func (iops *InfrahubOps) PreparePlakarEncryption(encrypt bool, encryptKey, passp
 	if encryptKey != "" {
 		return errEncryptKeyOnPlakar
 	}
-	pass, err := resolvePassphrase(passphraseFile)
-	if err != nil {
+	if err := iops.LoadPlakarPassphrase(passphraseFile); err != nil {
 		return err
 	}
 	iops.config.Plakar.Encrypt = encrypt
-	iops.config.Plakar.Passphrase = pass
 	if encrypt {
+		pass := iops.config.Plakar.Passphrase
 		if pass == "" {
 			return errEncryptWithoutPassphrase
 		}
@@ -366,7 +374,7 @@ func (iops *InfrahubOps) PreparePlakarEncryption(encrypt bool, encryptKey, passp
 	return nil
 }
 
-// loadPlakarPassphrase resolves the passphrase (env/file) for opening an
+// LoadPlakarPassphrase resolves the passphrase (env/file) for opening an
 // encrypted repository on restore/list and stores it on the Plakar config.
 // A plaintext repo simply ignores an empty (or supplied) passphrase.
 func (iops *InfrahubOps) LoadPlakarPassphrase(passphraseFile string) error {

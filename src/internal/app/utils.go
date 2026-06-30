@@ -38,6 +38,13 @@ const minPassphraseLen = 12
 // resolvePassphrase resolves the encryption passphrase for unattended use.
 // Resolution order: --passphrase-file (first line) → INFRAHUB_BACKUP_PASSPHRASE.
 // Returns an empty string when neither is set. The value is never logged.
+//
+// Both sources are normalized with firstLine so the host derives the same key
+// the co-located runner does: the runner reads the passphrase from stdin and
+// also takes its first line (see readPassphraseStdinIf). Without this, an env
+// passphrase carrying a trailing newline (e.g. from `export VAR=$(cat file)`)
+// would stamp the repo canary with one key while the runner encrypts data with
+// another, aborting the backup at the first component.
 func resolvePassphrase(passphraseFile string) (string, error) {
 	if passphraseFile != "" {
 		data, err := os.ReadFile(passphraseFile)
@@ -46,7 +53,7 @@ func resolvePassphrase(passphraseFile string) (string, error) {
 		}
 		return firstLine(string(data)), nil
 	}
-	return os.Getenv(passphraseEnvVar), nil
+	return firstLine(os.Getenv(passphraseEnvVar)), nil
 }
 
 // firstLine returns the first line of s with the trailing CR/LF stripped, but
