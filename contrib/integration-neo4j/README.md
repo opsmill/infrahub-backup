@@ -7,10 +7,13 @@
 > restore commands and output layout are confirmed against a live Enterprise
 > instance** (2026-06-30): `database backup --compress=false --from --to-path <db>`
 > produces a single `<db>-<ts>.backup` artifact; `database restore --from-path
-> <dir> [--overwrite-destination] <db>` restores it. **Still pending:** the
-> offline (`neo4j+offline://`) Community path (no Community image was available to
-> test), the full connector Go path under a real run (Import→kloset→Export), the
-> testcontainers suite, SDK plugin entrypoints, and edition/Bolt-count manifest.
+> <dir> [--overwrite-destination] <db>` restores it. The **offline
+> (`neo4j+offline://`) Community path is also validated** against Neo4j Community
+> 2025.10.1: `database dump --to-path … <db>` → single `<db>.dump`; `database load
+> --from-path … --overwrite-destination` round-trips with data intact (the output
+> path must be writable by the `neo4j` user). **Still pending:** the full connector
+> Go path under a real run (Import→kloset→Export), the testcontainers suite, SDK
+> plugin entrypoints, and edition/Bolt-count manifest.
 > Not yet submitted to `PlakarKorp/integrations` (outward action, pending a green
 > test suite + review).
 
@@ -56,10 +59,11 @@ the consumption model verified for `infrahub-backup` (kloset v1.1.0 compile spik
 
 - [x] Validate `neo4j-admin` online backup/restore flags + output layout against a real
       Neo4j Enterprise (done 2026-06-30 against 2025.10.1).
+- [x] Validate Community offline `database dump`/`database load` round-trip (done
+      2026-06-30 against Community 2025.10.1; data intact; output-path perms noted).
 - [ ] Add SDK plugin entrypoints (`plugin/neo4j-importer/main.go`, etc.) + align the
       `go-kloset-sdk` version for `.ptar` packaging (`plakar pkg build`).
-- [ ] testcontainers suite: Enterprise online round-trip, **Community offline round-trip
-      (untested — needs a Community image)**, offline-against-running fail-fast.
+- [ ] testcontainers suite automating both round-trips + offline-against-running fail-fast.
 - [ ] Run the full connector path (Import→kloset→Export) end-to-end in a runner with neo4j-admin.
 - [ ] Edition detection + Bolt-based node/relationship counts in the manifest (online).
 - [ ] Verify temp-dir lifecycle (refcounted cleanup) under partial consumption.

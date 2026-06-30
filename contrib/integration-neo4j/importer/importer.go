@@ -109,6 +109,10 @@ func (i *Importer) adminArgs(toPath string) ([]string, error) {
 	switch i.conn.Proto {
 	case "neo4j+offline":
 		// Community OFFLINE dump. Requires the database STOPPED (caller's responsibility).
+		// VERIFIED against Neo4j Community 2025.10.1: produces a single "<db>.dump"
+		// under --to-path (emitDir walks it); load round-trip preserves data.
+		// NOTE: --to-path must be writable by the user running neo4j-admin (the
+		// "neo4j" user in the official image) — the runner must own/chmod the output mount.
 		return []string{"database", "dump", "--to-path=" + toPath, db}, nil
 	case "neo4j":
 		// Enterprise ONLINE backup. --compress=false keeps the artifact dedup-friendly.
