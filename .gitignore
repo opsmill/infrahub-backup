@@ -8,3 +8,6 @@ src/internal/app/embedded/neo4jwatchdog/*watchdog*
 
 # stray kloset/pebble relative cache (defensive)
 2.0.0/
+
+# neo4jwatchdog build output (cross-compiled by make build)
+tools/neo4jwatchdog/neo4jwatchdog

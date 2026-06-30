@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/PlakarKorp/kloset/connectors/exporter"
 	"github.com/PlakarKorp/kloset/objects"
 	"github.com/PlakarKorp/kloset/repository"
 	"github.com/PlakarKorp/kloset/snapshot"
@@ -113,6 +114,65 @@ func TestEncryptedRepoHidesPlaintext(t *testing.T) {
 	writeTestSnapshot(t, enc, "secret", marker, nil)
 	if repoContainsBytes(t, enc.RepoPath, marker) {
 		t.Fatal("SC-001 violated: encrypted repo bytes contain the plaintext marker")
+	}
+}
+
+// T021 (data layer) / SC-002: an encrypted backup→restore round-trip recovers
+// the exact content with the correct passphrase — proving the data is genuinely
+// encrypted at rest yet decryptable with the key (the engine secret round-trips).
+func TestEncryptedRoundTripInProcess(t *testing.T) {
+	cfg := newTestPlakarConfig(t)
+	cfg.Encrypt = true
+	cfg.Passphrase = "round-trip-passphrase-1"
+	payload := randomMarker(t, 2048)
+	writeTestSnapshot(t, cfg, "rt", payload, nil)
+
+	// Open with the key, load the (only) snapshot, export it to a temp dir.
+	kctx, err := initPlakarContext(cfg)
+	if err != nil {
+		t.Fatalf("initPlakarContext: %v", err)
+	}
+	defer closePlakarContext(kctx)
+	repo, err := openRepo(kctx, cfg)
+	if err != nil {
+		t.Fatalf("openRepo with key: %v", err)
+	}
+	defer closeRepo(repo)
+
+	var mac objects.MAC
+	found := false
+	for m, lerr := range repo.ListSnapshots() {
+		if lerr != nil {
+			t.Fatalf("list: %v", lerr)
+		}
+		mac = m
+		found = true
+	}
+	if !found {
+		t.Fatal("no snapshot found in encrypted repo")
+	}
+	snap, err := snapshot.Load(repo, mac)
+	if err != nil {
+		t.Fatalf("load snapshot: %v", err)
+	}
+	defer snap.Close()
+
+	outDir := t.TempDir()
+	exp, err := exporter.NewExporter(kctx, connectorOptions(kctx), map[string]string{"location": "fs://" + outDir})
+	if err != nil {
+		t.Fatalf("new exporter: %v", err)
+	}
+	defer exp.Close(kctx.Context)
+	if err := snap.Export(exp, "/", &snapshot.ExportOptions{SkipPermissions: true}); err != nil {
+		t.Fatalf("export: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(outDir, "secret.json"))
+	if err != nil {
+		t.Fatalf("reading restored file: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("restored content does not match the original — decryption round-trip failed")
 	}
 }
 
