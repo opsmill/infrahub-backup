@@ -34,7 +34,8 @@ func init() {
 
 // Importer backs up a single Neo4j database.
 type Importer struct {
-	conn neo4jconn.ConnConfig
+	conn            neo4jconn.ConnConfig
+	includeMetadata string // online only: none|all|users|roles (empty = omit the flag)
 }
 
 // NewImporter is the connector constructor used both for in-process registration
@@ -44,7 +45,16 @@ func NewImporter(_ context.Context, _ *connectors.Options, proto string, config 
 	if err != nil {
 		return nil, err
 	}
-	return &Importer{conn: conn}, nil
+	imp := &Importer{conn: conn}
+	if v := config["include_metadata"]; v != "" {
+		switch v {
+		case "none", "all", "users", "roles":
+			imp.includeMetadata = v
+		default:
+			return nil, fmt.Errorf("invalid include_metadata %q: want none|all|users|roles", v)
+		}
+	}
+	return imp, nil
 }
 
 func (i *Importer) Origin() string {
@@ -102,6 +112,8 @@ func (i *Importer) adminArgs(toPath string) ([]string, error) {
 		return []string{"database", "dump", "--to-path=" + toPath, db}, nil
 	case "neo4j":
 		// Enterprise ONLINE backup. --compress=false keeps the artifact dedup-friendly.
+		// VERIFIED against Neo4j Enterprise 2025.10.1: these flags produce a single
+		// "<db>-<timestamp>.backup" artifact under --to-path (emitDir walks it).
 		args := []string{"database", "backup", "--to-path=" + toPath, "--compress=false"}
 		if i.conn.Host != "" {
 			from := i.conn.Host
@@ -109,6 +121,9 @@ func (i *Importer) adminArgs(toPath string) ([]string, error) {
 				from = i.conn.Host + ":" + i.conn.Port
 			}
 			args = append(args, "--from="+from)
+		}
+		if i.includeMetadata != "" {
+			args = append(args, "--include-metadata="+i.includeMetadata)
 		}
 		return append(args, db), nil
 	default:

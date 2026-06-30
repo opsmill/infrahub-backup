@@ -9,6 +9,7 @@
     "username": { "type": "string" },
     "password": { "type": "string" },
     "database": { "type": "string", "description": "Database name (default: neo4j)" },
+    "include_metadata": { "type": "string", "enum": ["none", "all", "users", "roles"], "description": "Enterprise online backup: include roles/users metadata for restore (neo4j-admin --include-metadata)" },
     "data_dir": { "type": "string", "description": "Neo4j data/home directory (offline only)" },
     "neo4j_admin_path": { "type": "string", "description": "Path to the neo4j-admin binary" },
     "neo4j_bin_dir": { "type": "string", "description": "Directory containing neo4j-admin (else $PATH)" }

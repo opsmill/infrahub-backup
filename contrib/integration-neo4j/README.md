@@ -1,12 +1,18 @@
 # Neo4j integration for Plakar (DRAFT)
 
-> **Status: draft — compile-verified, NOT behavior-verified.** The kloset connector
-> wiring (importer/exporter registration, record/manifest emission) follows the
-> verified patterns of `integration-mysql`/`integration-postgresql`. The
-> `neo4j-admin` invocations and output-layout handling are implemented per
-> documented behavior but **must be validated against a real Neo4j with a
-> testcontainers suite before the upstream PR**. Not yet submitted to
-> `PlakarKorp/integrations` (an outward action pending review + a green test suite).
+> **Status: draft — compile-verified + neo4j-admin commands validated against a
+> real Neo4j Enterprise 2025.10.1.** The kloset connector wiring follows the
+> verified patterns of `integration-mysql`/`integration-postgresql` (builds +
+> `go vet` clean against kloset v1.1.0). The **online (`neo4j://`) backup and
+> restore commands and output layout are confirmed against a live Enterprise
+> instance** (2026-06-30): `database backup --compress=false --from --to-path <db>`
+> produces a single `<db>-<ts>.backup` artifact; `database restore --from-path
+> <dir> [--overwrite-destination] <db>` restores it. **Still pending:** the
+> offline (`neo4j+offline://`) Community path (no Community image was available to
+> test), the full connector Go path under a real run (Import→kloset→Export), the
+> testcontainers suite, SDK plugin entrypoints, and edition/Bolt-count manifest.
+> Not yet submitted to `PlakarKorp/integrations` (outward action, pending a green
+> test suite + review).
 
 Backup and restore of Neo4j databases with [Plakar](https://github.com/PlakarKorp/plakar),
 encapsulating the `neo4j-admin` commands so database backups are as easy as any
@@ -48,10 +54,13 @@ the consumption model verified for `infrahub-backup` (kloset v1.1.0 compile spik
 
 ## TODO before upstream contribution
 
+- [x] Validate `neo4j-admin` online backup/restore flags + output layout against a real
+      Neo4j Enterprise (done 2026-06-30 against 2025.10.1).
 - [ ] Add SDK plugin entrypoints (`plugin/neo4j-importer/main.go`, etc.) + align the
       `go-kloset-sdk` version for `.ptar` packaging (`plakar pkg build`).
-- [ ] testcontainers suite: Enterprise online round-trip, Community offline round-trip,
-      offline-against-running fail-fast — validate exact `neo4j-admin` flags + output layout.
+- [ ] testcontainers suite: Enterprise online round-trip, **Community offline round-trip
+      (untested — needs a Community image)**, offline-against-running fail-fast.
+- [ ] Run the full connector path (Import→kloset→Export) end-to-end in a runner with neo4j-admin.
 - [ ] Edition detection + Bolt-based node/relationship counts in the manifest (online).
 - [ ] Verify temp-dir lifecycle (refcounted cleanup) under partial consumption.
 - [ ] Move to a `PlakarKorp/integrations` fork (branch `integration/neo4j`, subdir `neo4j/`) and open the PR.
