@@ -41,6 +41,8 @@ type PlakarConfig struct {
 	CacheDir   string // Local cache directory for dedup state
 	SnapshotID string // Specific snapshot ID for restore (empty = latest)
 	BackupID   string // Specific backup-id tag for restore (empty = latest complete group)
+	Encrypt    bool   // Create the repository encrypted (set at create time only)
+	Passphrase string // Symmetric passphrase for an encrypted repo; never logged/persisted
 }
 
 // Configuration holds the application configuration

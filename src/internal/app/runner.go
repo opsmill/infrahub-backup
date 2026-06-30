@@ -28,40 +28,47 @@ func runnerBinary() (string, error) {
 // present), joins the DB's compose network (reach it by service name), and mounts
 // the tool binary + the kloset repo. This needs no separately-built runner image
 // and resolves fs:// repo reachability (the host repo dir is bind-mounted in).
-func LaunchComposeBackup(project, dbService, repoPath, uri string, opts map[string]string, tags []string, mountDBVolumes bool) (string, error) {
-	args, err := composeRunnerArgs(project, dbService, repoPath, mountDBVolumes)
+func LaunchComposeBackup(project, dbService, repoPath, uri, passphrase string, opts map[string]string, tags []string, mountDBVolumes bool) (string, error) {
+	args, err := composeRunnerArgs(project, dbService, repoPath, mountDBVolumes, passphrase != "")
 	if err != nil {
 		return "", err
 	}
 	repoArg := repoArgFor(repoPath)
 	args = append(args, "__run-connector", "backup", repoArg, uri)
+	if passphrase != "" {
+		args = append(args, "--passphrase-stdin")
+	}
 	for k, v := range opts {
 		args = append(args, "--opt", k+"="+v)
 	}
 	for _, t := range tags {
 		args = append(args, "--tag", t)
 	}
-	return runDockerCapture(args)
+	return runDockerCapture(args, passphrase)
 }
 
 // LaunchComposeRestore runs ONE restore connector op in a co-located runner.
-func LaunchComposeRestore(project, dbService, repoPath, destURI, snapshot string, opts map[string]string, mountDBVolumes bool) error {
-	args, err := composeRunnerArgs(project, dbService, repoPath, mountDBVolumes)
+func LaunchComposeRestore(project, dbService, repoPath, destURI, snapshot, passphrase string, opts map[string]string, mountDBVolumes bool) error {
+	args, err := composeRunnerArgs(project, dbService, repoPath, mountDBVolumes, passphrase != "")
 	if err != nil {
 		return err
 	}
 	repoArg := repoArgFor(repoPath)
 	args = append(args, "__run-connector", "restore", repoArg, destURI, snapshot)
+	if passphrase != "" {
+		args = append(args, "--passphrase-stdin")
+	}
 	for k, v := range opts {
 		args = append(args, "--opt", k+"="+v)
 	}
-	_, err = runDockerCapture(args)
+	_, err = runDockerCapture(args, passphrase)
 	return err
 }
 
 // composeRunnerArgs builds the `docker run …` prefix up to (but not including)
-// the in-container command: image, network, mounts, env.
-func composeRunnerArgs(project, dbService, repoPath string, mountDBVolumes bool) ([]string, error) {
+// the in-container command: image, network, mounts, env. When withStdin is set,
+// the container keeps stdin open (`-i`) so the passphrase can be piped in.
+func composeRunnerArgs(project, dbService, repoPath string, mountDBVolumes, withStdin bool) ([]string, error) {
 	cid, err := composeContainerID(project, dbService)
 	if err != nil {
 		return nil, err
@@ -79,14 +86,20 @@ func composeRunnerArgs(project, dbService, repoPath string, mountDBVolumes bool)
 		return nil, fmt.Errorf("resolving runner binary: %w", err)
 	}
 
-	args := []string{
-		"run", "--rm",
+	args := []string{"run", "--rm"}
+	if withStdin {
+		// Keep stdin open so the orchestrator can pipe the passphrase in. The
+		// passphrase is never an arg or -e env var (it would leak via docker
+		// inspect / the process list).
+		args = append(args, "-i")
+	}
+	args = append(args,
 		"--network", network,
 		"--user", "root", // neo4j-admin/pg tools; online backup tolerates root
 		"-e", "HOME=/tmp",
 		"-w", "/tmp", // kloset writes a relative "<ver>/store" cache under CWD — keep it writable
-		"-v", bin + ":/usr/local/bin/infrahub-backup:ro",
-	}
+		"-v", bin+":/usr/local/bin/infrahub-backup:ro",
+	)
 	if !strings.Contains(repoPath, "://") {
 		// Local fs:// repo — bind-mount the host directory into the runner.
 		args = append(args, "-v", repoPath+":/repo")
@@ -149,9 +162,15 @@ func firstNetwork(cid string) (string, error) {
 	return fields[0], nil
 }
 
-func runDockerCapture(args []string) (string, error) {
+// runDockerCapture runs `docker <args>` and returns the last stdout token. When
+// stdin is non-empty it is written to the container (one line) and stdin closed,
+// used to pipe the repository passphrase without exposing it on argv/env.
+func runDockerCapture(args []string, stdin string) (string, error) {
 	var out, errb bytes.Buffer
 	cmd := exec.Command("docker", args...)
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin + "\n")
+	}
 	cmd.Stdout = &out
 	cmd.Stderr = &errb
 	if err := cmd.Run(); err != nil {

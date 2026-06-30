@@ -25,3 +25,36 @@ Each operational area is exposed as its own binary:
 ## Using the CLI
 
 Documentation for using the Infrahub Backup is available in the [infrahub-backup documentation](https://docs.infrahub.app/backup/)
+
+## Encrypted Plakar backups
+
+The Plakar backend (`--backend plakar`) can write **encrypted at-rest** repositories
+using the engine's native symmetric encryption (Argon2id KDF + AES‑256‑GCM‑SIV). A
+leaked or stolen repository is unreadable without the passphrase.
+
+```bash
+# Create an encrypted repository (passphrase via env or file)
+export INFRAHUB_BACKUP_PASSPHRASE='correct horse battery staple'
+infrahub-backup create --backend plakar --repo fs:///backups/infra --encrypt
+
+# The same passphrase is required for every later operation on the repo:
+infrahub-backup --backend plakar --repo fs:///backups/infra snapshots list
+infrahub-backup restore --backend plakar --repo fs:///backups/infra <backup-id>
+
+# Read the passphrase from a file instead of the environment:
+infrahub-backup create --backend plakar --repo fs:///backups/infra --encrypt \
+  --passphrase-file /run/secrets/backup-pass
+```
+
+Notes:
+
+- Encryption is fixed when the repository is **created**; it is not applied
+  retroactively and cannot be toggled in place. Create a new repository to change it.
+- The passphrase must be **at least 12 characters**. It is supplied non‑interactively
+  via `INFRAHUB_BACKUP_PASSPHRASE` or `--passphrase-file` (first line) and is **never**
+  written to logs or to the co-located runner's command line / environment.
+- **There is no key escrow.** If you lose the passphrase, the backups are
+  unrecoverable. Store it securely.
+- `--encrypt-key` is the **tarball** backend's public-key (ECIES) flag; using it with
+  `--backend plakar` is rejected — use `--encrypt` with a passphrase instead.
+- Repositories created without `--encrypt` stay plaintext and behave exactly as before.

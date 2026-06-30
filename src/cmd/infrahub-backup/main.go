@@ -89,6 +89,18 @@ func main() {
 			if err := validateBackendFlags(iops); err != nil {
 				return err
 			}
+			// Plakar uses native symmetric (passphrase) encryption; reject the
+			// tarball --encrypt-key flag and resolve/validate the passphrase
+			// before any repository is created.
+			if iops.Config().Backend == app.BackendPlakar {
+				if err := iops.PreparePlakarEncryption(
+					viper.GetBool("encrypt"),
+					viper.GetString("encrypt-key"),
+					viper.GetString("passphrase-file"),
+				); err != nil {
+					return err
+				}
+			}
 			return iops.CreateBackup(
 				viper.GetBool("force"),
 				viper.GetString("neo4jmetadata"),
@@ -162,6 +174,9 @@ func main() {
 			}
 			forceRestore, _ := cmd.Flags().GetBool("force")
 			if iops.Config().Backend == app.BackendPlakar {
+				if err := iops.LoadPlakarPassphrase(viper.GetString("passphrase-file")); err != nil {
+					return err
+				}
 				return iops.RestoreBackup("", restoreExcludeTaskManagerDB, restoreMigrateFormat, restoreSleepDuration, restoreDecryptKey, forceRestore, restoreResetDeploymentID)
 			}
 			return iops.RestoreBackup(args[0], restoreExcludeTaskManagerDB, restoreMigrateFormat, restoreSleepDuration, restoreDecryptKey, forceRestore, restoreResetDeploymentID)
@@ -238,6 +253,9 @@ func main() {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if iops.Config().Plakar.RepoPath == "" {
 				return fmt.Errorf("--repo is required for snapshots list")
+			}
+			if err := iops.LoadPlakarPassphrase(viper.GetString("passphrase-file")); err != nil {
+				return err
 			}
 			jsonOutput := viper.GetString("log-format") == "json"
 			return iops.ListSnapshots(jsonOutput)

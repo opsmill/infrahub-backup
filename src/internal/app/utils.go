@@ -28,6 +28,45 @@ func getEnvOrDefault(key, defaultValue string) string {
 	return defaultValue
 }
 
+// passphraseEnvVar is the environment variable that supplies the symmetric
+// passphrase for encrypted plakar repositories (create/backup/restore/list).
+const passphraseEnvVar = "INFRAHUB_BACKUP_PASSPHRASE"
+
+// minPassphraseLen is the minimum length enforced for a new encrypted repository.
+const minPassphraseLen = 12
+
+// resolvePassphrase resolves the encryption passphrase for unattended use.
+// Resolution order: --passphrase-file (first line) → INFRAHUB_BACKUP_PASSPHRASE.
+// Returns an empty string when neither is set. The value is never logged.
+func resolvePassphrase(passphraseFile string) (string, error) {
+	if passphraseFile != "" {
+		data, err := os.ReadFile(passphraseFile)
+		if err != nil {
+			return "", fmt.Errorf("reading passphrase file %q: %w", passphraseFile, err)
+		}
+		return firstLine(string(data)), nil
+	}
+	return os.Getenv(passphraseEnvVar), nil
+}
+
+// firstLine returns the first line of s with the trailing CR/LF stripped, but
+// preserving any leading/interior spaces (passphrases may contain spaces).
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	return strings.TrimRight(s, "\r")
+}
+
+// validatePassphrase enforces the minimum passphrase length for creating an
+// encrypted repository (FR-013). It is checked before any repository is created.
+func validatePassphrase(passphrase string) error {
+	if len(passphrase) < minPassphraseLen {
+		return fmt.Errorf("passphrase too short: encrypted backups require a passphrase of at least %d characters", minPassphraseLen)
+	}
+	return nil
+}
+
 func getCurrentDir() string {
 	dir, err := os.Getwd()
 	if err != nil {

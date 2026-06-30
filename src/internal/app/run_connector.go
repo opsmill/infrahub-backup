@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -36,39 +37,55 @@ func RunConnectorCommand() *cobra.Command {
 	}
 
 	var backupOpts, tags []string
+	var backupPassphraseStdin bool
 	backupCmd := &cobra.Command{
 		Use:          "backup <repo> <source-uri>",
 		Args:         cobra.ExactArgs(2),
 		SilenceUsage: true,
 		RunE: func(_ *cobra.Command, args []string) error {
-			return runConnectorBackup(args[0], args[1], parseKV(backupOpts), tags)
+			passphrase, err := readPassphraseStdinIf(backupPassphraseStdin)
+			if err != nil {
+				return err
+			}
+			return runConnectorBackup(args[0], args[1], passphrase, parseKV(backupOpts), tags)
 		},
 	}
 	backupCmd.Flags().StringArrayVar(&backupOpts, "opt", nil, "connector option key=value (repeatable)")
 	backupCmd.Flags().StringArrayVar(&tags, "tag", nil, "snapshot tag key=value (repeatable)")
+	backupCmd.Flags().BoolVar(&backupPassphraseStdin, "passphrase-stdin", false, "read the repository passphrase from stdin (one line)")
 
 	var restoreOpts []string
+	var restorePassphraseStdin bool
 	restoreCmd := &cobra.Command{
 		Use:          "restore <repo> <dest-uri> <snapshot-hex>",
 		Args:         cobra.ExactArgs(3),
 		SilenceUsage: true,
 		RunE: func(_ *cobra.Command, args []string) error {
-			return runConnectorRestore(args[0], args[1], args[2], parseKV(restoreOpts))
+			passphrase, err := readPassphraseStdinIf(restorePassphraseStdin)
+			if err != nil {
+				return err
+			}
+			return runConnectorRestore(args[0], args[1], args[2], passphrase, parseKV(restoreOpts))
 		},
 	}
 	restoreCmd.Flags().StringArrayVar(&restoreOpts, "opt", nil, "connector option key=value (repeatable)")
+	restoreCmd.Flags().BoolVar(&restorePassphraseStdin, "passphrase-stdin", false, "read the repository passphrase from stdin (one line)")
 
 	// launch: exercise the co-located runner launcher through the tool (testing the
 	// orchestration path; the create flow will call LaunchComposeBackup directly).
 	var launchOpts, launchTags []string
-	var launchVolumes bool
+	var launchVolumes, launchPassphraseStdin bool
 	launchCmd := &cobra.Command{
 		Use:          "launch <project> <db-service> <repo> <source-uri>",
 		Args:         cobra.ExactArgs(4),
 		Hidden:       true,
 		SilenceUsage: true,
 		RunE: func(_ *cobra.Command, args []string) error {
-			snap, err := LaunchComposeBackup(args[0], args[1], args[2], args[3], parseKV(launchOpts), launchTags, launchVolumes)
+			passphrase, err := readPassphraseStdinIf(launchPassphraseStdin)
+			if err != nil {
+				return err
+			}
+			snap, err := LaunchComposeBackup(args[0], args[1], args[2], args[3], passphrase, parseKV(launchOpts), launchTags, launchVolumes)
 			if err != nil {
 				return err
 			}
@@ -79,9 +96,25 @@ func RunConnectorCommand() *cobra.Command {
 	launchCmd.Flags().StringArrayVar(&launchOpts, "opt", nil, "connector option key=value (repeatable)")
 	launchCmd.Flags().StringArrayVar(&launchTags, "tag", nil, "snapshot tag key=value (repeatable)")
 	launchCmd.Flags().BoolVar(&launchVolumes, "volumes-from-db", false, "share the DB container's volumes (neo4j community/restore)")
+	launchCmd.Flags().BoolVar(&launchPassphraseStdin, "passphrase-stdin", false, "read the repository passphrase from stdin (one line)")
 
 	cmd.AddCommand(backupCmd, restoreCmd, launchCmd)
 	return cmd
+}
+
+// readPassphraseStdinIf reads one line from stdin as the repository passphrase
+// when enabled. The orchestrator pipes it in via `docker run -i`, so it never
+// appears on the worker's command line or environment (FR-007). The trailing
+// CR/LF is stripped; interior characters are preserved.
+func readPassphraseStdinIf(enabled bool) (string, error) {
+	if !enabled {
+		return "", nil
+	}
+	data, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return "", fmt.Errorf("reading passphrase from stdin: %w", err)
+	}
+	return firstLine(string(data)), nil
 }
 
 func parseKV(kvs []string) map[string]string {
@@ -104,8 +137,8 @@ func connectorOptions(kctx *kcontext.KContext) *connectors.Options {
 
 // runConnectorBackup runs the registered importer for sourceURI and writes one
 // snapshot (with the given tags) into the kloset repository at repoPath.
-func runConnectorBackup(repoPath, sourceURI string, opts map[string]string, tags []string) (retErr error) {
-	cfg := &PlakarConfig{RepoPath: repoPath}
+func runConnectorBackup(repoPath, sourceURI, passphrase string, opts map[string]string, tags []string) (retErr error) {
+	cfg := &PlakarConfig{RepoPath: repoPath, Passphrase: passphrase}
 	kctx, err := initPlakarContext(cfg)
 	if err != nil {
 		return err
@@ -155,8 +188,8 @@ func runConnectorBackup(repoPath, sourceURI string, opts map[string]string, tags
 }
 
 // runConnectorRestore loads the snapshot and drives the registered exporter for destURI.
-func runConnectorRestore(repoPath, destURI, snapHex string, opts map[string]string) error {
-	cfg := &PlakarConfig{RepoPath: repoPath}
+func runConnectorRestore(repoPath, destURI, snapHex, passphrase string, opts map[string]string) error {
+	cfg := &PlakarConfig{RepoPath: repoPath, Passphrase: passphrase}
 	kctx, err := initPlakarContext(cfg)
 	if err != nil {
 		return err

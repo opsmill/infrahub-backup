@@ -111,7 +111,7 @@ func (iops *InfrahubOps) CreatePlakarBackup(force bool, neo4jMetadata string, ex
 
 		case ComponentPostgres:
 			uri := dbURI("postgres", iops.config.PostgresUsername, iops.config.PostgresPassword, "task-manager-db", "5432", iops.config.PostgresDatabase)
-			snapHex, cerr = LaunchComposeBackup(project, "task-manager-db", repoPath, uri, map[string]string{"compress": "false"}, tags, false)
+			snapHex, cerr = LaunchComposeBackup(project, "task-manager-db", repoPath, uri, iops.config.Plakar.Passphrase, map[string]string{"compress": "false"}, tags, false)
 
 		case ComponentMetadata:
 			snapHex, cerr = iops.writeMetadataSnapshot(metadataObj, tags)
@@ -160,7 +160,7 @@ func (iops *InfrahubOps) backupNeo4jComponent(project, repoPath, neo4jMetadata s
 			}
 		}()
 		opts := map[string]string{"neo4j_bin_dir": "/var/lib/neo4j/bin"}
-		return LaunchComposeBackup(project, "database", repoPath, uri, opts, tags, true)
+		return LaunchComposeBackup(project, "database", repoPath, uri, iops.config.Plakar.Passphrase, opts, tags, true)
 	}
 
 	uri := dbURI("neo4j", iops.config.Neo4jUsername, iops.config.Neo4jPassword, "database", "6362", iops.config.Neo4jDatabase)
@@ -168,7 +168,7 @@ func (iops *InfrahubOps) backupNeo4jComponent(project, repoPath, neo4jMetadata s
 	if neo4jMetadata != "" && neo4jMetadata != "none" {
 		opts["include_metadata"] = neo4jMetadata
 	}
-	return LaunchComposeBackup(project, "database", repoPath, uri, opts, tags, false)
+	return LaunchComposeBackup(project, "database", repoPath, uri, iops.config.Plakar.Passphrase, opts, tags, false)
 }
 
 // dbURI builds a connector URI with URL-encoded credentials.

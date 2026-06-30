@@ -148,7 +148,7 @@ func (iops *InfrahubOps) restoreComponentViaRunner(project, repoPath, component,
 			}
 		}()
 		opts := map[string]string{"neo4j_bin_dir": "/var/lib/neo4j/bin", "overwrite": "true"}
-		if err := LaunchComposeRestore(project, "database", repoPath, uri, snapHex, opts, true); err != nil {
+		if err := LaunchComposeRestore(project, "database", repoPath, uri, snapHex, iops.config.Plakar.Passphrase, opts, true); err != nil {
 			return fmt.Errorf("neo4j restore failed: %w", err)
 		}
 		logrus.Info("Neo4j restore completed")
@@ -161,7 +161,7 @@ func (iops *InfrahubOps) restoreComponentViaRunner(project, repoPath, component,
 		}
 		uri := dbURI("postgres", iops.config.PostgresUsername, iops.config.PostgresPassword, "task-manager-db", "5432", iops.config.PostgresDatabase)
 		opts := map[string]string{"clean": "true"}
-		if err := LaunchComposeRestore(project, "task-manager-db", repoPath, uri, snapHex, opts, false); err != nil {
+		if err := LaunchComposeRestore(project, "task-manager-db", repoPath, uri, snapHex, iops.config.Plakar.Passphrase, opts, false); err != nil {
 			return fmt.Errorf("postgres restore failed: %w", err)
 		}
 		logrus.Info("Postgres restore completed")
