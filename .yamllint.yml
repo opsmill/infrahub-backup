@@ -3,6 +3,7 @@ extends: default
 
 ignore: |
   docs/node_modules/
+  docs/pnpm-lock.yaml
   .git/
 
 rules:
