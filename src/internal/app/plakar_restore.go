@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"iter"
+	"net/url"
 	"strings"
 	"time"
 
@@ -34,9 +35,6 @@ func (iops *InfrahubOps) RestorePlakarBackup(excludeTaskManager bool, restoreMig
 	}
 
 	editionInfo := iops.detectNeo4jEditionInfo("restore")
-	if editionInfo.IsCommunity {
-		return fmt.Errorf("plakar runner restore for Neo4j Community (offline) is not yet wired into the restore flow; Enterprise restore is supported")
-	}
 
 	if restoreMigrateFormat {
 		logrus.Warn("--migrate-format is not yet supported by the runner restore; ignoring")
@@ -79,7 +77,7 @@ func (iops *InfrahubOps) RestorePlakarBackup(excludeTaskManager bool, restoreMig
 		component := parseSnapshotTags(snap.Header.Tags)[TagComponent]
 		snap.Close()
 		logrus.Infof("Restoring single component: %s", component)
-		if err := iops.restoreComponentViaRunner(project, repoPath, component, fmt.Sprintf("%x", mac[:]), excludeTaskManager); err != nil {
+		if err := iops.restoreComponentViaRunner(project, repoPath, component, fmt.Sprintf("%x", mac[:]), editionInfo.IsCommunity, excludeTaskManager); err != nil {
 			return err
 		}
 		logrus.Info("Restore from Plakar snapshot completed successfully")
@@ -113,7 +111,7 @@ func (iops *InfrahubOps) RestorePlakarBackup(excludeTaskManager bool, restoreMig
 	}).Info("Restoring from backup group")
 
 	for _, snapInfo := range group.Snapshots {
-		if err := iops.restoreComponentViaRunner(project, repoPath, snapInfo.Component, fmt.Sprintf("%x", snapInfo.MAC[:]), excludeTaskManager); err != nil {
+		if err := iops.restoreComponentViaRunner(project, repoPath, snapInfo.Component, fmt.Sprintf("%x", snapInfo.MAC[:]), editionInfo.IsCommunity, excludeTaskManager); err != nil {
 			return err
 		}
 	}
@@ -125,14 +123,20 @@ func (iops *InfrahubOps) RestorePlakarBackup(excludeTaskManager bool, restoreMig
 
 // restoreComponentViaRunner restores one component by driving its connector
 // exporter in a co-located runner, with the lifecycle each engine needs.
-func (iops *InfrahubOps) restoreComponentViaRunner(project, repoPath, component, snapHex string, excludeTaskManager bool) (retErr error) {
+func (iops *InfrahubOps) restoreComponentViaRunner(project, repoPath, component, snapHex string, community, excludeTaskManager bool) (retErr error) {
 	switch component {
 	case ComponentNeo4j:
-		// Offline restore: stop the writer so neo4j-admin can replace the store,
-		// run the exporter in a runner sharing the (now-quiesced) data volume,
-		// then restart. (Enterprise: the default database already exists in the
-		// catalog, so --overwrite-destination replaces its store; no CREATE DATABASE.)
-		uri := dbURI("neo4j", iops.config.Neo4jUsername, iops.config.Neo4jPassword, "database", "6362", iops.config.Neo4jDatabase)
+		// Stop the writer so neo4j-admin can replace the store, run the exporter in
+		// a runner sharing the (now-quiesced) data volume, then restart. The default
+		// database already exists in the catalog, so --overwrite-destination replaces
+		// its store; no CREATE DATABASE. Enterprise restores from the backup artifact
+		// (neo4j://); Community loads the offline dump (neo4j+offline://).
+		var uri string
+		if community {
+			uri = "neo4j+offline:///data?database=" + url.QueryEscape(iops.config.Neo4jDatabase)
+		} else {
+			uri = dbURI("neo4j", iops.config.Neo4jUsername, iops.config.Neo4jPassword, "database", "6362", iops.config.Neo4jDatabase)
+		}
 		logrus.Info("Stopping Neo4j for offline restore...")
 		if err := iops.StopServices("database"); err != nil {
 			return fmt.Errorf("failed to stop neo4j: %w", err)

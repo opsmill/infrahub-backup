@@ -40,9 +40,6 @@ func (iops *InfrahubOps) CreatePlakarBackup(force bool, neo4jMetadata string, ex
 	}
 
 	editionInfo := iops.detectNeo4jEditionInfo("backup")
-	if editionInfo.IsCommunity {
-		return fmt.Errorf("plakar runner backup for Neo4j Community (offline) is not yet wired into the create flow; Enterprise online backup is supported (community lifecycle pending)")
-	}
 
 	if redact {
 		if !force {
@@ -110,12 +107,7 @@ func (iops *InfrahubOps) CreatePlakarBackup(force bool, neo4jMetadata string, ex
 		var cerr error
 		switch component {
 		case ComponentNeo4j:
-			uri := dbURI("neo4j", iops.config.Neo4jUsername, iops.config.Neo4jPassword, "database", "6362", iops.config.Neo4jDatabase)
-			opts := map[string]string{"neo4j_bin_dir": "/var/lib/neo4j/bin"}
-			if neo4jMetadata != "" && neo4jMetadata != "none" {
-				opts["include_metadata"] = neo4jMetadata
-			}
-			snapHex, cerr = LaunchComposeBackup(project, "database", repoPath, uri, opts, tags, false)
+			snapHex, cerr = iops.backupNeo4jComponent(project, repoPath, neo4jMetadata, editionInfo.IsCommunity, tags)
 
 		case ComponentPostgres:
 			uri := dbURI("postgres", iops.config.PostgresUsername, iops.config.PostgresPassword, "task-manager-db", "5432", iops.config.PostgresDatabase)
@@ -149,6 +141,34 @@ func (iops *InfrahubOps) CreatePlakarBackup(force bool, neo4jMetadata string, ex
 	}
 
 	return nil
+}
+
+// backupNeo4jComponent captures the Neo4j component. Enterprise uses an online
+// backup over the backup port; Community stops the writer, runs an offline dump
+// in a runner sharing the (quiesced) data volume, then restarts.
+func (iops *InfrahubOps) backupNeo4jComponent(project, repoPath, neo4jMetadata string, community bool, tags []string) (snapHex string, retErr error) {
+	if community {
+		uri := "neo4j+offline:///data?database=" + url.QueryEscape(iops.config.Neo4jDatabase)
+		logrus.Info("Stopping Neo4j for offline (Community) backup...")
+		if err := iops.StopServices("database"); err != nil {
+			return "", fmt.Errorf("failed to stop neo4j: %w", err)
+		}
+		defer func() {
+			logrus.Info("Restarting Neo4j...")
+			if err := iops.StartServices("database"); err != nil && retErr == nil {
+				retErr = fmt.Errorf("failed to restart neo4j: %w", err)
+			}
+		}()
+		opts := map[string]string{"neo4j_bin_dir": "/var/lib/neo4j/bin"}
+		return LaunchComposeBackup(project, "database", repoPath, uri, opts, tags, true)
+	}
+
+	uri := dbURI("neo4j", iops.config.Neo4jUsername, iops.config.Neo4jPassword, "database", "6362", iops.config.Neo4jDatabase)
+	opts := map[string]string{"neo4j_bin_dir": "/var/lib/neo4j/bin"}
+	if neo4jMetadata != "" && neo4jMetadata != "none" {
+		opts["include_metadata"] = neo4jMetadata
+	}
+	return LaunchComposeBackup(project, "database", repoPath, uri, opts, tags, false)
 }
 
 // dbURI builds a connector URI with URL-encoded credentials.
