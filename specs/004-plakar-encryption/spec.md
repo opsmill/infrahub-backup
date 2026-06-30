@@ -16,6 +16,8 @@ This feature makes Plakar backups **encrypted at rest**: a leaked or stolen repo
 ### Session 2026-06-30
 
 - Q: Which key-management model should the encrypted Plakar repository use? → A (initial): keypair (asymmetric). **→ Revised after the plan-phase spike: PASSPHRASE (symmetric).** The spike found kloset repository encryption is **symmetric-only** (`storage.Configuration.Encryption` is `*encryption.Configuration`; `encryption.DeriveKey(passphrase)` → a secret used by `repository.New`), and kloset's `encryption/keypair` is **ed25519 for snapshot *signing*, not encryption**. An asymmetric "backup needs only the public key" model is therefore not achievable natively (writing + dedup against the repo require the symmetric secret). Decision: use the native **symmetric passphrase**, supplied non-interactively (env/file) for backup, restore, and listing.
+- Q: Should the tool validate passphrase strength? → A: **Yes — enforce a minimum length.** At create time, reject a passphrase shorter than 12 characters with a clear message (before any repository is created); document the requirement. (The Argon2id KDF additionally slows brute force.)
+- Q: What happens if `--encrypt-key` (the legacy tarball ECIES flag) is passed with `--backend plakar`? → A: **Error.** Reject it with a clear message redirecting the user to `--encrypt` + `INFRAHUB_BACKUP_PASSPHRASE` — never silently ignore a flag the user believes controls encryption.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -72,6 +74,8 @@ An operator lists the backup groups in an encrypted repository. With the key, th
 - **Encryption requested but no key/passphrase available** — refuse to start rather than create a repository the operator can't reproduce the key for.
 - **Key material exposure** — the key/passphrase must never appear in logs, error messages, or persisted process metadata, including where it is handed to the co-located runner.
 - **Mixing**: targeting an existing encrypted repository for a new backup without the key — fail clearly (cannot append to an encrypted repo blindly).
+- **`--encrypt-key` with `--backend plakar`** — reject with a clear error pointing to `--encrypt` + a passphrase (the plakar backend does not use the legacy ECIES public key); never silently ignore it.
+- **Passphrase too short on create** — reject (minimum 12 characters) before creating the repository.
 
 ## Requirements *(mandatory)*
 
@@ -89,6 +93,7 @@ An operator lists the backup groups in an encrypted repository. With the key, th
 - **FR-010**: The key-management model MUST be a **passphrase** that derives the repository's symmetric encryption key (the engine's native KDF). The **same passphrase** is required to create, back up to, restore from, and list/inspect an encrypted repository.
 - **FR-011**: The passphrase MUST be suppliable **non-interactively** (environment variable or file) so scheduled/unattended backups work, and MUST be injected into the runner without appearing on its command line, environment dump, or logs.
 - **FR-012**: The tool MUST verify the supplied passphrase against the encrypted repository **before** reading or writing, so a wrong/absent passphrase fails fast and clearly instead of producing corrupt or partial output.
+- **FR-013**: When creating an encrypted repository, the tool MUST reject a passphrase shorter than **12 characters** with a clear message, **before** creating the repository (preventing trivially-weak keys).
 
 ### Key Entities *(include if data involved)*
 

@@ -35,9 +35,11 @@ Both error returns are clear, actionable, and make **no** repository changes (FR
 | `--encrypt` (create) | create the plakar repo encrypted (no-op if the repo already exists with its own setting) |
 | `INFRAHUB_BACKUP_PASSPHRASE` (env) | the passphrase (create/backup/restore/list) |
 | `--passphrase-file <path>` | read the passphrase from a file (first line) |
-| `--encrypt-key` | **tarball-only** (legacy ECIES); NOT used by the plakar backend — documented |
+| `--encrypt-key` | **tarball-only** (legacy ECIES). With `--backend plakar` it is **rejected with an error** redirecting to `--encrypt` + `INFRAHUB_BACKUP_PASSPHRASE` (never silently ignored). |
 
 Resolution order for the passphrase: `--passphrase-file` → `INFRAHUB_BACKUP_PASSPHRASE`. Wired through `create`, `restore`, and `snapshots list` (all currently drop encryption on the plakar path).
+
+**Validation**: on `create --encrypt`, reject a passphrase shorter than **12 characters** before creating the repository (FR-013).
 
 ## Runner key injection (secure)
 
