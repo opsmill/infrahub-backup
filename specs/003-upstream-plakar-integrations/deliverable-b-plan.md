@@ -9,12 +9,21 @@
 - [x] **Step 3** `connectors.go` — postgres + neo4j registered in-process.
 - [x] **Step 4** `run_connector.go` — `__run-connector` worker; **tested**: tool's own worker backs up live neo4j → tagged snapshot → `snapshots list` reads it.
 - [x] **Step 5 (partial)** `runner.go` — `LaunchComposeBackup`/`LaunchComposeRestore`: one-shot runner = DB's own image + tool binary + repo bind-mount, on the DB network. **Tested through the tool**: host tool launches the co-located runner → snapshot in the HOST repo.
-- [ ] **Step 2** delete `importer.go` + `backup_neo4j_watchdog.go` (do with the create-flow rewrite, so the old path stays building until replaced).
-- [ ] **Steps 6–7** wire `LaunchComposeBackup/Restore` into `plakar_backup.go`/`plakar_restore.go`: discovered creds → URIs (`neo4j://…@database:6362/neo4j`, `postgres://…@task-manager-db:5432/prefect`), service names, `mountDBVolumes` for community; metadata snapshot written in-process by the host tool (it can reach the repo directly); clean-break guard (FR-016) + restore selector (FR-024).
-- [ ] **Step 8** community lifecycle: stop app + **stop the writer container** then `--volumes-from` for the offline dump; restart after.
-- [ ] **Step 9** Kubernetes `CreateEphemeralJob` equivalent.
-- [ ] **restore-online lifecycle** (open items below) — needs iterative live testing.
-- [ ] **K8s** + delete old path + `make lint` green + vendor hash.
+- [x] **Step 6 (backup)** `CreatePlakarBackup` rewritten to launch the runner per DB component (Enterprise neo4j `database:6362`, postgres `task-manager-db:5432`) + in-process metadata snapshot. **Tested E2E** against the live Enterprise Infrahub: neo4j + postgres + metadata grouped under one backup-id, `status=complete`.
+- [ ] **Step 7 (restore)** rewrite `plakar_restore.go` to drive `LaunchComposeRestore` per component + clean-break guard (FR-016) + restore selector (FR-024). **DESTRUCTIVE — cannot test on the live instance**; needs a throwaway Infrahub to restore into. The neo4j restore-online lifecycle (below) needs iteration there.
+- [ ] **Step 8** Community lifecycle: stop app + **stop the writer container**, then `--volumes-from` for the offline dump/load; restart after. (Create flow currently guards Community as pending.)
+- [ ] **Step 2** delete `importer.go`'s StreamingImporter + `backup_neo4j_watchdog.go` + the now-dead `neo4jStreamFactory`/`postgresStreamFactory` (keep `NewMemoryImporter` for the in-process metadata snapshot). Do with the restore rewrite.
+- [ ] **Step 9** Kubernetes `CreateEphemeralJob` equivalent (create flow guards K8s as pending).
+- [ ] `make lint` green + refresh `flake.nix` vendorHash (CI/Linux).
+
+### Restore-online lifecycle (test against a throwaway Infrahub)
+
+The runner restore (neo4j image, `--volumes-from` the target neo4j) should fix the
+E2E data-dir issue (the neo4j image carries the config that maps `/data`), but must
+be verified: target neo4j **stopped** → `neo4j-admin database restore` writes
+`/data/databases/<db>` → run as the `neo4j` user (ownership) → restart neo4j →
+Enterprise `CREATE DATABASE <db>` to mount. Postgres restore: `pg_restore`/`psql`
+via the exporter against `task-manager-db`.
 
 
 
