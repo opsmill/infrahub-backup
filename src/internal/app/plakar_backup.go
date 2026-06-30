@@ -179,7 +179,7 @@ func (iops *InfrahubOps) CreatePlakarBackup(force bool, neo4jMetadata string, ex
 			return fmt.Errorf("failed to create snapshot for %s: %w", component, err)
 		}
 
-		source, err := snapshot.NewSource(context.Background(), 0, imp)
+		source, err := snapshot.NewSource(context.Background(), imp)
 		if err != nil {
 			builder.Close()
 			logIncompleteBackup(completed, len(components), backupID)

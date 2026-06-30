@@ -247,6 +247,9 @@ func main() {
 	snapshotsCmd.AddCommand(snapshotsListCmd)
 	rootCmd.AddCommand(snapshotsCmd)
 
+	// Hidden worker invoked inside the co-located runner (Deliverable B).
+	rootCmd.AddCommand(app.RunConnectorCommand())
+
 	if err := rootCmd.Execute(); err != nil {
 		logrus.Errorf("Command failed: %v", err)
 		os.Exit(1)
