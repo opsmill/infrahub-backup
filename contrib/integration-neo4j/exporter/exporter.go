@@ -123,11 +123,32 @@ func (e *Exporter) stageRecord(record *connectors.Record, stage string) *connect
 // file was staged (offline load) versus a backup artifact (online restore).
 func (e *Exporter) load(ctx context.Context, stage string) error {
 	db := e.conn.Database
+	// Locate the staged backup artifact (the single non-manifest data file).
+	// VERIFIED finding (2026-06-30): pass the artifact FILE — not the stage
+	// directory — to --from-path. Given a directory, neo4j-admin matches artifacts
+	// by the *target* database name and fails ("no backups to restore for <db>")
+	// when restoring to a differently-named target; given the file it restores to
+	// any target name.
+	entries, err := os.ReadDir(stage)
+	if err != nil {
+		return fmt.Errorf("reading stage dir: %w", err)
+	}
+	var artifact string
+	for _, en := range entries {
+		if !en.IsDir() {
+			artifact = filepath.Join(stage, en.Name())
+			break
+		}
+	}
+	if artifact == "" {
+		return fmt.Errorf("no staged backup artifact found in %s", stage)
+	}
+
 	var args []string
 	if e.conn.Offline() {
-		args = []string{"database", "load", "--from-path=" + stage, db}
+		args = []string{"database", "load", "--from-path=" + artifact, db}
 	} else {
-		args = []string{"database", "restore", "--from-path=" + stage, db}
+		args = []string{"database", "restore", "--from-path=" + artifact, db}
 	}
 	if e.overwrite {
 		args = append(args, "--overwrite-destination=true")

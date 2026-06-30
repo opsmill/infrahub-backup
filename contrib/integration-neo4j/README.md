@@ -61,10 +61,21 @@ the consumption model verified for `infrahub-backup` (kloset v1.1.0 compile spik
       Neo4j Enterprise (done 2026-06-30 against 2025.10.1).
 - [x] Validate Community offline `database dump`/`database load` round-trip (done
       2026-06-30 against Community 2025.10.1; data intact; output-path perms noted).
+- [x] Run the full in-process connector path end-to-end against live data (2026-06-30,
+      Neo4j Enterprise 2025.10.1, 18,553 nodes): **backup** = Import→kloset snapshot
+      (66 MB `.backup` artifact captured, snapshot committed to an `fs://` repo);
+      **restore** = snapshot→Export→stage (full artifact byte-for-byte)→`neo4j-admin
+      restore` (RESTORE_OK). Surfaced + fixed a real exporter bug (pass the artifact
+      **file** to `--from-path`, not the stage dir — a directory makes neo4j-admin
+      match by target-db name and fail when restoring to a renamed target).
+- [ ] **Runner responsibility (not connector):** ensure `neo4j-admin restore` runs with
+      the live Neo4j config/home so it writes the data dir the server reads, runs as the
+      `neo4j` user (store-file ownership), and the Enterprise catalog mounts the restored
+      db (`CREATE DATABASE`). The connector mechanics are validated; this DB-online step
+      is the tool's lifecycle job.
 - [ ] Add SDK plugin entrypoints (`plugin/neo4j-importer/main.go`, etc.) + align the
       `go-kloset-sdk` version for `.ptar` packaging (`plakar pkg build`).
 - [ ] testcontainers suite automating both round-trips + offline-against-running fail-fast.
-- [ ] Run the full connector path (Import→kloset→Export) end-to-end in a runner with neo4j-admin.
 - [ ] Edition detection + Bolt-based node/relationship counts in the manifest (online).
 - [ ] Verify temp-dir lifecycle (refcounted cleanup) under partial consumption.
 - [ ] Move to a `PlakarKorp/integrations` fork (branch `integration/neo4j`, subdir `neo4j/`) and open the PR.
