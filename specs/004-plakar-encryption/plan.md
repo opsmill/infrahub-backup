@@ -47,7 +47,8 @@ src/internal/app/
 ├── snapshots.go         # ListSnapshots/openRepo path: supply passphrase for an encrypted repo
 ├── runner.go            # LaunchComposeBackup/Restore: inject passphrase via STDIN (docker run -i), not argv/-e
 └── run_connector.go     # __run-connector: add --passphrase-stdin; derive secret; open repo encrypted
-src/cmd/infrahub-backup/main.go   # wire --encrypt (plakar) + INFRAHUB_BACKUP_PASSPHRASE / --passphrase-file into create/restore/snapshots
+src/cmd/infrahub-backup/main.go   # wire --encrypt (plakar) + INFRAHUB_BACKUP_PASSPHRASE / --passphrase-file into create/restore/snapshots;
+                                  # enforce 12-char min passphrase (FR-013); reject --encrypt-key with --backend plakar (clarify)
 ```
 
 **Structure Decision**: in-place extension of the 003 plakar backend + runner; no new packages, modules, or build artifacts. Encryption is a property of the repository (set at create, supplied at open), so it composes with the existing per-component runner flow without touching the connectors.

@@ -35,6 +35,8 @@ The operator secret.
 - **VR-3**: a passphrase supplied for a **plaintext** repo ⇒ warn + ignore (don't error the whole op).
 - **VR-4**: the passphrase MUST NOT appear in logs, error text, the runner command line, `-e` env, or `docker inspect` output (FR-007, FR-011).
 - **VR-5**: encryption applies to every component (neo4j enterprise/community, postgres, metadata) once the repo is encrypted, and to create/backup/restore/list alike (FR-002, FR-003).
+- **VR-6**: on `create --encrypt`, a passphrase shorter than **12 characters** is rejected **before** the repository is created (FR-013).
+- **VR-7**: `--encrypt-key` (legacy tarball ECIES) passed with `--backend plakar` is **rejected with an error** redirecting to `--encrypt` + passphrase — never silently ignored.
 
 ## State transitions (encrypted backup/restore)
 
