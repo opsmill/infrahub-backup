@@ -58,7 +58,29 @@ func RunConnectorCommand() *cobra.Command {
 	}
 	restoreCmd.Flags().StringArrayVar(&restoreOpts, "opt", nil, "connector option key=value (repeatable)")
 
-	cmd.AddCommand(backupCmd, restoreCmd)
+	// launch: exercise the co-located runner launcher through the tool (testing the
+	// orchestration path; the create flow will call LaunchComposeBackup directly).
+	var launchOpts, launchTags []string
+	var launchVolumes bool
+	launchCmd := &cobra.Command{
+		Use:          "launch <project> <db-service> <repo> <source-uri>",
+		Args:         cobra.ExactArgs(4),
+		Hidden:       true,
+		SilenceUsage: true,
+		RunE: func(_ *cobra.Command, args []string) error {
+			snap, err := LaunchComposeBackup(args[0], args[1], args[2], args[3], parseKV(launchOpts), launchTags, launchVolumes)
+			if err != nil {
+				return err
+			}
+			fmt.Println(snap)
+			return nil
+		},
+	}
+	launchCmd.Flags().StringArrayVar(&launchOpts, "opt", nil, "connector option key=value (repeatable)")
+	launchCmd.Flags().StringArrayVar(&launchTags, "tag", nil, "snapshot tag key=value (repeatable)")
+	launchCmd.Flags().BoolVar(&launchVolumes, "volumes-from-db", false, "share the DB container's volumes (neo4j community/restore)")
+
+	cmd.AddCommand(backupCmd, restoreCmd, launchCmd)
 	return cmd
 }
 
