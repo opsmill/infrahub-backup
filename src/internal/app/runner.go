@@ -115,7 +115,8 @@ func repoArgFor(repoPath string) string {
 }
 
 func composeContainerID(project, service string) (string, error) {
-	out, err := exec.Command("docker", "ps", "-q",
+	// -a so a stopped container is still found (restore stops the writer first).
+	out, err := exec.Command("docker", "ps", "-aq",
 		"--filter", "label=com.docker.compose.project="+project,
 		"--filter", "label=com.docker.compose.service="+service).Output()
 	if err != nil {
