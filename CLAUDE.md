@@ -265,6 +265,8 @@ The codebase uses explicit error wrapping with `fmt.Errorf` for context. All com
 ## Active Technologies
 - Go 1.25.0 + `github.com/PlakarKorp/kloset` (target stable v1.1.0), `go-kloset-sdk` v1.1.0 (fallback path), `integration-postgresql` v1.1.0-beta.7, `integration-neo4j` (new, fork build), `integration-fs`/`integration-s3`, `cobra`, `viper`, `logrus`, `pgx/v5` (retained for the separate task-manager tool); `testcontainers-go` for integration tests (003-upstream-plakar-integrations)
 - kloset repository — `fs://` (local dir) or `s3://` (object store); plaintext by default (unchanged) (003-upstream-plakar-integrations)
+- Go 1.25.0 + `github.com/PlakarKorp/kloset` v1.1.0 — `encryption` (symmetric: `NewDefaultConfiguration`, `DeriveKey`, `DeriveCanary`, `VerifyCanary`), `connectors/storage` (`Configuration.Encryption`, `NewConfigurationFromBytes`), `repository.New(secret, …)`; builds on the 003 runner (`runner.go`, `run_connector.go`) (004-plakar-encryption)
+- kloset repository (`fs://` / `s3://`), now optionally symmetric-encrypted (KDF + cipher params + canary in the repo CONFIG) (004-plakar-encryption)
 
 - Go 1.25.0 + kloset v1.0.13 (Plakar core), integration-fs (storage), cobra, logrus, viper (002-plakar-integration)
 - Plakar repository (local filesystem or S3 via integration backends) (002-plakar-integration)

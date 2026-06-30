@@ -15,7 +15,7 @@ This feature makes Plakar backups **encrypted at rest**: a leaked or stolen repo
 
 ### Session 2026-06-30
 
-- Q: Which key-management model should the encrypted Plakar repository use? → A: **Keypair (asymmetric).** Backups require only the **public** key (so an unattended/scheduled backup runner never holds the decryption secret); **restore** (and listing/inspection of contents) requires the **private** key. This matches the legacy tarball's public-key UX and gives the strongest posture for unattended backups. Feasibility of the engine's native keypair support is a plan-phase spike; **passphrase (symmetric) is the documented fallback** if keypair is not workable.
+- Q: Which key-management model should the encrypted Plakar repository use? → A (initial): keypair (asymmetric). **→ Revised after the plan-phase spike: PASSPHRASE (symmetric).** The spike found kloset repository encryption is **symmetric-only** (`storage.Configuration.Encryption` is `*encryption.Configuration`; `encryption.DeriveKey(passphrase)` → a secret used by `repository.New`), and kloset's `encryption/keypair` is **ed25519 for snapshot *signing*, not encryption**. An asymmetric "backup needs only the public key" model is therefore not achievable natively (writing + dedup against the repo require the symmetric secret). Decision: use the native **symmetric passphrase**, supplied non-interactively (env/file) for backup, restore, and listing.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -86,15 +86,15 @@ An operator lists the backup groups in an encrypted repository. With the key, th
 - **FR-007**: The key/passphrase MUST NOT be written to logs, error output, or persisted process/command metadata — including when injected into the runner.
 - **FR-008**: Plaintext repositories MUST continue to work unchanged; encryption is chosen at create time and is **not** applied retroactively to existing plaintext repositories.
 - **FR-009**: Encryption MUST be optional — backups remain plaintext unless encryption is explicitly requested (no behavior change for existing 003 users who don't opt in).
-- **FR-010**: The key-management model MUST be **asymmetric (keypair)**: encryption is established with a **public** key at create time; **backup** requires only the public key; **restore** and content listing/inspection require the **private** key. (If a plan-phase spike shows the engine's keypair support is unworkable, the documented fallback is a symmetric passphrase — recorded as a deviation.)
-- **FR-011**: An unattended **backup** MUST be possible with only the **public** key present (the backup runner MUST NOT require the decryption/private key).
-- **FR-012**: The tool MUST provide a way to obtain a keypair for backup encryption (generate one, and/or accept a provided public key), consistent with how the legacy backend's `keygen`/`--encrypt-key` works.
+- **FR-010**: The key-management model MUST be a **passphrase** that derives the repository's symmetric encryption key (the engine's native KDF). The **same passphrase** is required to create, back up to, restore from, and list/inspect an encrypted repository.
+- **FR-011**: The passphrase MUST be suppliable **non-interactively** (environment variable or file) so scheduled/unattended backups work, and MUST be injected into the runner without appearing on its command line, environment dump, or logs.
+- **FR-012**: The tool MUST verify the supplied passphrase against the encrypted repository **before** reading or writing, so a wrong/absent passphrase fails fast and clearly instead of producing corrupt or partial output.
 
 ### Key Entities *(include if data involved)*
 
 - **Encrypted repository**: a Plakar repository whose stored contents are encrypted; its encryption is fixed at create time and recorded in the repository's own configuration.
-- **Key material**: an asymmetric **key pair** — the **public** key encrypts (used at create + every backup); the **private** key decrypts (used for restore + content inspection). The private key is the sensitive secret and is needed only at restore time.
-- **Runner**: the co-located one-shot context (from 003) that performs backup/restore; it receives the **public** key for backup and the **private** key for restore, securely (never logged).
+- **Key material**: a **passphrase** that derives the repository's symmetric encryption key (engine KDF). The same passphrase is needed for every operation (create, backup, restore, list); there is no public/private split.
+- **Runner**: the co-located one-shot context (from 003) that performs backup/restore; it receives the **passphrase** for every operation, securely (never on its command line / env dump / logs).
 
 ## Success Criteria *(mandatory)*
 
@@ -105,12 +105,12 @@ An operator lists the backup groups in an encrypted repository. With the key, th
 - **SC-003**: Attempting to restore, list, or append-backup an encrypted repository **without** the correct key fails with a clear error and zero changes, in 100% of test runs.
 - **SC-004**: The key/passphrase never appears in tool logs, error messages, or the runner's command line / persisted metadata (verified by scanning output + process/command inspection).
 - **SC-005**: Existing plaintext (003) repositories and the no-encryption path continue to work unchanged (no regression for users who don't opt in).
-- **SC-006**: An encrypted backup completes with **only the public key** available (the private/decryption key is never required to back up), verified by running a backup in an environment that has no access to the private key.
+- **SC-006**: A wrong or absent passphrase against an encrypted repository is rejected by a key-verification check **before** any read/write (no corrupt/partial output), in 100% of test runs.
 
 ## Assumptions & Dependencies
 
 - **Builds on 003**: depends on the reworked Plakar backend + the co-located runner (branch `003-upstream-plakar-integrations`). Encryption is wired through that same backup/restore/runner flow.
-- **Native repository encryption**: uses the backup engine's built-in repository encryption (key material supplied when the repository is opened), rather than encrypting files after the fact. The engine offers symmetric (passphrase-derived) and asymmetric (keypair) modes; this feature targets the **keypair** mode, with a plan-phase spike to confirm it is usable (and passphrase as the fallback).
+- **Native repository encryption**: uses the backup engine's built-in **symmetric** repository encryption (a passphrase-derived key supplied when the repository is opened), rather than encrypting files after the fact. A plan-phase spike confirmed the engine's repository encryption is symmetric-only (its `keypair` is ed25519 *signing*, not encryption), so an asymmetric model is not used.
 - **Encryption at create time**: a repository is either encrypted or plaintext from creation; switching requires creating a new repository.
 - **Docker Compose first**: consistent with 003, which targets Compose; the Kubernetes runner remains pending and is out of scope here.
 - **Unattended-friendly key input**: key material can be supplied non-interactively (env/file) so scheduled backups work.
