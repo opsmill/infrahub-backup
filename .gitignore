@@ -5,3 +5,6 @@ src/internal/app/embedded/neo4jwatchdog/*watchdog*
 
 # spec-kit extension catalog cache
 .specify/extensions/.cache/
+
+# stray kloset/pebble relative cache (defensive)
+2.0.0/
