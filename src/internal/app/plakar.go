@@ -50,6 +50,12 @@ var (
 	// is used with the plakar backend, which uses passphrase-derived symmetric keys.
 	errEncryptKeyOnPlakar = errors.New(
 		"--encrypt-key is only valid for the tarball backend; for --backend plakar use --encrypt with a passphrase (INFRAHUB_BACKUP_PASSPHRASE or --passphrase-file)")
+	// errEncryptExistingPlaintextRepo is returned when --encrypt targets a
+	// repository that already exists as plaintext. Encryption is fixed at
+	// creation (FR-008); refusing loudly avoids silently appending plaintext to a
+	// repo the operator believes is being encrypted.
+	errEncryptExistingPlaintextRepo = errors.New(
+		"cannot enable encryption on an existing plaintext repository; encryption is fixed at repository creation — create a new repository (a different --repo) with --encrypt")
 )
 
 // defaultCacheDir returns the default Plakar cache directory.
@@ -187,14 +193,20 @@ func inspectEncryption(configBytes []byte) (*encryption.Configuration, error) {
 }
 
 // newRepository wraps repository.New, deriving and verifying the symmetric secret
-// when the repository is encrypted. The four cases follow the open contract:
+// when the repository is encrypted. The cases follow the open contract:
+//   - requireEncrypted (--encrypt) but repo is plaintext → errEncryptExistingPlaintextRepo
 //   - plaintext repo, no passphrase           → open plaintext
 //   - plaintext repo, passphrase supplied      → warn + ignore the passphrase (VR-3)
 //   - encrypted repo, no passphrase            → errEncryptedRepoNeedsPassphrase
 //   - encrypted repo, passphrase supplied      → derive key, VerifyCanary, then open
 //
+// requireEncrypted is set only when the caller explicitly requested encryption
+// at create time (--encrypt); it turns the otherwise-benign "passphrase supplied
+// for a plaintext repo" warning into a hard error so encryption can never be
+// silently downgraded on an existing plaintext repo (FR-008).
+//
 // No read or write of repository contents happens before the canary check (FR-012).
-func newRepository(kctx *kcontext.KContext, store storage.Store, configBytes []byte, passphrase string) (*repository.Repository, error) {
+func newRepository(kctx *kcontext.KContext, store storage.Store, configBytes []byte, passphrase string, requireEncrypted bool) (*repository.Repository, error) {
 	enc, err := inspectEncryption(configBytes)
 	if err != nil {
 		store.Close(kctx.Context)
@@ -203,6 +215,9 @@ func newRepository(kctx *kcontext.KContext, store storage.Store, configBytes []b
 
 	var secret []byte
 	switch {
+	case enc == nil && requireEncrypted:
+		store.Close(kctx.Context)
+		return nil, errEncryptExistingPlaintextRepo
 	case enc == nil && passphrase != "":
 		logrus.Warn("repository is not encrypted; the supplied passphrase is ignored")
 	case enc != nil && passphrase == "":
@@ -237,7 +252,8 @@ func openRepo(kctx *kcontext.KContext, cfg *PlakarConfig) (*repository.Repositor
 		return nil, fmt.Errorf("failed to open plakar repository %s: %w", cfg.RepoPath, err)
 	}
 
-	repo, err := newRepository(kctx, store, configBytes, cfg.Passphrase)
+	// openRepo never requires encryption — it opens whatever the repo is (restore/list).
+	repo, err := newRepository(kctx, store, configBytes, cfg.Passphrase, false)
 	if err != nil {
 		return nil, err
 	}
@@ -249,10 +265,11 @@ func openRepo(kctx *kcontext.KContext, cfg *PlakarConfig) (*repository.Repositor
 func openOrCreateRepo(kctx *kcontext.KContext, cfg *PlakarConfig) (*repository.Repository, error) {
 	sc := storeConfig(cfg.RepoPath)
 
-	// Try to open existing repository
+	// Try to open existing repository. When --encrypt was requested, refuse to
+	// open a pre-existing plaintext repo rather than silently appending plaintext.
 	store, configBytes, err := storage.Open(kctx, sc)
 	if err == nil {
-		repo, oerr := newRepository(kctx, store, configBytes, cfg.Passphrase)
+		repo, oerr := newRepository(kctx, store, configBytes, cfg.Passphrase, cfg.Encrypt)
 		if oerr != nil {
 			return nil, oerr
 		}
@@ -282,7 +299,12 @@ func createRepo(kctx *kcontext.KContext, cfg *PlakarConfig, sc map[string]string
 			return nil, errEncryptWithoutPassphrase
 		}
 		// storage.NewConfiguration() pre-populates a default symmetric encryption
-		// configuration; derive the key from its KDF params and stamp the canary.
+		// configuration; guard the invariant so a future kloset default of nil
+		// fails clearly instead of panicking on the derefs below.
+		if storageConfig.Encryption == nil {
+			return nil, fmt.Errorf("encryption requested but the storage engine did not provide an encryption configuration")
+		}
+		// Derive the key from its KDF params and stamp the canary.
 		key, err := encryption.DeriveKey(storageConfig.Encryption.KDFParams, []byte(cfg.Passphrase))
 		if err != nil {
 			return nil, fmt.Errorf("deriving repository key: %w", err)

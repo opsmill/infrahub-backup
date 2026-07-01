@@ -176,6 +176,25 @@ func TestEncryptedRoundTripInProcess(t *testing.T) {
 	}
 }
 
+// Gap-sweep fix: --encrypt pointed at an EXISTING plaintext repo must refuse
+// (encryption is fixed at create, FR-008) rather than silently appending
+// plaintext with only a warning.
+func TestEncryptExistingPlaintextRepoRefused(t *testing.T) {
+	cfg := newTestPlakarConfig(t) // plaintext repo
+	writeTestSnapshot(t, cfg, "plain", randomMarker(t, 128), nil)
+
+	// Re-target the same repo with --encrypt + a valid passphrase.
+	enc := &PlakarConfig{RepoPath: cfg.RepoPath, CacheDir: t.TempDir(), Encrypt: true, Passphrase: "a-valid-passphrase-1"}
+	kctx, err := initPlakarContext(enc)
+	if err != nil {
+		t.Fatalf("initPlakarContext: %v", err)
+	}
+	defer closePlakarContext(kctx)
+	if _, err := openOrCreateRepo(kctx, enc); !errors.Is(err, errEncryptExistingPlaintextRepo) {
+		t.Fatalf("want errEncryptExistingPlaintextRepo, got %v", err)
+	}
+}
+
 // T013 / VR-1 / FR-006: --encrypt with no passphrase is refused before any repo
 // is created.
 func TestEncryptWithoutPassphraseRefused(t *testing.T) {

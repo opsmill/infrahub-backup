@@ -52,7 +52,7 @@ func RunConnectorCommand() *cobra.Command {
 	}
 	backupCmd.Flags().StringArrayVar(&backupOpts, "opt", nil, "connector option key=value (repeatable)")
 	backupCmd.Flags().StringArrayVar(&tags, "tag", nil, "snapshot tag key=value (repeatable)")
-	backupCmd.Flags().BoolVar(&backupPassphraseStdin, "passphrase-stdin", false, "read the repository passphrase from stdin (one line)")
+	addPassphraseStdinFlag(backupCmd, &backupPassphraseStdin)
 
 	var restoreOpts []string
 	var restorePassphraseStdin bool
@@ -69,7 +69,7 @@ func RunConnectorCommand() *cobra.Command {
 		},
 	}
 	restoreCmd.Flags().StringArrayVar(&restoreOpts, "opt", nil, "connector option key=value (repeatable)")
-	restoreCmd.Flags().BoolVar(&restorePassphraseStdin, "passphrase-stdin", false, "read the repository passphrase from stdin (one line)")
+	addPassphraseStdinFlag(restoreCmd, &restorePassphraseStdin)
 
 	// launch: exercise the co-located runner launcher through the tool (testing the
 	// orchestration path; the create flow will call LaunchComposeBackup directly).
@@ -96,10 +96,17 @@ func RunConnectorCommand() *cobra.Command {
 	launchCmd.Flags().StringArrayVar(&launchOpts, "opt", nil, "connector option key=value (repeatable)")
 	launchCmd.Flags().StringArrayVar(&launchTags, "tag", nil, "snapshot tag key=value (repeatable)")
 	launchCmd.Flags().BoolVar(&launchVolumes, "volumes-from-db", false, "share the DB container's volumes (neo4j community/restore)")
-	launchCmd.Flags().BoolVar(&launchPassphraseStdin, "passphrase-stdin", false, "read the repository passphrase from stdin (one line)")
+	addPassphraseStdinFlag(launchCmd, &launchPassphraseStdin)
 
 	cmd.AddCommand(backupCmd, restoreCmd, launchCmd)
 	return cmd
+}
+
+// addPassphraseStdinFlag registers the shared --passphrase-stdin flag on a
+// subcommand, binding it to target. Centralized so the flag name and help text
+// stay identical across the backup/restore/launch subcommands.
+func addPassphraseStdinFlag(cmd *cobra.Command, target *bool) {
+	cmd.Flags().BoolVar(target, "passphrase-stdin", false, "read the repository passphrase from stdin (one line)")
 }
 
 // readPassphraseStdinIf reads one line from stdin as the repository passphrase
@@ -145,7 +152,12 @@ func runConnectorBackup(repoPath, sourceURI, passphrase string, opts map[string]
 	}
 	defer closePlakarContext(kctx)
 
-	repo, err := openOrCreateRepo(kctx, cfg)
+	// The host (ensurePlakarRepo) always creates the repository — with the right
+	// encryption — before any runner launches, so the worker only ever OPENS it.
+	// Using openRepo (not openOrCreateRepo) means a missing/unreachable repo fails
+	// loudly here instead of the worker silently creating a NEW plaintext repo and
+	// writing the database dump in the clear.
+	repo, err := openRepo(kctx, cfg)
 	if err != nil {
 		return err
 	}
