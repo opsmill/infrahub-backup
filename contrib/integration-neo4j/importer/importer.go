@@ -57,9 +57,7 @@ func NewImporter(_ context.Context, _ *connectors.Options, proto string, config 
 	return imp, nil
 }
 
-func (i *Importer) Origin() string {
-	return i.conn.Proto + "://" + i.conn.Host + "/" + i.conn.Database
-}
+func (i *Importer) Origin() string                 { return i.conn.Origin() }
 func (i *Importer) Type() string                   { return i.conn.Proto }
 func (i *Importer) Root() string                   { return "/" }
 func (i *Importer) Flags() location.Flags          { return location.FLAG_STREAM }
@@ -113,7 +111,9 @@ func (i *Importer) adminArgs(toPath string) ([]string, error) {
 		// under --to-path (emitDir walks it); load round-trip preserves data.
 		// NOTE: --to-path must be writable by the user running neo4j-admin (the
 		// "neo4j" user in the official image) — the runner must own/chmod the output mount.
-		return []string{"database", "dump", "--to-path=" + toPath, db}, nil
+		// The `--` end-of-options separator ensures a database name beginning with
+		// "-" can't be misparsed by neo4j-admin (picocli) as a flag.
+		return []string{"database", "dump", "--to-path=" + toPath, "--", db}, nil
 	case "neo4j":
 		// Enterprise ONLINE backup. --compress=false keeps the artifact dedup-friendly.
 		// VERIFIED against Neo4j Enterprise 2025.10.1: these flags produce a single
@@ -129,7 +129,9 @@ func (i *Importer) adminArgs(toPath string) ([]string, error) {
 		if i.includeMetadata != "" {
 			args = append(args, "--include-metadata="+i.includeMetadata)
 		}
-		return append(args, db), nil
+		// `--` ends option parsing so a "-"-prefixed database name is treated as
+		// the positional arg, not a flag.
+		return append(args, "--", db), nil
 	default:
 		return nil, fmt.Errorf("unsupported protocol %q", i.conn.Proto)
 	}
@@ -186,12 +188,17 @@ func emitDir(ctx context.Context, records chan<- *connectors.Record, dir string)
 			LmodTime: time.Now().UTC(),
 		}
 		fpath := f
+		// once is per FILE (not per reader-open): re-opening the same record's
+		// reader must decrement the refcount at most once, otherwise cleanup could
+		// drive remaining to 0 early and RemoveAll the temp dir while other files'
+		// readers are still unopened, truncating the snapshot.
+		var once sync.Once
 		readerFunc := func() (io.ReadCloser, error) {
 			fh, err := os.Open(fpath)
 			if err != nil {
 				return nil, err
 			}
-			return &cleanupReader{ReadCloser: fh, cleanup: cleanup}, nil
+			return &cleanupReader{ReadCloser: fh, once: &once, cleanup: cleanup}, nil
 		}
 		select {
 		case <-ctx.Done():
@@ -203,11 +210,12 @@ func emitDir(ctx context.Context, records chan<- *connectors.Record, dir string)
 	return nil
 }
 
-// cleanupReader runs cleanup exactly once when the file reader is closed.
+// cleanupReader runs the (per-file) cleanup exactly once, no matter how many
+// times this file's reader is opened and closed.
 type cleanupReader struct {
 	io.ReadCloser
+	once    *sync.Once
 	cleanup func()
-	once    sync.Once
 }
 
 func (r *cleanupReader) Close() error {

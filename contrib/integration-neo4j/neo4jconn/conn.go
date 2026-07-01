@@ -21,6 +21,10 @@ type ConnConfig struct {
 	Proto string
 	Host  string
 	Port  string // backup-service port for online; unused for offline
+	// Username/Password are parsed from the URI for completeness but are NOT
+	// passed to neo4j-admin: online backup/restore authenticate over the backup
+	// service (port 6362), not via Bolt credentials, and the connector issues no
+	// Bolt queries. Reserved for a future Bolt-based metadata enhancement.
 	Username string
 	Password string
 	Database string
@@ -49,6 +53,17 @@ func (cc ConnConfig) BinPath() string {
 
 // Offline reports whether this is the Community offline-dump protocol.
 func (cc ConnConfig) Offline() bool { return cc.Proto == "neo4j+offline" }
+
+// Origin returns a stable identity for the backup source. Online is keyed on
+// host; offline (which has no host) is keyed on the data directory, so two
+// distinct offline datadirs backing up the same database name do not collide.
+func (cc ConnConfig) Origin() string {
+	loc := cc.Host
+	if cc.Offline() {
+		loc = cc.DataDir
+	}
+	return cc.Proto + "://" + loc + "/" + cc.Database
+}
 
 // ParseConnConfig builds a ConnConfig from the connector configuration map.
 // Standalone keys take precedence over the location URI.

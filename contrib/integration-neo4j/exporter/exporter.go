@@ -47,9 +47,7 @@ func NewExporter(_ context.Context, _ *connectors.Options, proto string, config 
 	return e, nil
 }
 
-func (e *Exporter) Origin() string {
-	return e.conn.Proto + "://" + e.conn.Host + "/" + e.conn.Database
-}
+func (e *Exporter) Origin() string                 { return e.conn.Origin() }
 func (e *Exporter) Type() string                   { return e.conn.Proto }
 func (e *Exporter) Root() string                   { return "/" }
 func (e *Exporter) Flags() location.Flags          { return 0 }
@@ -129,34 +127,48 @@ func (e *Exporter) load(ctx context.Context, stage string) error {
 	// by the *target* database name and fails ("no backups to restore for <db>")
 	// when restoring to a differently-named target; given the file it restores to
 	// any target name.
+	// Exactly one data artifact is expected (manifest.json is skipped at staging):
+	// the offline "<db>.dump" or the online ".backup" artifact. Fail clearly on 0
+	// or >1 rather than silently picking the alphabetically-first entry.
 	entries, err := os.ReadDir(stage)
 	if err != nil {
 		return fmt.Errorf("reading stage dir: %w", err)
 	}
-	var artifact string
+	var artifacts []string
 	for _, en := range entries {
 		if !en.IsDir() {
-			artifact = filepath.Join(stage, en.Name())
-			break
+			artifacts = append(artifacts, filepath.Join(stage, en.Name()))
 		}
 	}
-	if artifact == "" {
-		return fmt.Errorf("no staged backup artifact found in %s", stage)
+	if len(artifacts) != 1 {
+		return fmt.Errorf("expected exactly one staged backup artifact in %s, found %d", stage, len(artifacts))
 	}
+	artifact := artifacts[0]
 
 	// VERIFIED finding (2026-06-30): `database restore` (Enterprise) accepts the
-	// artifact FILE in --from-path (and a directory would match artifacts by the
-	// target db name); `database load` (Community) requires --from-path to be the
-	// DIRECTORY containing <db>.dump, not the file. Dispatch accordingly.
+	// artifact FILE in --from-path (a directory would match artifacts by the target
+	// db name and fail on a renamed target); `database load` (Community) requires
+	// --from-path to be the DIRECTORY containing "<targetdb>.dump". The `--`
+	// separator guards a "-"-prefixed database name from being parsed as a flag.
 	var args []string
 	if e.conn.Offline() {
-		args = []string{"database", "load", "--from-path=" + stage, db}
+		// `database load` looks for "<targetdb>.dump" in --from-path, but the staged
+		// dump keeps the SOURCE database name — rename it when restoring into a
+		// differently-named database.
+		want := filepath.Join(stage, db+".dump")
+		if artifact != want {
+			if err := os.Rename(artifact, want); err != nil {
+				return fmt.Errorf("staging dump as %q: %w", db+".dump", err)
+			}
+		}
+		args = []string{"database", "load", "--from-path=" + stage}
 	} else {
-		args = []string{"database", "restore", "--from-path=" + artifact, db}
+		args = []string{"database", "restore", "--from-path=" + artifact}
 	}
 	if e.overwrite {
 		args = append(args, "--overwrite-destination=true")
 	}
+	args = append(args, "--", db)
 
 	cmd := exec.CommandContext(ctx, e.conn.BinPath(), args...)
 	out, err := cmd.CombinedOutput()

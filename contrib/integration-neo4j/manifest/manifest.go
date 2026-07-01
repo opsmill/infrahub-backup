@@ -17,39 +17,36 @@ import (
 
 // Manifest is the structure serialised to /manifest.json.
 type Manifest struct {
-	Version       int       `json:"version"`
-	CreatedAt     time.Time `json:"created_at"`
-	Connector     string    `json:"connector"`
-	Edition       string    `json:"edition,omitempty"` // "enterprise" | "community" | "" (unknown)
-	Database      string    `json:"database"`
-	Host          string    `json:"host,omitempty"`
-	ServerVersion string    `json:"server_version,omitempty"`
-	BackupMode    string    `json:"backup_mode"` // "online" | "offline"
-	// NodeCount/RelationshipCount are populated only when a live Bolt connection
-	// is reachable (Enterprise online). Omitted for Community offline (DB stopped).
-	NodeCount         *int64 `json:"node_count,omitempty"`
-	RelationshipCount *int64 `json:"relationship_count,omitempty"`
+	Version   int       `json:"version"`
+	CreatedAt time.Time `json:"created_at"`
+	Connector string    `json:"connector"`
+	// Edition is "enterprise" for the online protocol (online backup is
+	// Enterprise-only) and omitted for offline, where the dump works on either
+	// edition and we cannot tell without probing.
+	Edition       string `json:"edition,omitempty"`
+	Database      string `json:"database"`
+	Host          string `json:"host,omitempty"`
+	ServerVersion string `json:"server_version,omitempty"`
+	BackupMode    string `json:"backup_mode"` // "online" | "offline"
 }
 
 // Emit builds the manifest and sends /manifest.json as the first record.
 // Failures collecting optional metadata are non-fatal (partial manifests are OK).
 func Emit(ctx context.Context, conn neo4jconn.ConnConfig, records chan<- *connectors.Record) error {
-	mode := "online"
+	mode, edition := "online", "enterprise" // online backup is Enterprise-only
 	if conn.Offline() {
-		mode = "offline"
+		mode, edition = "offline", "" // offline dump runs on either edition; unknown here
 	}
 	m := &Manifest{
 		Version:       1,
 		CreatedAt:     time.Now().UTC(),
 		Connector:     "neo4j",
+		Edition:       edition,
 		Database:      conn.Database,
 		Host:          conn.Host,
 		ServerVersion: conn.ServerVersion(ctx),
 		BackupMode:    mode,
 	}
-	// TODO (behavior verification pending): derive Edition from the version string
-	// or config, and populate NodeCount/RelationshipCount via a Bolt query when
-	// online. Requires a Bolt driver dependency + a live-DB test harness.
 
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
