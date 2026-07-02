@@ -15,11 +15,23 @@ const sidebars: SidebarsConfig = {
       label: 'How-to Guides',
       items: [
         'guides/install',
-        'guides/backup-instance',
-        'guides/restore-backup',
-        'guides/kubernetes-backup',
-        'guides/kubernetes-restore',
-        'guides/collect-troubleshooting-bundle',
+        {
+          type: 'category',
+          label: 'Infrahub Backup',
+          items: [
+            'guides/backup-instance',
+            'guides/restore-backup',
+            'guides/kubernetes-backup',
+            'guides/kubernetes-restore',
+          ],
+        },
+        {
+          type: 'category',
+          label: 'Infrahub Collect',
+          items: [
+            'guides/collect-troubleshooting-bundle',
+          ],
+        },
       ],
     },
     {
