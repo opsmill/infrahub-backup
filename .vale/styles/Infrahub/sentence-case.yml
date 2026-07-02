@@ -114,6 +114,7 @@ exceptions:
   - Infrahub Servers Tree View
   - Infrahub YAML Tree View
   - infrahub-backup
+  - infrahub-collect
   - infrahubctl
   - Integration with Other Tools
   - Intelligent Yaml editing
