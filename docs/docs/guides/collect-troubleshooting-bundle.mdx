@@ -1,14 +1,18 @@
 ---
-title: How to collect a troubleshooting bundle
+title: Collect a troubleshooting bundle
 ---
 
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 
-This guide walks you through collecting a troubleshooting bundle from your Infrahub instance using `infrahub-collect`. If OpsMill support asked you for logs, or you want to gather diagnostic data before opening a support request, follow these steps to produce a single archive containing everything support needs to investigate — in one command, on both Docker Compose and Kubernetes deployments.
+Use `infrahub-collect` to gather everything OpsMill support needs to investigate an issue — service logs, diagnostic status, configuration, and metrics — into a single local archive. Run it when support asks for logs, or to attach diagnostic data to a support request. The same command produces the same bundle on Docker Compose and Kubernetes deployments.
 
 :::info
 Collection is strictly read-only. Unlike `infrahub-backup create`, the collect command never stops, restarts, or scales any container or pod, so it is safe to run against a production instance at any time — including while the instance is degraded.
+:::
+
+:::note Collect or back up?
+A troubleshooting bundle contains diagnostics for support to read; a [backup](./backup-instance.mdx) is a restorable snapshot of your data. When support asks for both, run `infrahub-collect create --include-backup` to produce them in one run.
 :::
 
 ## Prerequisites
@@ -32,9 +36,9 @@ Before collecting a bundle:
 </TabItem>
 </Tabs>
 
-The `infrahub-collect` binary ships in the same release packages as `infrahub-backup`, so the [installation guide](./install.mdx) steps apply to it unchanged.
+The `infrahub-collect` binary is included in the same release packages as `infrahub-backup`, and the [installation guide](./install.mdx) steps apply to it unchanged.
 
-No repository checkout, Python environment, or container image download is required. Collection works fully offline and performs no network access beyond your deployment itself.
+The binary is self-contained and collection works fully offline: it uses your existing Docker or kubectl access and performs no network access beyond your deployment itself.
 
 ## Step 1: Verify environment detection
 
@@ -44,7 +48,7 @@ Confirm the tool can find your Infrahub deployment:
 infrahub-collect environment detect
 ```
 
-The tool auto-detects Docker Compose projects and Kubernetes namespaces containing Infrahub. To list every deployment it can see:
+The tool auto-detects Docker Compose projects and Kubernetes namespaces containing Infrahub. To list every deployment it detects:
 
 ```bash
 infrahub-collect environment list
@@ -165,13 +169,13 @@ The bundle layout is identical on Docker Compose and Kubernetes. Inside the arch
 - `server/` - Version, installed packages, API information, configuration, schema, environment variables
 - `metrics/` - Container resource metrics
 
-:::note
-Secret values in collected environment variables and configuration output are masked before they are written to the bundle: any key containing `password`, `secret`, `token`, or `key` is replaced with `********`. Service logs are collected as-is, so review them before sharing if your applications log sensitive payloads.
+:::warning Review before sharing
+Masking is based on key names: environment variables and configuration keys containing `password`, `secret`, `token`, or `key` are replaced with `********` before they are written to the bundle. Secrets stored under other key names are not detected. Service logs are collected as-is, and database query logs (`--include-queries`) can contain customer data. Review the bundle contents before sharing.
 :::
 
 ## Step 5: Share the bundle with support
 
-Send the archive to OpsMill support through your usual channel (support portal, Slack, or email). The bundle is a plain local file, so environments with restricted egress can transfer it through whatever mechanism their security policy allows.
+Send the archive to OpsMill support through your usual support channel. The bundle is a plain local file, so environments with restricted egress can transfer it through whatever mechanism their security policy allows.
 
 ## Advanced usage
 
@@ -210,7 +214,7 @@ export INFRAHUB_LOG_LINES=500000
 infrahub-collect create
 ```
 
-The effective limit is recorded in the manifest, so support can tell whether logs were truncated.
+The effective limit is recorded in the manifest, so support knows whether logs were truncated.
 
 ### Run a performance benchmark
 
@@ -221,6 +225,30 @@ infrahub-collect create --benchmark
 ```
 
 The benchmark requires downloading the OpsMill benchmark container image and generates load against your instance. If the image cannot be pulled — for example in an air-gapped environment — the benchmark is skipped with a warning and the rest of the collection completes normally.
+
+## Troubleshoot collection
+
+### No deployment detected
+
+If `infrahub-collect create` reports that no environment was found, list what the tool can see:
+
+```bash
+infrahub-collect environment list
+```
+
+On Docker Compose, confirm the project is running with `docker compose ls`; the project name must contain `infrahub`, or you must name it with `--project`. On Kubernetes, the namespace is discovered through the `app.kubernetes.io/name=infrahub` label; for deployments with custom labels, name the namespace with `--k8s-namespace`.
+
+### Permission denied on Kubernetes
+
+Log collection needs the `pods/log` permission and the status collectors need `pods/exec`. If your role lacks one of them, the affected collectors are recorded as failed in the manifest. Ask your cluster administrator for read access to both — collection needs no write or scale permissions.
+
+### Docker or kubectl not found
+
+The tool depends on the Docker CLI or kubectl being installed and configured on the machine where it runs. When neither is usable, the command fails immediately and the error names the missing CLI.
+
+### Individual collectors failed
+
+Collector failures on a degraded deployment are expected — a stopped cache container cannot answer status queries. The command still exits successfully, and the manifest records each failure with a reason. Send the partial bundle as-is; support reads the manifest first.
 
 ## Validation
 
@@ -234,7 +262,7 @@ Confirm your collection works:
 
 ## Related resources
 
-- [How to backup your instance](./backup-instance.mdx)
-- [How to install](./install.mdx)
+- [Back up your Infrahub instance](./backup-instance.mdx)
+- [Install Infrahub Backup](./install.mdx)
 - [CLI command reference](../reference/commands.mdx)
 - [Configuration reference](../reference/configuration.mdx)

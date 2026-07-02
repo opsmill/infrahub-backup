@@ -238,7 +238,22 @@ infrahub-collect create --benchmark
 
 **Output:**
 
-A single archive named `support_bundle_<timestamp>.tar.gz` in the output directory, containing per-service logs (all replicas), diagnostic status dumps, server information, container metrics, and a `bundle_information.json` manifest with an explicit outcome for every collector.
+A single archive named `support_bundle_<timestamp>.tar.gz` in the output directory. Inside the archive, all files live under a top-level `bundle/` directory, with a `bundle_information.json` manifest recording an explicit outcome for every collector.
+
+**Collectors:**
+
+| Collector | What it gathers |
+|-----------|-----------------|
+| Service logs | Container logs for every Infrahub service, all replicas, plus previous-container logs for restarted pods |
+| Database logs | Neo4j server logs (`neo4j.log`, `debug.log`); full log directory with `--include-queries` |
+| Message-queue status | RabbitMQ queues, exchanges, bindings, connections, channels, and status |
+| Cache status | Redis info, client list, configuration, slow log, and database size |
+| Task-worker state | Prefect worker status, one directory per replica |
+| Task-manager state | Work pools, work queues, recent flow runs, events, and automations |
+| Server info | Versions, installed packages, API information/configuration/schema, masked environment variables |
+| Container metrics | Resource usage via `docker compose stats` or `kubectl top` |
+| Backup (opt-in) | Backup produced by the standard backup behavior (`--include-backup`) |
+| Benchmark (opt-in) | OpsMill benchmark results (`--benchmark`) |
 
 ### Environment and utility commands
 
