@@ -1,48 +1,49 @@
 <!--
 Sync Impact Report
 ==================
-Version change: (template, unversioned) → 1.0.0
-Rationale: Initial ratification. All placeholder tokens replaced with concrete
-principles derived from AGENTS.md, README.md, the Makefile, CI workflows, and
-the existing specs (001-k8s-helm-backup, 002-plakar-integration).
+Version change: 1.0.0 → 1.1.0
+Rationale: MINOR bump. Principle I materially expanded: the architecture is
+redefined from a fixed dual-binary set to a split-binary, shared-core pattern
+with an enumerated binary set now including `infrahub-collect` (troubleshooting
+bundle tool, spec 003-collect-tool / Jira INFP-415). The amendment mechanism
+(new binaries require a constitution amendment) is retained unchanged.
 
-Modified principles: n/a (initial adoption)
-Added sections:
-- Core Principles (I–V)
-- Operational Constraints & Tooling
-- Development Workflow
-- Governance
-Removed sections: none (template slots all filled)
+Modified principles:
+- I. Dual-Binary, Shared-Core Architecture → I. Split-Binary, Shared-Core
+  Architecture (adds `src/cmd/infrahub-collect` to the enumerated entry points)
+Added sections: none
+Removed sections: none
 
 Templates status:
-- ✅ .specify/templates/plan-template.md — "Constitution Check" gate is generic
-  and resolves against this file at plan time; no edits required.
-- ✅ .specify/templates/spec-template.md — no constitution-mandated sections
-  added; compatible as-is.
-- ✅ .specify/templates/tasks-template.md — task categories (tests, polish)
-  already cover the testing-discipline principle; no edits required.
-- ✅ AGENTS.md / CLAUDE.md — existing guidance is consistent with these
-  principles; no changes needed.
+- ✅ .specify/templates/plan-template.md — Constitution Check gate resolves
+  against this file at plan time; no edits required.
+- ✅ .specify/templates/spec-template.md — compatible as-is.
+- ✅ .specify/templates/tasks-template.md — compatible as-is.
+- ⚠ AGENTS.md / CLAUDE.md — still describe "two specialized CLI binaries";
+  MUST be updated to the three-binary set when infrahub-collect is implemented
+  (tracked in spec 003-collect-tool).
 
-Follow-up TODOs: none.
+Follow-up TODOs:
+- Update AGENTS.md project overview and architecture sections alongside the
+  003-collect-tool implementation.
 -->
 
 # Infrahub Ops CLI Constitution
 
 ## Core Principles
 
-### I. Dual-Binary, Shared-Core Architecture
+### I. Split-Binary, Shared-Core Architecture
 
 All application logic MUST live in the shared package `src/internal/app`. The
-binary entry points (`src/cmd/infrahub-backup`, `src/cmd/infrahub-taskmanager`)
-MUST remain thin Cobra wiring: command definitions, flag registration, and
-delegation to the shared core. New capabilities MUST be exposed through one of
-the two existing binaries; introducing a third binary requires a constitution
-amendment. Helper executables (e.g., `tools/neo4jwatchdog`, `tools/s3-uploader`)
-are permitted only when they are embedded into, and distributed through, the
-main binaries.
+binary entry points (`src/cmd/infrahub-backup`, `src/cmd/infrahub-taskmanager`,
+`src/cmd/infrahub-collect`) MUST remain thin Cobra wiring: command definitions,
+flag registration, and delegation to the shared core. New capabilities MUST be
+exposed through one of the binaries enumerated above; introducing an additional
+binary requires a constitution amendment. Helper executables (e.g.,
+`tools/neo4jwatchdog`, `tools/s3-uploader`) are permitted only when they are
+embedded into, and distributed through, the main binaries.
 
-*Rationale: the two tools intentionally share environment detection, command
+*Rationale: the tools intentionally share environment detection, command
 execution, and configuration; duplicating logic in entry points causes the
 binaries to drift apart.*
 
@@ -147,4 +148,4 @@ amendment. Compliance is reviewed at two points: the plan-stage Constitution
 Check and PR review. Runtime development guidance for agents lives in
 AGENTS.md (routed via CLAUDE.md) and MUST stay consistent with this document.
 
-**Version**: 1.0.0 | **Ratified**: 2026-07-02 | **Last Amended**: 2026-07-02
+**Version**: 1.1.0 | **Ratified**: 2026-07-02 | **Last Amended**: 2026-07-02

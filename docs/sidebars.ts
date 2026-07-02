@@ -19,6 +19,7 @@ const sidebars: SidebarsConfig = {
         'guides/restore-backup',
         'guides/kubernetes-backup',
         'guides/kubernetes-restore',
+        'guides/collect-troubleshooting-bundle',
       ],
     },
     {
