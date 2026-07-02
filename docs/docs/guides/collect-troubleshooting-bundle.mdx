@@ -32,6 +32,8 @@ Before collecting a bundle:
 </TabItem>
 </Tabs>
 
+The `infrahub-collect` binary ships in the same release packages as `infrahub-backup`, so the [installation guide](./install.mdx) steps apply to it unchanged.
+
 No repository checkout, Python environment, or container image download is required. Collection works fully offline and performs no network access beyond your deployment itself.
 
 ## Step 1: Verify environment detection
@@ -151,7 +153,7 @@ The manifest records what was attempted and what succeeded:
 }
 ```
 
-The bundle layout is identical on Docker Compose and Kubernetes:
+The bundle layout is identical on Docker Compose and Kubernetes. Inside the archive, all files live under a top-level `bundle/` directory:
 
 - `bundle_information.json` - Collection manifest
 - `logs/<service>/` - Container logs, one file per replica (plus `*.previous.log` for restarted pods)
