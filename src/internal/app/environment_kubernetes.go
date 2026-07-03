@@ -290,6 +290,24 @@ func (k *KubernetesBackend) GetAllPods(service string) ([]string, error) {
 			return pods, nil
 		}
 	}
+
+	// Fallback: substring match on pod names, mirroring getPodForService. The
+	// Helm chart labels some pods with a different service value than the
+	// canonical name (e.g. infrahub-server pods carry infrahub/service=server),
+	// so label selectors alone would miss them.
+	output, err := k.executor.runCommand("kubectl", "get", "pods", "-n", k.namespace, "-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}")
+	if err == nil {
+		pods := []string{}
+		for _, name := range nonEmptyLines(output) {
+			if strings.Contains(name, service) {
+				pods = append(pods, name)
+			}
+		}
+		if len(pods) > 0 {
+			return pods, nil
+		}
+	}
+
 	return nil, fmt.Errorf("no pods found for service %s", service)
 }
 
