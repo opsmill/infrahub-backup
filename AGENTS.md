@@ -4,20 +4,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`infrahub-ops-cli` is a Go-based toolset for managing and maintaining Infrahub instances. The project provides two specialized CLI binaries:
+`infrahub-ops-cli` is a Go-based toolset for managing and maintaining Infrahub instances. The project provides three specialized CLI binaries:
 
 - **infrahub-backup** - Backup/restore operations and environment detection
 - **infrahub-taskmanager** - Task manager (Prefect) maintenance operations
+- **infrahub-collect** - Troubleshooting-bundle collection (read-only diagnostics) for support
 
-Both tools share common internal application logic but expose different commands through their respective main entry points.
+All three tools share common internal application logic but expose different commands through their respective main entry points.
 
 ## Common Development Commands
 
 ### Building and Running
 
-- `make build` - Build both binaries to `bin/infrahub-backup` and `bin/infrahub-taskmanager`
-- `make build-all` - Cross-compile both binaries for Linux, Darwin, and Windows (amd64/arm64)
-- `make install` - Build and install both binaries to `$GOPATH/bin`
+- `make build` - Build all three binaries to `bin/infrahub-backup`, `bin/infrahub-taskmanager`, and `bin/infrahub-collect`
+- `make build-all` - Cross-compile all three binaries for Linux, Darwin, and Windows (amd64/arm64)
+- `make install` - Build and install all three binaries to `$GOPATH/bin`
 - `make clean` - Remove build artifacts
 
 ### Testing and Quality
@@ -40,7 +41,7 @@ Whenever Go modules change (any modification to `go.mod` or `go.sum` — adding,
 
 ## Architecture
 
-The codebase follows a command-pattern architecture using Cobra for CLI structure, with two separate binary entry points sharing common internal logic:
+The codebase follows a command-pattern architecture using Cobra for CLI structure, with three separate binary entry points sharing common internal logic:
 
 ### Core Components
 
@@ -54,50 +55,64 @@ The codebase follows a command-pattern architecture using Cobra for CLI structur
    - Commands: `flush flow-runs`, `flush stale-runs`, `environment detect`, `environment list`, `version`
    - Uses shared application logic from `src/internal/app`
 
-3. **src/internal/app/app.go** - Core application logic
+3. **src/cmd/infrahub-collect/main.go** - Troubleshooting-bundle tool entry point
+   - Defines root command with troubleshooting-bundle collection
+   - Commands: `create`, `environment detect`, `environment list`, `version`
+   - Uses shared application logic from `src/internal/app`
+
+4. **src/internal/app/app.go** - Core application logic
    - `InfrahubOps` struct - Main application controller
    - `CommandExecutor` - Handles Docker Compose and system command execution
    - Environment detection (Docker vs Kubernetes)
    - Docker project discovery and validation
-   - Shared by both CLI tools
+   - Shared by all three CLI tools
 
-4. **src/internal/app/backup.go** - Backup and restore operations
+5. **src/internal/app/backup.go** - Backup and restore operations
    - Creates tar.gz backups with metadata JSON
    - Backs up Neo4j database, PostgreSQL (task-manager), and artifacts
    - Implements safe backup with container stopping/starting
    - Restore validates metadata and handles version compatibility
 
-5. **src/internal/app/taskmanager.go** - Task management operations
+6. **src/internal/app/taskmanager.go** - Task management operations
    - PostgreSQL database connection management
    - Flow run cleanup operations (completed/failed/cancelled)
    - Stale run cancellation (stuck in running state)
    - Uses embedded Python scripts for Prefect API operations
 
-6. **src/internal/app/utils.go** - Utility functions
+7. **src/internal/app/collect*.go** - Troubleshooting-bundle collection
+   - `collect.go` - Orchestrator (`CollectBundle`), collector run plan, staging/archive lifecycle
+   - `collect_manifest.go` - `bundle_information.json` manifest and per-collector results
+   - `collect_logs.go` - Per-replica service log collector (backend-agnostic)
+   - `collect_diagnostics.go` - Database, message-queue, cache, task-worker, task-manager, and server collectors
+   - `collect_metrics.go` - Container resource metrics collector
+   - `collect_extras.go` - Opt-in `--include-backup` and `--benchmark` collectors
+   - `masking.go` - Key-name secret masking for env and config dumps
+
+8. **src/internal/app/utils.go** - Utility functions
    - File operations, checksum validation
    - Environment variable handling
    - Version detection and comparison
 
-7. **src/internal/app/cli.go** - Shared CLI configuration
+9. **src/internal/app/cli.go** - Shared CLI configuration
    - `ConfigureRootCommand()` - Sets up common flags and configuration
    - `AttachEnvironmentCommands()` - Adds environment detection commands
-   - Shared between both binaries
+   - Shared between all three binaries
 
 ### Key Design Patterns
 
-- **Split Binary Architecture**: Two specialized binaries sharing common internal logic for focused functionality
+- **Split Binary Architecture**: Three specialized binaries sharing common internal logic for focused functionality
 - **Embedded Scripts**: Python scripts are embedded using Go's embed package (src/internal/app/scripts directory)
 - **Docker Compose Integration**: All operations work through Docker Compose commands
 - **Project-based Operations**: Can target specific Docker Compose projects with `--project` flag
 - **Streaming Output**: Commands stream output in real-time for user feedback
-- **Shared Configuration**: Both binaries use the same configuration system and environment variables
+- **Shared Configuration**: All binaries use the same configuration system and environment variables
 
 ## Docker Compose Dependencies
 
-Both tools assume Infrahub is deployed using Docker Compose with these service names:
+All tools assume Infrahub is deployed using Docker Compose with these service names:
 
-- `database` (Neo4j) - Used by infrahub-backup
-- `task-manager-db` (PostgreSQL) - Used by both tools
+- `database` (Neo4j) - Used by infrahub-backup and infrahub-collect
+- `task-manager-db` (PostgreSQL) - Used by infrahub-backup and infrahub-taskmanager
 - `infrahub-server`, `task-worker`, `task-manager`, `task-manager-background-svc` - Application containers
 - `cache`, `message-queue` - Infrastructure services
 
