@@ -38,11 +38,20 @@ func (b *bareBackend) Stop(services ...string) error            { return nil }
 func (b *bareBackend) IsRunning(service string) (bool, error)   { return true, nil }
 
 // fakeCollectBackend satisfies the full collectBackend seam for unit tests.
+// execFn, when set, overrides Exec so tests can script per-command outputs.
 type fakeCollectBackend struct {
 	bareBackend
 	replicas map[string][]Replica
 	logs     map[string]string
 	metrics  string
+	execFn   func(service string, command []string, opts *ExecOptions) (string, error)
+}
+
+func (f *fakeCollectBackend) Exec(service string, command []string, opts *ExecOptions) (string, error) {
+	if f.execFn != nil {
+		return f.execFn(service, command, opts)
+	}
+	return f.bareBackend.Exec(service, command, opts)
 }
 
 func (f *fakeCollectBackend) ServiceReplicas(service string) ([]Replica, error) {
@@ -255,9 +264,35 @@ func TestRunCollectPlan_OutcomeRecording(t *testing.T) {
 	assertStagingRemoved(t, outputDir)
 }
 
-func TestCollectBundle_EmptyPlanProducesValidBundle(t *testing.T) {
+// TestCollectBundle_RegisteredPlan runs the full registered plan (T025)
+// against the fake backend: only infrahub-server has replicas, so its logs,
+// server info, and metrics are collected while every other service-bound
+// collector is skipped as not deployed.
+func TestCollectBundle_RegisteredPlan(t *testing.T) {
 	iops := NewInfrahubOps()
-	iops.backend = newFakeCollectBackend()
+	backend := newFakeCollectBackend()
+	backend.execFn = func(service string, command []string, opts *ExecOptions) (string, error) {
+		joined := strings.Join(command, " ")
+		switch {
+		case strings.Contains(joined, "infrahub.__version__"):
+			return "1.5.2", nil
+		case strings.Contains(joined, "INFRAHUB_INTERNAL_ADDRESS"):
+			return "http://infrahub-server:8000", nil
+		case joined == "pip list":
+			return "infrahub 1.5.2", nil
+		case joined == "env":
+			return "INFRAHUB_API_TOKEN=secret123\nINFRAHUB_HOST=localhost", nil
+		case strings.HasSuffix(joined, "/api/config"):
+			return `{"security":{"secret_key":"abc123"}}`, nil
+		case strings.HasSuffix(joined, "/api/info"):
+			return `{"version":"1.5.2"}`, nil
+		case strings.HasSuffix(joined, "/api/schema"):
+			return `{"nodes":[]}`, nil
+		default:
+			return "", nil
+		}
+	}
+	iops.backend = backend
 	outputDir := filepath.Join(t.TempDir(), "bundles")
 	opts := CollectOptions{OutputDir: outputDir, LogLines: 100000}
 
@@ -266,19 +301,85 @@ func TestCollectBundle_EmptyPlanProducesValidBundle(t *testing.T) {
 	}
 
 	archivePath := findArchive(t, outputDir)
-	manifest, _ := extractBundleManifest(t, archivePath)
+	manifest, destDir := extractBundleManifest(t, archivePath)
 
 	if manifest.ManifestVersion != manifestVersion {
 		t.Errorf("manifest_version = %d, want %d", manifest.ManifestVersion, manifestVersion)
 	}
-	if manifest.Collectors == nil {
-		t.Error("collectors is null, want an empty JSON array")
-	}
-	if len(manifest.Collectors) != 0 {
-		t.Errorf("collectors = %+v, want empty until the run plan is registered (T025)", manifest.Collectors)
-	}
 	if manifest.Environment != "docker" {
 		t.Errorf("environment = %q, want %q", manifest.Environment, "docker")
+	}
+	if manifest.InfrahubVersion != "1.5.2" {
+		t.Errorf("infrahub_version = %q, want %q (populated by server-info)", manifest.InfrahubVersion, "1.5.2")
+	}
+	if manifest.LogLines != 100000 {
+		t.Errorf("log_lines = %d, want 100000", manifest.LogLines)
+	}
+
+	notDeployed := "service not deployed"
+	wantResults := []CollectorResult{
+		{Name: "logs/infrahub-server", Status: collectorStatusSuccess},
+		{Name: "logs/task-worker", Status: collectorStatusSkipped, Reason: notDeployed},
+		{Name: "logs/database", Status: collectorStatusSkipped, Reason: notDeployed},
+		{Name: "logs/message-queue", Status: collectorStatusSkipped, Reason: notDeployed},
+		{Name: "logs/cache", Status: collectorStatusSkipped, Reason: notDeployed},
+		{Name: "logs/task-manager", Status: collectorStatusSkipped, Reason: notDeployed},
+		{Name: "logs/task-manager-db", Status: collectorStatusSkipped, Reason: notDeployed},
+		{Name: "logs/task-manager-background-svc", Status: collectorStatusSkipped, Reason: notDeployed},
+		{Name: "database-logs", Status: collectorStatusSkipped, Reason: notDeployed},
+		{Name: "message-queue-status", Status: collectorStatusSkipped, Reason: notDeployed},
+		{Name: "cache-status", Status: collectorStatusSkipped, Reason: notDeployed},
+		{Name: "task-worker-state", Status: collectorStatusSkipped, Reason: notDeployed},
+		{Name: "task-manager-state", Status: collectorStatusSkipped, Reason: notDeployed},
+		{Name: "server-info", Status: collectorStatusSuccess},
+		{Name: "metrics", Status: collectorStatusSuccess},
+	}
+	if len(manifest.Collectors) != len(wantResults) {
+		t.Fatalf("manifest has %d collector entries %+v, want %d", len(manifest.Collectors), manifest.Collectors, len(wantResults))
+	}
+	for i, want := range wantResults {
+		if manifest.Collectors[i] != want {
+			t.Errorf("collectors[%d] = %+v, want %+v", i, manifest.Collectors[i], want)
+		}
+	}
+
+	// Server dumps are masked before they reach the bundle (research R5).
+	envDump, err := os.ReadFile(filepath.Join(destDir, "bundle", "server", "environment.txt"))
+	if err != nil {
+		t.Errorf("server/environment.txt missing from archive: %v", err)
+	} else {
+		if strings.Contains(string(envDump), "secret123") {
+			t.Errorf("environment.txt leaks the API token: %q", envDump)
+		}
+		if !strings.Contains(string(envDump), "INFRAHUB_API_TOKEN="+maskedValue) {
+			t.Errorf("environment.txt = %q, want the token masked", envDump)
+		}
+	}
+	configDump, err := os.ReadFile(filepath.Join(destDir, "bundle", "server", "config.json"))
+	if err != nil {
+		t.Errorf("server/config.json missing from archive: %v", err)
+	} else if strings.Contains(string(configDump), "abc123") || !strings.Contains(string(configDump), maskedValue) {
+		t.Errorf("config.json = %q, want the secret masked", configDump)
+	}
+	versionDump, err := os.ReadFile(filepath.Join(destDir, "bundle", "server", "version.txt"))
+	if err != nil {
+		t.Errorf("server/version.txt missing from archive: %v", err)
+	} else if strings.TrimSpace(string(versionDump)) != "1.5.2" {
+		t.Errorf("version.txt = %q, want %q", versionDump, "1.5.2")
+	}
+
+	logDump, err := os.ReadFile(filepath.Join(destDir, "bundle", "logs", "infrahub-server", "infrahub-server-1.log"))
+	if err != nil {
+		t.Errorf("logs/infrahub-server/infrahub-server-1.log missing from archive: %v", err)
+	} else if string(logDump) != "log line\n" {
+		t.Errorf("log content = %q, want %q", logDump, "log line\n")
+	}
+
+	metricsDump, err := os.ReadFile(filepath.Join(destDir, "bundle", "metrics", "metrics.txt"))
+	if err != nil {
+		t.Errorf("metrics/metrics.txt missing from archive: %v", err)
+	} else if !strings.HasPrefix(string(metricsDump), backend.metrics) {
+		t.Errorf("metrics.txt content = %q, want prefix %q", metricsDump, backend.metrics)
 	}
 
 	assertStagingRemoved(t, outputDir)

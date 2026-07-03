@@ -1,10 +1,12 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"sort"
 	"strings"
+	"time"
 )
 
 type DockerBackend struct {
@@ -101,6 +103,16 @@ func (d *DockerBackend) Exec(service string, command []string, opts *ExecOptions
 
 func (d *DockerBackend) ExecStream(service string, command []string, opts *ExecOptions) (string, error) {
 	return d.executor.runCommandWithStream("docker", d.buildExecArgs(service, command, opts)...)
+}
+
+// DockerBackend provides the optional timeout-bounded exec capability the
+// bundle diagnostics collectors prefer (spec 003-collect-tool, research R2).
+var _ contextExecer = (*DockerBackend)(nil)
+
+// ExecContext is the timeout-bounded variant of Exec used by the bundle
+// collectors (research R2: 60s per status dump).
+func (d *DockerBackend) ExecContext(ctx context.Context, timeout time.Duration, service string, command []string, opts *ExecOptions) (string, error) {
+	return d.executor.runCommandContext(ctx, timeout, "docker", d.buildExecArgs(service, command, opts)...)
 }
 
 func (d *DockerBackend) ExecStreamPipe(service string, command []string, opts *ExecOptions) (io.ReadCloser, func() error, error) {

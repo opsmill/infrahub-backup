@@ -66,6 +66,10 @@ type collectContext struct {
 	backend   EnvironmentBackend
 	opts      CollectOptions
 	bundleDir string
+	// manifest lets collectors contribute run-level fields (e.g. the
+	// server-info collector fills infrahub_version best-effort). Outcome
+	// entries stay the orchestrator's job.
+	manifest *BundleManifest
 }
 
 // collect resolves the active environment backend to the collect-side
@@ -103,14 +107,28 @@ func (iops *InfrahubOps) CollectBundle(opts CollectOptions) error {
 	return iops.runCollectPlan(backend, opts, iops.collectPlan(opts))
 }
 
-// collectPlan builds the ordered collector run plan for this run.
-//
-// TODO(003-collect-tool T025): register the full ordered plan — logs per
-// service, database, message-queue, cache, task-worker, task-manager, server,
-// metrics, and the opt-in extras — and populate the manifest's
-// infrahub_version.
+// collectPlan builds the ordered collector run plan for this run: logs per
+// canonical service, then the parity diagnostics (database → message-queue →
+// cache → task-worker → task-manager → server), then metrics (research R9).
+// The manifest's environment and log_lines are set at construction; the
+// server-info collector fills infrahub_version best-effort.
 func (iops *InfrahubOps) collectPlan(opts CollectOptions) []collector {
-	return nil
+	plan := serviceLogCollectors()
+	plan = append(plan,
+		databaseLogsCollector(),
+		messageQueueCollector(),
+		cacheCollector(),
+		taskWorkerCollector(),
+		taskManagerCollector(),
+		serverInfoCollector(),
+		metricsCollector(),
+	)
+
+	// Opt-in extras run last so the always-on diagnostics are already staged
+	// when they start:
+	// TODO(003-collect-tool T033): append the --include-backup collector.
+	// TODO(003-collect-tool T036): append the --benchmark collector.
+	return plan
 }
 
 // runCollectPlan stages the bundle, runs every collector in order, finalizes
@@ -155,6 +173,7 @@ func (iops *InfrahubOps) runCollectPlan(backend EnvironmentBackend, opts Collect
 		backend:   backend,
 		opts:      opts,
 		bundleDir: bundleDir,
+		manifest:  manifest,
 	}
 
 	for _, c := range plan {
