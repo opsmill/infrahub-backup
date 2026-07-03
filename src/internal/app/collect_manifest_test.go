@@ -72,6 +72,9 @@ func TestBundleManifest_JSONShape(t *testing.T) {
 	}
 
 	// All schema-required fields must be present with the exact JSON names.
+	// The schema allows additionalProperties, so the exact field count is not
+	// asserted — that would break the next time a legal optional field is added
+	// (FIX-T1).
 	for _, field := range []string{
 		"manifest_version", "collect_id", "created_at", "tool_version",
 		"infrahub_version", "environment", "log_lines", "collectors",
@@ -79,9 +82,6 @@ func TestBundleManifest_JSONShape(t *testing.T) {
 		if _, ok := decoded[field]; !ok {
 			t.Errorf("serialized manifest is missing required field %q", field)
 		}
-	}
-	if len(decoded) != 8 {
-		t.Errorf("serialized manifest has %d fields, want exactly 8: %v", len(decoded), decoded)
 	}
 
 	if version, ok := decoded["manifest_version"].(float64); !ok || int(version) != 2026070200 {

@@ -1,8 +1,12 @@
 package app
 
 import (
+	"context"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCollectPlanOrdering(t *testing.T) {
@@ -284,6 +288,121 @@ func TestServerAPIFetchCommand(t *testing.T) {
 			t.Errorf("fetch script missing %q:\n%s", fragment, script)
 		}
 	}
+}
+
+// timeoutExecBackend is a collect backend whose bounded exec always times out,
+// used to prove a command timeout survives a real aggregating collector's
+// string aggregation and reaches the manifest as the bare contract reason
+// (FIX-4).
+type timeoutExecBackend struct {
+	fakeCollectBackend
+	timeout time.Duration
+}
+
+func (b *timeoutExecBackend) ExecContext(ctx context.Context, timeout time.Duration, service string, command []string, opts *ExecOptions) (string, error) {
+	return "", &timeoutError{timeout: b.timeout}
+}
+
+var _ contextExecer = (*timeoutExecBackend)(nil)
+
+// TestAggregatingCollector_TimeoutReasonSurvivesAggregation drives the real
+// message-queue collector (execDumpCollector → runExecDumps → execDumpsInto)
+// against a backend whose exec times out, and asserts the manifest reason is
+// exactly the CLI contract's bare "timed out after 60s" — not a verbose
+// composite (FIX-4).
+func TestAggregatingCollector_TimeoutReasonSurvivesAggregation(t *testing.T) {
+	iops := NewInfrahubOps()
+	backend := &timeoutExecBackend{
+		fakeCollectBackend: *newFakeCollectBackend(),
+		timeout:            collectExecTimeout,
+	}
+	// message-queue must have a replica so the collector runs instead of being
+	// skipped as not deployed.
+	backend.replicas["message-queue"] = []Replica{{Service: "message-queue", Container: "message-queue-1"}}
+	outputDir := filepath.Join(t.TempDir(), "bundles")
+	opts := CollectOptions{OutputDir: outputDir, LogLines: 100000}
+
+	if err := iops.runCollectPlan(backend, opts, []collector{messageQueueCollector()}); err != nil {
+		t.Fatalf("runCollectPlan failed: %v", err)
+	}
+
+	manifest, _ := extractBundleManifest(t, findArchive(t, outputDir))
+	if len(manifest.Collectors) != 1 {
+		t.Fatalf("manifest has %d entries %+v, want 1", len(manifest.Collectors), manifest.Collectors)
+	}
+	want := CollectorResult{Name: "message-queue-status", Status: collectorStatusFailed, Reason: "timed out after 60s"}
+	if manifest.Collectors[0] != want {
+		t.Errorf("collector result = %+v, want %+v (bare timeout reason per contracts/cli.md, FIX-4)", manifest.Collectors[0], want)
+	}
+}
+
+// copyRecordingBackend records the source paths passed to CopyFromContext and
+// scripts the Neo4j log-directory listing, exercising collectDatabaseLogs
+// without a real container (FIX-T2, FIX-7).
+type copyRecordingBackend struct {
+	bareBackend
+	copied   []string
+	logFiles string
+}
+
+func (b *copyRecordingBackend) CopyFromContext(ctx context.Context, timeout time.Duration, service, src, dest string) error {
+	b.copied = append(b.copied, src)
+	return nil
+}
+
+func (b *copyRecordingBackend) ExecContext(ctx context.Context, timeout time.Duration, service string, command []string, opts *ExecOptions) (string, error) {
+	return b.logFiles, nil
+}
+
+var (
+	_ contextCopier = (*copyRecordingBackend)(nil)
+	_ contextExecer = (*copyRecordingBackend)(nil)
+)
+
+// TestCollectDatabaseLogs_IncludeQueries covers the FR-004 --include-queries
+// path: the default run copies exactly neo4j.log+debug.log, --include-queries
+// copies the live-enumerated set including query logs, and an empty enumeration
+// falls back to the default set rather than recording an empty success (FIX-7).
+func TestCollectDatabaseLogs_IncludeQueries(t *testing.T) {
+	newCC := func(backend EnvironmentBackend, opts CollectOptions) *collectContext {
+		return &collectContext{ctx: context.Background(), backend: backend, bundleDir: t.TempDir(), opts: opts}
+	}
+
+	t.Run("default copies only the Neo4j server logs", func(t *testing.T) {
+		backend := &copyRecordingBackend{bareBackend: bareBackend{name: "docker"}}
+		if err := collectDatabaseLogs(newCC(backend, CollectOptions{})); err != nil {
+			t.Fatalf("collectDatabaseLogs failed: %v", err)
+		}
+		want := []string{"/logs/neo4j.log", "/logs/debug.log"}
+		if !reflect.DeepEqual(backend.copied, want) {
+			t.Errorf("copied = %v, want %v", backend.copied, want)
+		}
+	})
+
+	t.Run("include-queries copies the enumerated set including query logs", func(t *testing.T) {
+		backend := &copyRecordingBackend{
+			bareBackend: bareBackend{name: "docker"},
+			logFiles:    "neo4j.log\ndebug.log\nquery.log\nquery.log.1\n",
+		}
+		if err := collectDatabaseLogs(newCC(backend, CollectOptions{IncludeQueries: true})); err != nil {
+			t.Fatalf("collectDatabaseLogs failed: %v", err)
+		}
+		want := []string{"/logs/neo4j.log", "/logs/debug.log", "/logs/query.log", "/logs/query.log.1"}
+		if !reflect.DeepEqual(backend.copied, want) {
+			t.Errorf("copied = %v, want %v", backend.copied, want)
+		}
+	})
+
+	t.Run("empty enumeration falls back to the default set (FIX-7)", func(t *testing.T) {
+		backend := &copyRecordingBackend{bareBackend: bareBackend{name: "docker"}, logFiles: ""}
+		if err := collectDatabaseLogs(newCC(backend, CollectOptions{IncludeQueries: true})); err != nil {
+			t.Fatalf("collectDatabaseLogs failed: %v", err)
+		}
+		want := []string{"/logs/neo4j.log", "/logs/debug.log"}
+		if !reflect.DeepEqual(backend.copied, want) {
+			t.Errorf("copied = %v, want %v (empty enumeration must fall back, not record an empty success)", backend.copied, want)
+		}
+	})
 }
 
 func TestReplicaBaseName(t *testing.T) {

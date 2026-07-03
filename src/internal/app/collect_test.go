@@ -492,6 +492,109 @@ func TestRunCollectPlan_InterruptCleansStaging(t *testing.T) {
 	}
 }
 
+// TestRunCollectPlan_CollectorPanicRecovered proves a panicking collector (run
+// or skip) is recorded as failed and the run continues, so one bad collector
+// never defeats FR-009 (FIX-3).
+func TestRunCollectPlan_CollectorPanicRecovered(t *testing.T) {
+	t.Run("a panic in run is recorded and the run continues", func(t *testing.T) {
+		iops := NewInfrahubOps()
+		backend := newFakeCollectBackend()
+		outputDir := filepath.Join(t.TempDir(), "bundles")
+		opts := CollectOptions{OutputDir: outputDir, LogLines: 100000}
+
+		afterRan := false
+		plan := []collector{
+			{name: "panicker", run: func(cc *collectContext) error { panic("boom") }},
+			{name: "after", run: func(cc *collectContext) error { afterRan = true; return nil }},
+		}
+
+		if err := iops.runCollectPlan(backend, opts, plan); err != nil {
+			t.Fatalf("runCollectPlan aborted on a collector panic, want the run to complete: %v", err)
+		}
+		if !afterRan {
+			t.Error("collector after the panicking one did not run (FR-009)")
+		}
+
+		manifest, _ := extractBundleManifest(t, findArchive(t, outputDir))
+		wantResults := []CollectorResult{
+			{Name: "panicker", Status: collectorStatusFailed, Reason: "panic: boom"},
+			{Name: "after", Status: collectorStatusSuccess},
+		}
+		if len(manifest.Collectors) != len(wantResults) {
+			t.Fatalf("manifest has %d entries %+v, want %d", len(manifest.Collectors), manifest.Collectors, len(wantResults))
+		}
+		for i, want := range wantResults {
+			if manifest.Collectors[i] != want {
+				t.Errorf("collectors[%d] = %+v, want %+v", i, manifest.Collectors[i], want)
+			}
+		}
+		assertStagingRemoved(t, outputDir)
+	})
+
+	t.Run("a panic in the skip precondition is recorded as failed", func(t *testing.T) {
+		iops := NewInfrahubOps()
+		backend := newFakeCollectBackend()
+		outputDir := filepath.Join(t.TempDir(), "bundles")
+		opts := CollectOptions{OutputDir: outputDir, LogLines: 100000}
+
+		plan := []collector{
+			{
+				name: "panic-skip",
+				skip: func(cc *collectContext) (bool, string) { panic("skip boom") },
+				run:  func(cc *collectContext) error { t.Error("run reached despite panicking skip"); return nil },
+			},
+		}
+
+		if err := iops.runCollectPlan(backend, opts, plan); err != nil {
+			t.Fatalf("runCollectPlan aborted on a panicking skip, want the run to complete: %v", err)
+		}
+
+		manifest, _ := extractBundleManifest(t, findArchive(t, outputDir))
+		want := CollectorResult{Name: "panic-skip", Status: collectorStatusFailed, Reason: "panic: skip boom"}
+		if len(manifest.Collectors) != 1 || manifest.Collectors[0] != want {
+			t.Errorf("collectors = %+v, want [%+v]", manifest.Collectors, want)
+		}
+	})
+}
+
+// readOnlyGuardBackend fails the test if any workload-lifecycle method is
+// called, enforcing FR-010 / SC-003: collect must never stop, start, or scale
+// a deployment's workloads (FIX-T3).
+type readOnlyGuardBackend struct {
+	fakeCollectBackend
+	t *testing.T
+}
+
+func (b *readOnlyGuardBackend) Start(services ...string) error {
+	b.t.Errorf("Start(%v) called during collect: FR-010 requires a read-only run", services)
+	return nil
+}
+
+func (b *readOnlyGuardBackend) Stop(services ...string) error {
+	b.t.Errorf("Stop(%v) called during collect: FR-010 requires a read-only run", services)
+	return nil
+}
+
+// TestRunCollectPlan_ReadOnlyGuard drives the full registered plan through
+// runCollectPlan with a backend that fails the test on any lifecycle call, and
+// asserts the bundle is still produced with zero Start/Stop calls (FR-010,
+// SC-003 — previously only covered by the environment-gated k8s e2e; FIX-T3).
+func TestRunCollectPlan_ReadOnlyGuard(t *testing.T) {
+	iops := NewInfrahubOps()
+	guard := &readOnlyGuardBackend{fakeCollectBackend: *newFakeCollectBackend(), t: t}
+	iops.backend = guard
+	outputDir := filepath.Join(t.TempDir(), "bundles")
+	opts := CollectOptions{OutputDir: outputDir, LogLines: 100000}
+
+	if err := iops.runCollectPlan(guard, opts, iops.collectPlan(opts)); err != nil {
+		t.Fatalf("runCollectPlan failed: %v", err)
+	}
+
+	// The guard asserts zero lifecycle calls; the archive must still exist.
+	findArchive(t, outputDir)
+	assertStagingRemoved(t, outputDir)
+}
+
 func TestCollectContext_BackendSeam(t *testing.T) {
 	t.Run("bare backend is rejected with a clear error", func(t *testing.T) {
 		cc := &collectContext{backend: &bareBackend{name: "docker"}}
