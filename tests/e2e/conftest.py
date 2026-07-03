@@ -74,6 +74,18 @@ def backup_binary() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Fixture: collect_binary
+# ---------------------------------------------------------------------------
+@pytest.fixture(scope="session")
+def collect_binary() -> str:
+    """Build infrahub-collect and return the binary path."""
+    subprocess.run(["make", "build"], cwd=str(PROJECT_ROOT), check=True)
+    binary = PROJECT_ROOT / "bin" / "infrahub-collect"
+    assert binary.exists(), f"Binary not found at {binary}"
+    return str(binary)
+
+
+# ---------------------------------------------------------------------------
 # Fixture: minio_docker (testcontainers)
 # ---------------------------------------------------------------------------
 @pytest.fixture(scope="session")
