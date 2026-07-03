@@ -121,10 +121,10 @@ Single Go project: binaries in `src/cmd/<name>/main.go`, all logic in `src/inter
 
 ## Phase 7: Polish & Cross-Cutting Concerns
 
-- [ ] T037 [P] Update `AGENTS.md` project overview and architecture sections from two to three binaries, adding `infrahub-collect` command summary (constitution v1.1.0 Sync Impact Report mandates this alongside implementation)
-- [ ] T038 [P] Wire collect e2e tests into the existing docker/k8s e2e jobs in `.github/workflows/ci.yml` (same markers/fixtures; critique E4)
-- [ ] T039 [P] Fix `docs/docs/guides/install-collect.mdx` prerequisite "Go 1.21 or later" → Go 1.25 (matches `go.mod`; Vale/rumdl must pass)
-- [ ] T040 Run `specs/003-collect-tool/quickstart.md` validation scenarios 1–4 and 6 locally (build, CLI smoke, Docker collection, degraded case, flag/env precedence) and full gates: `make fmt && make vet && make lint && make test`
+- [X] T037 [P] Update `AGENTS.md` project overview and architecture sections from two to three binaries, adding `infrahub-collect` command summary (constitution v1.1.0 Sync Impact Report mandates this alongside implementation)
+- [X] T038 [P] Wire collect e2e tests into the existing docker/k8s e2e jobs in `.github/workflows/ci.yml` (same markers/fixtures; critique E4)
+- [X] T039 [P] Fix `docs/docs/guides/install-collect.mdx` prerequisite "Go 1.21 or later" → Go 1.25 (matches `go.mod`; Vale/rumdl must pass)
+- [X] T040 Run `specs/003-collect-tool/quickstart.md` validation scenarios 1–4 and 6 locally (build, CLI smoke, Docker collection, degraded case, flag/env precedence) and full gates: `make fmt && make vet && make lint && make test`
 
 ---
 
