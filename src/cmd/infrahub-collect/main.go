@@ -44,13 +44,20 @@ func main() {
 		Long:         "Collect a troubleshooting bundle from the Infrahub instance. Collection is read-only: no container or pod is stopped, restarted, or scaled. Individual collector failures are recorded in the bundle manifest and do not abort the run.",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if lines := viper.GetInt("log-lines"); lines <= 0 {
+			lines := viper.GetInt("log-lines")
+			if lines <= 0 {
 				return fmt.Errorf("--log-lines must be a positive integer, got %d", lines)
 			}
-			// TODO(003-collect-tool T013): build CollectOptions from viper
-			// (output-dir, log-lines, include-backup, include-queries,
-			// benchmark) and call iops.CollectBundle(opts).
-			return fmt.Errorf("bundle collection is not implemented yet")
+
+			opts := app.CollectOptions{
+				OutputDir:      viper.GetString("output-dir"),
+				LogLines:       lines,
+				IncludeBackup:  viper.GetBool("include-backup"),
+				IncludeQueries: viper.GetBool("include-queries"),
+				Benchmark:      viper.GetBool("benchmark"),
+			}
+
+			return iops.CollectBundle(opts)
 		},
 	}
 	createCmd.Flags().IntVar(&logLines, "log-lines", 100000, "Maximum log lines collected per container")
