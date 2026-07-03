@@ -15,10 +15,14 @@ import (
 )
 
 // Per-collector subprocess time bounds (research R2): exec/status dumps get
-// 60s, log downloads and file copies get 5 minutes.
+// 60s, log downloads and file copies get 5 minutes. The opt-in benchmark gets
+// its own generous bound: it downloads an image (--pull always) and then runs
+// disk and CPU measurements, which can exceed the transfer bound on slow
+// disks or links.
 const (
-	collectExecTimeout     = 60 * time.Second
-	collectTransferTimeout = 5 * time.Minute
+	collectExecTimeout      = 60 * time.Second
+	collectTransferTimeout  = 5 * time.Minute
+	collectBenchmarkTimeout = 10 * time.Minute
 )
 
 // CollectOptions aggregates the create-command inputs resolved from
@@ -111,6 +115,14 @@ type collector struct {
 	run  func(cc *collectContext) error
 }
 
+// collectSkipError marks a collector run outcome that must be recorded as
+// skipped — with a warning reason — instead of failed: the opt-in benchmark
+// degrades this way when its image cannot be pulled or run, so air-gapped
+// runs stay clean (research R11, spec air-gapped edge case).
+type collectSkipError struct{ reason string }
+
+func (e *collectSkipError) Error() string { return e.reason }
+
 // CollectBundle gathers a troubleshooting bundle from the detected
 // environment into <OutputDir>/support_bundle_<collect_id>.tar.gz. Individual
 // collector failures are recorded in the bundle manifest and never abort the
@@ -143,11 +155,14 @@ func (iops *InfrahubOps) collectPlan(opts CollectOptions) []collector {
 	)
 
 	// Opt-in extras run last so the always-on diagnostics are already staged
-	// when they start. The include-backup collector inherits the standard
-	// backup behavior — it may stop/restart application containers — so it
-	// must never run before the read-only collectors.
-	plan = append(plan, includeBackupCollector(runStandardBackup))
-	// TODO(003-collect-tool T036): append the --benchmark collector.
+	// when they start. The benchmark generates load, so it runs only after
+	// every read-only collector has captured the undisturbed state; the
+	// include-backup collector inherits the standard backup behavior — it may
+	// stop/restart application containers — so it must stay last of all.
+	plan = append(plan,
+		benchmarkCollector(runEnvironmentBenchmark),
+		includeBackupCollector(runStandardBackup),
+	)
 	return plan
 }
 
@@ -213,6 +228,14 @@ func (iops *InfrahubOps) runCollectPlan(backend EnvironmentBackend, opts Collect
 		if err := c.run(cc); err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return fmt.Errorf("bundle collection interrupted: %w", ctxErr)
+			}
+
+			var skip *collectSkipError
+			if errors.As(err, &skip) {
+				logrus.Warnf("Collector %s skipped: %s", c.name, skip.reason)
+				cc.takeArtifact() // drop a skipped collector's artifact reference
+				manifest.recordSkipped(c.name, skip.reason)
+				continue
 			}
 
 			reason := err.Error()

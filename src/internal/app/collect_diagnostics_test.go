@@ -25,8 +25,10 @@ func TestCollectPlanOrdering(t *testing.T) {
 		"task-manager-state",
 		"server-info",
 		"metrics",
-		// Opt-in extras stay last: the include-backup collector may
-		// stop/restart application containers (inherited backup behavior).
+		// Opt-in extras stay last: the benchmark generates load, and the
+		// include-backup collector may stop/restart application containers
+		// (inherited backup behavior), so backup stays last of all.
+		"benchmark",
 		"backup",
 	}
 

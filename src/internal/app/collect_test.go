@@ -333,6 +333,7 @@ func TestCollectBundle_RegisteredPlan(t *testing.T) {
 		{Name: "task-manager-state", Status: collectorStatusSkipped, Reason: notDeployed},
 		{Name: "server-info", Status: collectorStatusSuccess},
 		{Name: "metrics", Status: collectorStatusSuccess},
+		{Name: "benchmark", Status: collectorStatusSkipped, Reason: "not requested"},
 		{Name: "backup", Status: collectorStatusSkipped, Reason: "not requested"},
 	}
 	if len(manifest.Collectors) != len(wantResults) {

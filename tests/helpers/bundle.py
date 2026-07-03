@@ -32,12 +32,13 @@ EXPECTED_COLLECTORS = {f"logs/{service}" for service in LOG_SERVICES} | {
     "task-manager-state",
     "server-info",
     "metrics",
+    "benchmark",
     "backup",
 }
 
 # Opt-in extras: always present in the manifest, skipped ("not requested")
 # unless their flag is set.
-OPT_IN_COLLECTORS = {"backup"}
+OPT_IN_COLLECTORS = {"backup", "benchmark"}
 
 # Bundle directory owned by each non-log collector (contracts/bundle-layout.md).
 COLLECTOR_DIRS = {
