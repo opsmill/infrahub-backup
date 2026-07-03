@@ -105,7 +105,7 @@ jobs:
       - name: Install tini
         run: apt-get update && apt-get install -y tini
 
-      - name: Build infrahub-backup binary
+      - name: Build binaries (infrahub-backup, infrahub-taskmanager, infrahub-collect)
         run: make build
 
       - name: Install Python dependencies
@@ -161,7 +161,7 @@ jobs:
       - name: Install tini
         run: apt-get update && apt-get install -y tini
 
-      - name: Build infrahub-backup binary
+      - name: Build binaries (infrahub-backup, infrahub-taskmanager, infrahub-collect)
         run: make build
 
       - name: Install Python dependencies
