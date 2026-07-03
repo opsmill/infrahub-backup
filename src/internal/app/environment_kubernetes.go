@@ -428,6 +428,51 @@ func (k *KubernetesBackend) ReplicaLogs(replica Replica, tailLines int, previous
 	return k.executor.runCommandPipeContext(context.Background(), collectTransferTimeout, "kubectl", args...)
 }
 
+// kubectlBenchmarkRunArgs builds the kubectl run arguments for the one-off
+// benchmark pod (research R11): attached so its output is captured, never
+// restarted, removed after the attach session completes, and bounded by
+// --pod-running-timeout so a failing image pull surfaces as an error instead
+// of waiting out the whole benchmark bound.
+func kubectlBenchmarkRunArgs(namespace, name, image string) []string {
+	return []string{
+		"run", name,
+		"-n", namespace,
+		"--image=" + image,
+		"--image-pull-policy=Always",
+		"--restart=Never",
+		"--attach",
+		"--rm",
+		"--quiet",
+		"--pod-running-timeout=5m",
+	}
+}
+
+// RunBenchmark runs the opt-in benchmark image as a one-off attached pod in
+// the namespace (research R11) and returns its combined output. The pod is
+// deleted afterwards even when the run timed out — kubectl's --rm only covers
+// a completed attach session. Deleting it is permitted: FR-010 protects the
+// deployment's workloads and this pod is the tool's own transient resource.
+func (k *KubernetesBackend) RunBenchmark(ctx context.Context, image, podName string) (string, error) {
+	defer func() {
+		// context.Background(): the pod must be deleted even when ctx was
+		// cancelled by a timeout or an interrupt.
+		if _, err := k.executor.runCommandContext(context.Background(), collectExecTimeout,
+			"kubectl", "delete", "pod", podName, "-n", k.namespace, "--ignore-not-found=true", "--now"); err != nil {
+			logrus.Debugf("Failed to delete benchmark pod %s: %v", podName, err)
+		}
+	}()
+
+	args := kubectlBenchmarkRunArgs(k.namespace, podName, image)
+	output, err := k.executor.runCommandContext(ctx, collectBenchmarkTimeout, "kubectl", args...)
+	if err != nil {
+		if output != "" {
+			return "", fmt.Errorf("kubectl run failed: %w: %s", err, commandErrorLine(output))
+		}
+		return "", fmt.Errorf("kubectl run failed: %w", err)
+	}
+	return output, nil
+}
+
 // Metrics captures one-shot pod resource metrics via kubectl top. A missing
 // metrics-server surfaces as a normal error so the metrics collector records
 // failed in the manifest without aborting the run (research R4).

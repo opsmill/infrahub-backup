@@ -115,7 +115,7 @@ Single Go project: binaries in `src/cmd/<name>/main.go`, all logic in `src/inter
 
 **Purpose**: Cross-environment opt-in benchmark collector — not tied to a user story; required by FR-013 and the published `--benchmark` flag.
 
-- [ ] T036 Implement the benchmark collector in `src/internal/app/collect_extras.go`: port the benchmark image reference from the Python `invoke bundle collect` implementation (critique Q1) with `INFRAHUB_BENCHMARK_IMAGE` override; Docker: `docker run` attached to the project network; Kubernetes: one-off `kubectl run` pod in the namespace; capture output to `bundle/benchmark/`; always delete the transient container/pod; image pull/run failure → manifest `skipped` + warning (research R11); default off → `skipped`/`not requested`; add an `INFRAHUB_BENCHMARK_IMAGE` row to `docs/docs/reference/configuration.mdx` (Vale/rumdl must pass)
+- [X] T036 Implement the benchmark collector in `src/internal/app/collect_extras.go`: port the benchmark image reference from the Python `invoke bundle collect` implementation (critique Q1) with `INFRAHUB_BENCHMARK_IMAGE` override; Docker: `docker run` attached to the project network; Kubernetes: one-off `kubectl run` pod in the namespace; capture output to `bundle/benchmark/`; always delete the transient container/pod; image pull/run failure → manifest `skipped` + warning (research R11); default off → `skipped`/`not requested`; add an `INFRAHUB_BENCHMARK_IMAGE` row to `docs/docs/reference/configuration.mdx` (Vale/rumdl must pass)
 
 ---
 

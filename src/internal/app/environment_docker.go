@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
 type DockerBackend struct {
@@ -278,6 +280,78 @@ func (d *DockerBackend) Metrics() (string, error) {
 			return "", fmt.Errorf("docker stats failed: %w: %s", err, output)
 		}
 		return "", fmt.Errorf("docker stats failed: %w", err)
+	}
+	return output, nil
+}
+
+// dockerBenchmarkRunArgs builds the docker run arguments for the transient
+// benchmark container, ported from the Python tool's collect_benchmark step
+// (`docker run --pull always --rm <image>`) plus an explicit name — so the
+// timeout path can force-remove the container — and the project network
+// attachment (research R11).
+func dockerBenchmarkRunArgs(name, network, image string) []string {
+	args := []string{"run", "--pull", "always", "--rm", "--name", name}
+	if network != "" {
+		args = append(args, "--network", network)
+	}
+	return append(args, image)
+}
+
+// pickComposeNetwork chooses the network the benchmark container joins: the
+// compose project's default network when present, otherwise the first project
+// network in lexical order, otherwise none (empty string).
+func pickComposeNetwork(project string, networks []string) string {
+	if len(networks) == 0 {
+		return ""
+	}
+	preferred := project + "_default"
+	if contains(networks, preferred) {
+		return preferred
+	}
+	sorted := append([]string(nil), networks...)
+	sort.Strings(sorted)
+	return sorted[0]
+}
+
+// benchmarkNetwork resolves the compose project's network for the benchmark
+// container. Discovery failure degrades to no attachment (empty string): the
+// benchmark measures host resources and does not require the project network.
+func (d *DockerBackend) benchmarkNetwork() string {
+	output, err := d.executor.runCommandContext(context.Background(), collectExecTimeout,
+		"docker", "network", "ls",
+		"--filter", "label=com.docker.compose.project="+d.project,
+		"--format", "{{.Name}}")
+	if err != nil {
+		logrus.Debugf("Failed to enumerate networks of project %s: %v", d.project, err)
+		return ""
+	}
+	return pickComposeNetwork(d.project, nonEmptyLines(output))
+}
+
+// RunBenchmark runs the opt-in benchmark image as a transient container
+// attached to the compose project's network (research R11) and returns its
+// combined output. The container is force-removed afterwards even when the
+// run timed out: --rm only covers a clean exit, and killing the docker CLI
+// leaves the daemon-side container behind. Removing it is permitted — FR-010
+// protects the deployment's workloads and this container is the tool's own
+// transient resource.
+func (d *DockerBackend) RunBenchmark(ctx context.Context, image, containerName string) (string, error) {
+	defer func() {
+		// context.Background(): the container must be removed even when ctx
+		// was cancelled by a timeout or an interrupt.
+		if _, err := d.executor.runCommandContext(context.Background(), collectExecTimeout,
+			"docker", "rm", "-f", containerName); err != nil {
+			logrus.Debugf("Failed to remove benchmark container %s (already removed?): %v", containerName, err)
+		}
+	}()
+
+	args := dockerBenchmarkRunArgs(containerName, d.benchmarkNetwork(), image)
+	output, err := d.executor.runCommandContext(ctx, collectBenchmarkTimeout, "docker", args...)
+	if err != nil {
+		if output != "" {
+			return "", fmt.Errorf("docker run failed: %w: %s", err, commandErrorLine(output))
+		}
+		return "", fmt.Errorf("docker run failed: %w", err)
 	}
 	return output, nil
 }
