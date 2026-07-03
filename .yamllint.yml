@@ -5,6 +5,7 @@ ignore: |
   docs/node_modules/
   docs/pnpm-lock.yaml
   .git/
+  .specify/extensions/
 
 rules:
   braces:
