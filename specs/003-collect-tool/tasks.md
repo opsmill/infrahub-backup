@@ -71,8 +71,8 @@ Single Go project: binaries in `src/cmd/<name>/main.go`, all logic in `src/inter
 - [X] T024 [US1] Implement the metrics collector in `src/internal/app/collect_metrics.go` using the backend `Metrics` primitive, output into `bundle/metrics/`
 - [X] T025 [US1] Register the full ordered run plan in `CollectBundle` (`src/internal/app/collect.go`): logs per service → database → message-queue → cache → task-worker → task-manager → server → metrics (+ opt-in extras), populating `infrahub_version`, `environment`, `log_lines` in the manifest
 - [X] T026 [US1] Unit tests in `src/internal/app/collect_logs_test.go`: log filename derivation (docker/k8s single/multi-container, previous), kubectl/docker argument construction, replica parsing from jsonpath output
-- [ ] T027 [US1] Add `collect_binary` session fixture in `tests/e2e/conftest.py` (mirrors `backup_binary`: `make build` → `bin/infrahub-collect`) and `run_collect` helper in `tests/helpers/utils.py`
-- [ ] T028 [US1] E2E test `tests/e2e/test_k8s_collect.py` (`-m k8s`): full collect against the kind+Helm stack — archive integrity, manifest validates against `specs/003-collect-tool/contracts/manifest.schema.json`, one log file per replica (scale task-worker ≥ 2), `.previous.log` for an induced restart, layout per `specs/003-collect-tool/contracts/bundle-layout.md`, zero pod restarts/scale events caused by the run (SC-003)
+- [X] T027 [US1] Add `collect_binary` session fixture in `tests/e2e/conftest.py` (mirrors `backup_binary`: `make build` → `bin/infrahub-collect`) and `run_collect` helper in `tests/helpers/utils.py`
+- [X] T028 [US1] E2E test `tests/e2e/test_k8s_collect.py` (`-m k8s`): full collect against the kind+Helm stack — archive integrity, manifest validates against `specs/003-collect-tool/contracts/manifest.schema.json`, one log file per replica (scale task-worker ≥ 2), `.previous.log` for an induced restart, layout per `specs/003-collect-tool/contracts/bundle-layout.md`, zero pod restarts/scale events caused by the run (SC-003)
 
 **Checkpoint**: US1 fully functional — Kubernetes bundle collection works end-to-end (MVP).
 

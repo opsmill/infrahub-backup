@@ -92,6 +92,22 @@ def run_backup(
     return result
 
 
+def run_collect(
+    binary: str,
+    extra_args: list[str],
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
+    """Run infrahub-collect with the given arguments."""
+    cmd = [binary] + extra_args
+    run_env = {**os.environ, **(env or {})}
+    result = subprocess.run(cmd, capture_output=True, text=True, env=run_env)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Collect failed (exit {result.returncode}):\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+    return result
+
+
 def run_restore(
     binary: str,
     extra_args: list[str],
