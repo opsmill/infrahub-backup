@@ -27,7 +27,7 @@ The collect-side sibling of `BackupMetadata`. Serialized as `bundle_information.
 |------------|----------|------|-------|
 | Name | `name` | string | Stable identifier, path-like for per-service collectors (e.g. `logs/infrahub-server`, `cache-status`, `benchmark`) |
 | Status | `status` | string | `success` \| `failed` \| `skipped` (typed constants) |
-| Reason | `reason,omitempty` | string | Required when status ≠ `success`; human-readable cause ("container not running", "not requested", "previous logs unavailable") |
+| Reason | `reason,omitempty` | string | Required when status ≠ `success`; human-readable cause ("container not running", "not requested", "timed out after 60s", "previous logs unavailable") |
 
 **State transitions**: planned → running → exactly one of `success` / `failed` / `skipped`. A collector never aborts the run (FR-009); the orchestrator converts its returned error into `failed` + reason.
 
@@ -59,13 +59,16 @@ Environment/project selection reuses the existing `Configuration` fields (`Docke
 
 ## Replica
 
-Read-only descriptor returned by the backend replica-enumeration primitive (R3).
+Read-only descriptor returned by the backend replica-enumeration primitive (R3). On Kubernetes there is one Replica per **pod container** (multi-container pods — CNPG, sidecars — yield one entry per container; critique E2).
 
 | Field | Type | Docker meaning | Kubernetes meaning |
 |-------|------|----------------|--------------------|
 | Service | string | Compose service name | Service name (label-selector resolved) |
-| ID | string | Container ID | Pod name |
-| Restarted | bool | always false | `restartCount > 0` on any container → previous logs are fetched |
+| Pod | string | — (empty) | Pod name |
+| Container | string | Container **name** (human-meaningful; critique P2) | Container name within the pod |
+| Restarted | bool | always false | this container's `restartCount > 0` → previous logs are fetched |
+
+Log filename derivation: Docker → `<container-name>.log`; Kubernetes single-container pod → `<pod>.log`; multi-container pod → `<pod>_<container>.log`; previous logs append `.previous.log` in place of `.log`.
 
 ## Support bundle (filesystem artifact)
 

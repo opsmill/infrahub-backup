@@ -26,7 +26,7 @@ Technical approach: a thin Cobra entry point at `src/cmd/infrahub-collect` mirro
 
 **Performance Goals**: complete a bundle from a reference deployment in under 5 minutes with a single command (SC-001); stream progress per collector in real time (Principle V).
 
-**Constraints**: strictly read-only with respect to workload lifecycle — no stop/restart/scale ever (FR-010, SC-003); fully offline by default — no image pulls, no egress (FR-012); individual collector failures are non-fatal and the command still exits 0 with a partial bundle (FR-009, SC-005); identical command surface and bundle layout across Docker and Kubernetes (FR-006, SC-004); per-service log cap configurable, default 100,000 lines (FR-011).
+**Constraints**: strictly read-only with respect to workload lifecycle — no stop/restart/scale ever (FR-010, SC-003); fully offline by default — no image pulls, no egress (FR-012); individual collector failures are non-fatal and the command still exits 0 with a partial bundle (FR-009, SC-005); every collector subprocess is time-bounded (`exec.CommandContext`; 60s exec dumps, 5 min log/copy transfers — critique E1) so a hung container on a degraded instance cannot stall the run; identical command surface and bundle layout across Docker and Kubernetes (FR-006, SC-004); per-service log cap configurable, default 100,000 lines (FR-011).
 
 **Scale/Scope**: 8 Infrahub services × N replicas per service (Kubernetes); log volume up to `--log-lines` per container (default 100k lines); one archive per run.
 

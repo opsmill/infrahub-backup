@@ -40,8 +40,9 @@ Precedence: flag > environment variable > default (viper, `INFRAHUB_` prefix, `-
 1. Detects the environment (Docker Compose first unless `--k8s-namespace` is set), honoring `--project`/`--k8s-namespace`; multiple candidates without a selector → same selection behavior/error as `infrahub-backup` (FR-001).
 2. Never stops, restarts, or scales any container/pod/workload (FR-010). The only exception is a transient benchmark container/pod the tool itself creates under `--benchmark`.
 3. Runs all collectors even when some fail; each failure logs a `WARN` line and is recorded in the manifest (FR-009).
-4. Streams one `INFO` progress line per collector as it runs (Principle V); the docs' Step-3 transcript is the reference format.
-5. Writes `support_bundle_<YYYYMMDD_HHMMSS>.tar.gz` into the output directory and prints its path on success.
+4. Every collector subprocess is time-bounded (60s for exec/status dumps, 5 min for log/copy transfers); a timeout is a per-collector failure (`timed out after <duration>` in the manifest), never a hang.
+5. Streams one `INFO` progress line per collector as it runs (Principle V); the docs' Step-3 transcript is the reference format.
+6. Writes `support_bundle_<YYYYMMDD_HHMMSS>.tar.gz` into the output directory and prints its path **and size** on success. Write failures (unwritable/full output directory) are hard errors (exit 1) after staging cleanup.
 6. Performs no image pulls and no network egress beyond the deployment unless `--benchmark` is set (FR-012/FR-013).
 
 ## Exit codes

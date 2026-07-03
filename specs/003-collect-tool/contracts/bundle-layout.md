@@ -15,8 +15,10 @@ bundle/
 ├── bundle_information.json        # Manifest — see manifest.schema.json
 ├── logs/
 │   └── <service>/                 # One directory per Infrahub service present
-│       ├── <replica>.log          # One file per replica (container ID / pod name)
-│       └── <replica>.previous.log # Kubernetes only, for pods with restarts
+│       ├── <replica>.log          # One file per replica — Docker: container name;
+│       │                          # k8s: <pod>.log, or <pod>_<container>.log for
+│       │                          # multi-container pods
+│       └── <replica>.previous.log # Kubernetes only, per container with restarts
 ├── database/                      # Neo4j server logs: neo4j.log, debug.log
 │                                  # (full log dir incl. query logs with --include-queries)
 ├── message-queue/                 # RabbitMQ: queues, exchanges, bindings, connections,
