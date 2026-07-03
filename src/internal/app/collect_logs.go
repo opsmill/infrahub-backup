@@ -129,11 +129,11 @@ func podContainerCounts(replicas []Replica) map[string]int {
 	return counts
 }
 
-// replicaLogFilename derives the bundle log filename for one replica per
-// data-model.md: Docker → <container-name>.log; Kubernetes single-container
-// pod → <pod>.log; multi-container pod → <pod>_<container>.log. Previous logs
-// use .previous.log in place of .log.
-func replicaLogFilename(replica Replica, multiContainer bool, previous bool) string {
+// replicaBaseName derives the bundle-path base name for one replica per
+// data-model.md: Docker → container name; Kubernetes single-container pod →
+// pod name; multi-container pod → <pod>_<container>. Log files and the
+// per-replica task-worker directories share this derivation.
+func replicaBaseName(replica Replica, multiContainer bool) string {
 	base := replica.Container
 	if replica.Pod != "" {
 		base = replica.Pod
@@ -141,6 +141,13 @@ func replicaLogFilename(replica Replica, multiContainer bool, previous bool) str
 			base = replica.Pod + "_" + replica.Container
 		}
 	}
+	return base
+}
+
+// replicaLogFilename derives the bundle log filename for one replica:
+// <base>.log, or <base>.previous.log for previous-container logs.
+func replicaLogFilename(replica Replica, multiContainer bool, previous bool) string {
+	base := replicaBaseName(replica, multiContainer)
 	if previous {
 		return base + ".previous.log"
 	}

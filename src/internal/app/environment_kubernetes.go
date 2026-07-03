@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sirupsen/logrus"
 )
@@ -293,8 +294,32 @@ func (k *KubernetesBackend) GetAllPods(service string) ([]string, error) {
 }
 
 // KubernetesBackend implements the collect-side primitives (spec
-// 003-collect-tool, research R3/R4).
-var _ collectBackend = (*KubernetesBackend)(nil)
+// 003-collect-tool, research R3/R4) and the optional timeout-bounded and
+// per-replica exec capabilities the diagnostics collectors prefer.
+var (
+	_ collectBackend = (*KubernetesBackend)(nil)
+	_ contextExecer  = (*KubernetesBackend)(nil)
+	_ replicaExecer  = (*KubernetesBackend)(nil)
+)
+
+// ExecContext is the timeout-bounded variant of Exec used by the bundle
+// collectors (research R2: 60s per status dump).
+func (k *KubernetesBackend) ExecContext(ctx context.Context, timeout time.Duration, service string, command []string, opts *ExecOptions) (string, error) {
+	args, err := k.buildExecArgs(service, command, opts)
+	if err != nil {
+		return "", err
+	}
+	return k.executor.runCommandContext(ctx, timeout, "kubectl", args...)
+}
+
+// ExecReplica executes a command in one specific replica (pod container),
+// unlike Exec which resolves a single pod per service. The bundle collectors
+// use it to capture per-replica task-worker state.
+func (k *KubernetesBackend) ExecReplica(ctx context.Context, timeout time.Duration, replica Replica, command []string) (string, error) {
+	args := []string{"exec", "-n", k.namespace, replica.Pod, "-c", replica.Container, "--"}
+	args = append(args, command...)
+	return k.executor.runCommandContext(ctx, timeout, "kubectl", args...)
+}
 
 // kubectlContainerStatusArgs builds the kubectl arguments that list one
 // "<container> <restartCount>" pair per line for a pod's containers.

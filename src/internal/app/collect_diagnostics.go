@@ -1,0 +1,523 @@
+package app
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/sirupsen/logrus"
+)
+
+// Bundle directory names for the parity diagnostics collectors
+// (specs/003-collect-tool/contracts/bundle-layout.md).
+const (
+	databaseBundleDir     = "database"
+	messageQueueBundleDir = "message-queue"
+	cacheBundleDir        = "cache"
+	taskWorkerBundleDir   = "task-worker"
+	taskManagerBundleDir  = "task-manager"
+	serverBundleDir       = "server"
+)
+
+// neo4jLogPath is where the official Neo4j image writes its server logs.
+const neo4jLogPath = "/logs"
+
+// prefectServerAPIFallback is used when the task-manager container does not
+// define PREFECT_API_URL: the Prefect server serves its API on port 4200 by
+// default, and the command runs inside that container.
+const prefectServerAPIFallback = "http://localhost:4200/api"
+
+// infrahubServerAPIFallback is used when INFRAHUB_INTERNAL_ADDRESS is not
+// discoverable: the fetch runs inside the infrahub-server container, where
+// the API listens on its default port.
+const infrahubServerAPIFallback = "http://localhost:8000"
+
+// prefectEventsScript is the embedded script dumping recent Prefect events
+// (the Prefect CLI has no non-streaming events command; research R9).
+const (
+	prefectEventsScript       = "collect_prefect_events.py"
+	prefectEventsScriptTarget = "/tmp/infrahubops_collect_prefect_events.py"
+)
+
+// contextExecer is an optional backend capability: a timeout-bounded variant
+// of Exec (research R2: 60s per status dump). Both concrete backends
+// implement it; collectors fall back to plain Exec on backends (or test
+// fakes) that do not.
+type contextExecer interface {
+	ExecContext(ctx context.Context, timeout time.Duration, service string, command []string, opts *ExecOptions) (string, error)
+}
+
+// replicaExecer is an optional backend capability: execute a command in one
+// specific replica instead of the backend's default pod/container for the
+// service. KubernetesBackend implements it; on backends without it the
+// collectors fall back to service-level Exec (single-replica behavior).
+type replicaExecer interface {
+	ExecReplica(ctx context.Context, timeout time.Duration, replica Replica, command []string) (string, error)
+}
+
+// execDump runs a command inside a service container, bounded by the collect
+// exec timeout when the backend supports it.
+func (cc *collectContext) execDump(service string, command []string) (string, error) {
+	if execer, ok := cc.backend.(contextExecer); ok {
+		return execer.ExecContext(cc.ctx, collectExecTimeout, service, command, nil)
+	}
+	return cc.backend.Exec(service, command, nil)
+}
+
+// execReplicaDump runs a command inside one specific replica, falling back to
+// service-level exec when the backend cannot target replicas.
+func (cc *collectContext) execReplicaDump(replica Replica, command []string) (string, error) {
+	if execer, ok := cc.backend.(replicaExecer); ok {
+		return execer.ExecReplica(cc.ctx, collectExecTimeout, replica, command)
+	}
+	return cc.execDump(replica.Service, command)
+}
+
+// skipWhenServiceAbsent mirrors serviceLogCollector's precondition: a service
+// with zero replicas is not deployed in this environment, so the collector is
+// skipped. Enumeration errors (and backends without the collect primitives)
+// leave the decision to run(), which surfaces real failures as failed.
+func skipWhenServiceAbsent(service string) func(cc *collectContext) (bool, string) {
+	return func(cc *collectContext) (bool, string) {
+		cb, err := cc.collect()
+		if err != nil {
+			return false, ""
+		}
+		replicas, err := cb.ServiceReplicas(service)
+		if err != nil {
+			return false, ""
+		}
+		if len(replicas) == 0 {
+			return true, "service not deployed"
+		}
+		return false, ""
+	}
+}
+
+// execDumpSpec describes one diagnostic dump: the command executed inside the
+// service container and the bundle file its output is written to. mask, when
+// set, is applied to the output before it is written (research R5).
+type execDumpSpec struct {
+	filename string
+	command  []string
+	mask     func(string) string
+}
+
+// writeDumpFile writes one dump to the bundle, masking it first when the spec
+// requires it.
+func writeDumpFile(path, content string, mask func(string) string) error {
+	if mask != nil {
+		content = mask(content)
+	}
+	if !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		return fmt.Errorf("failed to write %s: %w", path, err)
+	}
+	return nil
+}
+
+// execDumpsInto runs each dump inside service and writes the outputs into
+// dir, returning one failure string per dump that could not be fully
+// collected. A failing command's partial output (often the tool's own error
+// text) is still written — masked — so the bundle shows what the service
+// reported (FR-009).
+func (cc *collectContext) execDumpsInto(service, dir string, dumps []execDumpSpec) []string {
+	failures := []string{}
+	for _, dump := range dumps {
+		output, err := cc.execDump(service, dump.command)
+		if err != nil {
+			logrus.Warnf("Failed to run %q in %s: %v", strings.Join(dump.command, " "), service, err)
+			failures = append(failures, fmt.Sprintf("%s: %v", dump.filename, err))
+			if strings.TrimSpace(output) == "" {
+				continue
+			}
+		}
+		if writeErr := writeDumpFile(filepath.Join(dir, dump.filename), output, dump.mask); writeErr != nil {
+			failures = append(failures, writeErr.Error())
+		}
+	}
+	return failures
+}
+
+// runExecDumps creates bundle/<dirName>/ and collects the dumps into it.
+func (cc *collectContext) runExecDumps(service, dirName string, dumps []execDumpSpec) []string {
+	dir := filepath.Join(cc.bundleDir, dirName)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return []string{fmt.Sprintf("failed to create %s directory: %v", dirName, err)}
+	}
+	return cc.execDumpsInto(service, dir, dumps)
+}
+
+// execDumpCollector builds a collector that runs a fixed set of exec dumps
+// inside one service. Partial failures keep the successful dumps in the
+// bundle and mark the collector failed with the aggregated reasons.
+func execDumpCollector(name, service, dirName string, dumps func() []execDumpSpec) collector {
+	return collector{
+		name: name,
+		skip: skipWhenServiceAbsent(service),
+		run: func(cc *collectContext) error {
+			if failures := cc.runExecDumps(service, dirName, dumps()); len(failures) > 0 {
+				return fmt.Errorf("partial %s collection: %s", dirName, strings.Join(failures, "; "))
+			}
+			return nil
+		},
+	}
+}
+
+// --- database (T018) ---
+
+// defaultDatabaseLogFiles are the Neo4j server logs always collected; query
+// logs join them only with --include-queries (FR-004).
+var defaultDatabaseLogFiles = []string{"neo4j.log", "debug.log"}
+
+// databaseLogsCollector copies the Neo4j server logs into bundle/database/.
+func databaseLogsCollector() collector {
+	return collector{
+		name: "database-logs",
+		skip: skipWhenServiceAbsent("database"),
+		run:  collectDatabaseLogs,
+	}
+}
+
+func collectDatabaseLogs(cc *collectContext) error {
+	dir := filepath.Join(cc.bundleDir, databaseBundleDir)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create %s directory: %w", databaseBundleDir, err)
+	}
+
+	failures := []string{}
+	files := defaultDatabaseLogFiles
+	if cc.opts.IncludeQueries {
+		// The full log directory includes rotated query logs
+		// (query.log, query.log.1, ...), so it is enumerated live.
+		names, err := cc.listDatabaseLogFiles()
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("failed to list %s: %v", neo4jLogPath, err))
+		} else {
+			files = names
+		}
+	}
+
+	for _, name := range files {
+		src := neo4jLogPath + "/" + name
+		if err := cc.backend.CopyFrom("database", src, filepath.Join(dir, name)); err != nil {
+			logrus.Warnf("Failed to copy %s from database: %v", src, err)
+			failures = append(failures, fmt.Sprintf("%s: %v", name, err))
+		}
+	}
+
+	if len(failures) > 0 {
+		return fmt.Errorf("partial database log collection: %s", strings.Join(failures, "; "))
+	}
+	return nil
+}
+
+// listDatabaseLogFiles enumerates the files in the Neo4j log directory.
+func (cc *collectContext) listDatabaseLogFiles() ([]string, error) {
+	output, err := cc.execDump("database", []string{"sh", "-c", "cd " + neo4jLogPath + " && ls -1"})
+	if err != nil {
+		return nil, err
+	}
+	return nonEmptyLines(output), nil
+}
+
+// --- message-queue (T019) ---
+
+// messageQueueDumps lists the RabbitMQ parity dumps (research R9), one file
+// per dump; environment and status pass through Erlang-config masking
+// (research R5).
+func messageQueueDumps() []execDumpSpec {
+	return []execDumpSpec{
+		{filename: "queues.txt", command: []string{"rabbitmqctl", "list_queues"}},
+		{filename: "exchanges.txt", command: []string{"rabbitmqctl", "list_exchanges"}},
+		{filename: "bindings.txt", command: []string{"rabbitmqctl", "list_bindings"}},
+		{filename: "connections.txt", command: []string{"rabbitmqctl", "list_connections"}},
+		{filename: "channels.txt", command: []string{"rabbitmqctl", "list_channels"}},
+		{filename: "status.txt", command: []string{"rabbitmqctl", "status"}, mask: maskErlangConfig},
+		{filename: "environment.txt", command: []string{"rabbitmqctl", "environment"}, mask: maskErlangConfig},
+	}
+}
+
+func messageQueueCollector() collector {
+	return execDumpCollector("message-queue-status", "message-queue", messageQueueBundleDir, messageQueueDumps)
+}
+
+// --- cache (T020) ---
+
+// cacheDumps lists the Redis parity dumps (research R9); the configuration
+// dump passes through key/value-pair masking (research R5). redis-cli runs
+// unauthenticated, matching the default deployment; a password-protected
+// Redis surfaces its NOAUTH error in the dump files.
+func cacheDumps() []execDumpSpec {
+	return []execDumpSpec{
+		{filename: "info.txt", command: []string{"redis-cli", "info"}},
+		{filename: "clients.txt", command: []string{"redis-cli", "client", "list"}},
+		{filename: "config.txt", command: []string{"redis-cli", "config", "get", "*"}, mask: maskConfigPairs},
+		{filename: "slowlog.txt", command: []string{"redis-cli", "slowlog", "get"}},
+		{filename: "dbsize.txt", command: []string{"redis-cli", "dbsize"}},
+	}
+}
+
+func cacheCollector() collector {
+	return execDumpCollector("cache-status", "cache", cacheBundleDir, cacheDumps)
+}
+
+// --- task-worker (T021) ---
+
+// taskWorkerDumps lists the per-replica Prefect worker dumps. The Prefect
+// worker exposes no dedicated status subcommand, so parity is the CLI
+// version, the effective configuration (masked — it can carry API keys), and
+// the work pools visible to the worker.
+func taskWorkerDumps() []execDumpSpec {
+	return []execDumpSpec{
+		{filename: "version.txt", command: []string{"prefect", "version"}},
+		{filename: "config.txt", command: []string{"prefect", "config", "view"}, mask: maskEnvOutput},
+		{filename: "work-pools.txt", command: []string{"prefect", "work-pool", "ls"}},
+	}
+}
+
+// taskWorkerCollector captures Prefect worker CLI output per replica into
+// bundle/task-worker/<replica>/.
+func taskWorkerCollector() collector {
+	return collector{
+		name: "task-worker-state",
+		skip: skipWhenServiceAbsent("task-worker"),
+		run:  collectTaskWorkerState,
+	}
+}
+
+func collectTaskWorkerState(cc *collectContext) error {
+	cb, err := cc.collect()
+	if err != nil {
+		return err
+	}
+	replicas, err := cb.ServiceReplicas("task-worker")
+	if err != nil {
+		return fmt.Errorf("failed to enumerate task-worker replicas: %w", err)
+	}
+	if len(replicas) == 0 {
+		return fmt.Errorf("no replicas found for service task-worker")
+	}
+
+	counts := podContainerCounts(replicas)
+	failures := []string{}
+	collected := 0
+	for _, replica := range replicas {
+		replicaName := replicaBaseName(replica, counts[replica.Pod] > 1)
+		replicaDir := filepath.Join(cc.bundleDir, taskWorkerBundleDir, replicaName)
+		if err := os.MkdirAll(replicaDir, 0755); err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", replicaName, err))
+			continue
+		}
+		for _, dump := range taskWorkerDumps() {
+			output, err := cc.execReplicaDump(replica, dump.command)
+			if err != nil {
+				logrus.Warnf("Failed to run %q in %s: %v", strings.Join(dump.command, " "), replicaName, err)
+				failures = append(failures, fmt.Sprintf("%s/%s: %v", replicaName, dump.filename, err))
+				// A failing CLI often prints the interesting error itself;
+				// keep it in the bundle when there is any output.
+				if strings.TrimSpace(output) == "" {
+					continue
+				}
+			} else {
+				collected++
+			}
+			if writeErr := writeDumpFile(filepath.Join(replicaDir, dump.filename), output, dump.mask); writeErr != nil {
+				failures = append(failures, writeErr.Error())
+			}
+		}
+	}
+
+	// Per research R9 the collector is failed only when nothing at all could
+	// be collected; partial output is a success with warnings (the files show
+	// which commands failed).
+	if collected == 0 {
+		return fmt.Errorf("task-worker state collection produced no output: %s", strings.Join(failures, "; "))
+	}
+	if len(failures) > 0 {
+		logrus.Warnf("Partial task-worker state collection: %s", strings.Join(failures, "; "))
+	}
+	return nil
+}
+
+// --- task-manager (T022) ---
+
+// prefectServerCommand wraps a command so it runs with PREFECT_API_URL
+// defaulting to the local Prefect server; a value already present in the
+// container environment wins over the fallback.
+func prefectServerCommand(command ...string) []string {
+	script := fmt.Sprintf(`export PREFECT_API_URL="${PREFECT_API_URL:-%s}"; exec "$@"`, prefectServerAPIFallback)
+	return append([]string{"sh", "-c", script, "sh"}, command...)
+}
+
+// taskManagerDumps lists the Prefect server state dumps collected via the
+// Prefect CLI inside the task-manager container (research R9). Recent events
+// have no CLI equivalent and are collected separately via an embedded script.
+func taskManagerDumps() []execDumpSpec {
+	return []execDumpSpec{
+		{filename: "work-pools.txt", command: prefectServerCommand("prefect", "work-pool", "ls")},
+		{filename: "work-queues.txt", command: prefectServerCommand("prefect", "work-queue", "ls")},
+		{filename: "flow-runs.txt", command: prefectServerCommand("prefect", "flow-run", "ls", "--limit", "200")},
+		{filename: "automations.txt", command: prefectServerCommand("prefect", "automation", "ls")},
+	}
+}
+
+// taskManagerCollector captures work pools, work queues, recent flow runs,
+// automations, and recent events into bundle/task-manager/.
+func taskManagerCollector() collector {
+	return collector{
+		name: "task-manager-state",
+		skip: skipWhenServiceAbsent("task-manager"),
+		run:  collectTaskManagerState,
+	}
+}
+
+func collectTaskManagerState(cc *collectContext) error {
+	failures := cc.runExecDumps("task-manager", taskManagerBundleDir, taskManagerDumps())
+
+	output, err := cc.runEmbeddedScriptDump("task-manager", prefectEventsScript, prefectEventsScriptTarget)
+	if err != nil {
+		logrus.Warnf("Failed to collect Prefect events: %v", err)
+		failures = append(failures, fmt.Sprintf("events.json: %v", err))
+	}
+	if err == nil || strings.TrimSpace(output) != "" {
+		if writeErr := writeDumpFile(filepath.Join(cc.bundleDir, taskManagerBundleDir, "events.json"), output, nil); writeErr != nil {
+			failures = append(failures, writeErr.Error())
+		}
+	}
+
+	if len(failures) > 0 {
+		return fmt.Errorf("partial task-manager state collection: %s", strings.Join(failures, "; "))
+	}
+	return nil
+}
+
+// runEmbeddedScriptDump copies an embedded Python script into a service
+// container, runs it under the collect exec timeout, and removes it again.
+// Unlike executeScriptWithOpts it captures the output quietly instead of
+// streaming it to the console — dump payloads belong in the bundle, not the
+// progress log.
+func (cc *collectContext) runEmbeddedScriptDump(service, scriptName, targetPath string) (string, error) {
+	scriptContent, err := readEmbeddedScript(scriptName)
+	if err != nil {
+		return "", fmt.Errorf("could not retrieve %s: %w", scriptName, err)
+	}
+
+	tmpFile, err := os.CreateTemp("", "infrahubops_collect_*.py")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp file: %w", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	if _, err := tmpFile.Write(scriptContent); err != nil {
+		tmpFile.Close()
+		return "", fmt.Errorf("failed to write script: %w", err)
+	}
+	tmpFile.Close()
+
+	if err := cc.backend.CopyTo(service, tmpFile.Name(), targetPath); err != nil {
+		return "", fmt.Errorf("failed to copy %s to %s: %w", scriptName, service, err)
+	}
+	defer func() {
+		if _, err := cc.backend.Exec(service, []string{"rm", "-f", targetPath}, nil); err != nil {
+			logrus.Warnf("Failed to clean up script %s on %s: %v", targetPath, service, err)
+		}
+	}()
+
+	return cc.execDump(service, []string{"python", "-u", targetPath})
+}
+
+// --- server (T023) ---
+
+// serverAPITarget maps one Infrahub API document to its bundle file.
+type serverAPITarget struct {
+	filename string
+	path     string
+	mask     func(string) string
+}
+
+// serverAPITargets lists the API documents captured into bundle/server/. The
+// configuration dump is masked (research R5); info and schema carry no
+// credentials. Paths that a given Infrahub version does not serve produce an
+// observable HTTP error in the file and a failed reason in the manifest.
+func serverAPITargets() []serverAPITarget {
+	return []serverAPITarget{
+		{filename: "info.json", path: "/api/info"},
+		{filename: "config.json", path: "/api/config", mask: maskJSON},
+		{filename: "schema.json", path: "/api/schema"},
+	}
+}
+
+// serverAPIFetchCommand builds the Python command fetching one API document
+// from inside the infrahub-server container (the image ships Python and
+// httpx, not necessarily curl; research R8). The body is printed as-is; a
+// non-2xx status is appended on stderr and reported via the exit code so the
+// collector records the failure while the response stays observable.
+func serverAPIFetchCommand(url string) []string {
+	script := strings.Join([]string{
+		"import sys",
+		"import httpx",
+		"resp = httpx.get(sys.argv[1], timeout=30)",
+		"sys.stdout.write(resp.text)",
+		"if resp.status_code >= 400:",
+		"    sys.stderr.write('\\nHTTP %d\\n' % resp.status_code)",
+		"    sys.exit(1)",
+	}, "\n")
+	return []string{"python", "-c", script, url}
+}
+
+// serverInfoCollector captures the Infrahub version, installed packages,
+// masked environment, and API info/config/schema into bundle/server/.
+func serverInfoCollector() collector {
+	return collector{
+		name: "server-info",
+		skip: skipWhenServiceAbsent("infrahub-server"),
+		run:  collectServerInfo,
+	}
+}
+
+func collectServerInfo(cc *collectContext) error {
+	dir := filepath.Join(cc.bundleDir, serverBundleDir)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create %s directory: %w", serverBundleDir, err)
+	}
+
+	failures := []string{}
+
+	version := cc.iops.getInfrahubVersion()
+	if version != "" && version != "unknown" && cc.manifest != nil {
+		cc.manifest.InfrahubVersion = version
+	}
+	if err := writeDumpFile(filepath.Join(dir, "version.txt"), version, nil); err != nil {
+		failures = append(failures, err.Error())
+	}
+
+	dumps := []execDumpSpec{
+		{filename: "packages.txt", command: []string{"pip", "list"}},
+		{filename: "environment.txt", command: []string{"env"}, mask: maskEnvOutput},
+	}
+
+	baseURL := cc.iops.getInfrahubInternalAddress()
+	if baseURL == "" {
+		baseURL = infrahubServerAPIFallback
+	}
+	baseURL = strings.TrimRight(baseURL, "/")
+	for _, target := range serverAPITargets() {
+		dumps = append(dumps, execDumpSpec{
+			filename: target.filename,
+			command:  serverAPIFetchCommand(baseURL + target.path),
+			mask:     target.mask,
+		})
+	}
+
+	failures = append(failures, cc.execDumpsInto("infrahub-server", dir, dumps)...)
+
+	if len(failures) > 0 {
+		return fmt.Errorf("partial server info collection: %s", strings.Join(failures, "; "))
+	}
+	return nil
+}

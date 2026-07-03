@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"regexp"
 	"strings"
 )
@@ -9,10 +10,13 @@ import (
 // written into a troubleshooting bundle (research R5, FR-008).
 const maskedValue = "********"
 
-// sensitiveKeySubstrings is the normative key-name match list (research R5):
-// a key is sensitive when it contains any of these substrings,
-// case-insensitively.
-var sensitiveKeySubstrings = []string{"password", "secret", "token", "key"}
+// sensitiveKeySubstrings is the key-name match list: a key is sensitive when
+// it contains any of these substrings, case-insensitively. The normative
+// minimum is password|secret|token|key (research R5, FR-008); "pass" widens
+// the match to subsume "password" and catch credential keys such as Redis
+// "requirepass" and RabbitMQ "default_pass" — over-masking is safe, leaking
+// is not.
+var sensitiveKeySubstrings = []string{"pass", "secret", "token", "key"}
 
 // isSensitiveKey reports whether a key name refers to a sensitive value,
 // using a case-insensitive substring match on the normative token list.
@@ -75,4 +79,43 @@ func maskErlangConfig(input string) string {
 		}
 		return "{" + submatch[1] + "," + maskedValue + "}"
 	})
+}
+
+// maskJSON masks values of sensitive keys anywhere in a JSON document, such
+// as the server API configuration dump (research R5). Input that is not valid
+// JSON is returned unchanged so callers can store error responses as-is and
+// keep failures observable.
+func maskJSON(input string) string {
+	var document any
+	if err := json.Unmarshal([]byte(input), &document); err != nil {
+		return input
+	}
+	masked, err := json.MarshalIndent(maskJSONValue(document), "", "    ")
+	if err != nil {
+		return input
+	}
+	return string(masked)
+}
+
+// maskJSONValue recursively masks sensitive-keyed values in a decoded JSON
+// tree. The whole value of a sensitive key is replaced, whatever its type.
+func maskJSONValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, nested := range typed {
+			if isSensitiveKey(key) {
+				typed[key] = maskedValue
+				continue
+			}
+			typed[key] = maskJSONValue(nested)
+		}
+		return typed
+	case []any:
+		for i, item := range typed {
+			typed[i] = maskJSONValue(item)
+		}
+		return typed
+	default:
+		return value
+	}
 }

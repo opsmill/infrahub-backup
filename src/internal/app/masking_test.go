@@ -20,8 +20,9 @@ func TestIsSensitiveKey(t *testing.T) {
 		{"plain username", "username", false},
 		{"plain host", "INFRAHUB_HOST", false},
 		{"empty key", "", false},
-		{"pass alone is not password", "default_pass", false},
-		{"requirepass is not password", "requirepass", false},
+		{"pass substring matches", "default_pass", true},
+		{"redis requirepass matches", "requirepass", true},
+		{"passphrase matches", "SSL_PASSPHRASE", true},
 	}
 
 	for _, tt := range tests {
@@ -122,6 +123,11 @@ func TestMaskConfigPairs(t *testing.T) {
 			want:  "auth-token\n" + maskedValue,
 		},
 		{
+			name:  "redis requirepass masked",
+			input: "requirepass\nhunter2",
+			want:  "requirepass\n" + maskedValue,
+		},
+		{
 			name:  "mixed pairs",
 			input: "maxmemory\n100mb\naccess-token\nabc123\nappendonly\nno",
 			want:  "maxmemory\n100mb\naccess-token\n" + maskedValue + "\nappendonly\nno",
@@ -159,6 +165,11 @@ func TestMaskErlangConfig(t *testing.T) {
 			want:  "{cookie_secret," + maskedValue + "},",
 		},
 		{
+			name:  "rabbitmq default_pass masked",
+			input: `{default_pass,<<"guest">>}`,
+			want:  "{default_pass," + maskedValue + "}",
+		},
+		{
 			name:  "non-sensitive tuple untouched",
 			input: `{default_user,<<"guest">>},`,
 			want:  `{default_user,<<"guest">>},`,
@@ -194,6 +205,50 @@ func TestMaskErlangConfig(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := maskErlangConfig(tt.input); got != tt.want {
 				t.Errorf("maskErlangConfig(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMaskJSON(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "top-level sensitive key masked",
+			input: `{"username":"admin","password":"hunter2"}`,
+			want:  "{\n    \"password\": \"" + maskedValue + "\",\n    \"username\": \"admin\"\n}",
+		},
+		{
+			name:  "nested objects and arrays walked",
+			input: `{"security":{"secret_key":"abc"},"servers":[{"api_token":"t"},{"host":"h"}]}`,
+			want: "{\n    \"security\": {\n        \"secret_key\": \"" + maskedValue + "\"\n    },\n" +
+				"    \"servers\": [\n        {\n            \"api_token\": \"" + maskedValue + "\"\n        },\n" +
+				"        {\n            \"host\": \"h\"\n        }\n    ]\n}",
+		},
+		{
+			name:  "sensitive key with object value fully replaced",
+			input: `{"secrets":{"inner":"value"}}`,
+			want:  "{\n    \"secrets\": \"" + maskedValue + "\"\n}",
+		},
+		{
+			name:  "non-JSON input returned unchanged",
+			input: "HTTP 502 Bad Gateway",
+			want:  "HTTP 502 Bad Gateway",
+		},
+		{
+			name:  "empty input returned unchanged",
+			input: "",
+			want:  "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := maskJSON(tt.input); got != tt.want {
+				t.Errorf("maskJSON(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
 	}
