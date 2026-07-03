@@ -266,7 +266,10 @@ The codebase uses explicit error wrapping with `fmt.Errorf` for context. All com
 
 - Go 1.25.0 + kloset v1.0.13 (Plakar core), integration-fs (storage), cobra, logrus, viper (002-plakar-integration)
 - Plakar repository (local filesystem or S3 via integration backends) (002-plakar-integration)
+- Go 1.25.0 + cobra, viper, logrus; Docker/Kubernetes via `docker`/`kubectl` CLI shell-out through `CommandExecutor` — no client-go or Docker SDK (003-collect-tool)
+- Local filesystem bundle output under `--output-dir` (default `./infrahub_bundles`); no network egress beyond the target deployment (003-collect-tool)
 
 ## Recent Changes
 
+- 003-collect-tool: Added `infrahub-collect` troubleshooting-bundle binary (collector framework, log/metrics primitives on both backends, key-name secret masking, bundle manifest)
 - 002-plakar-integration: Added kloset (Plakar core library), integration-fs (filesystem storage/exporter), cobra, logrus

@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opsmill.io/schemas/infrahub-collect/bundle_information.json",
+  "title": "Infrahub Collect bundle manifest (bundle_information.json)",
+  "type": "object",
+  "required": [
+    "manifest_version",
+    "collect_id",
+    "created_at",
+    "tool_version",
+    "infrahub_version",
+    "environment",
+    "log_lines",
+    "collectors"
+  ],
+  "properties": {
+    "manifest_version": {
+      "type": "integer",
+      "description": "Date-serial manifest schema version, e.g. 2026070200"
+    },
+    "collect_id": {
+      "type": "string",
+      "pattern": "^[0-9]{8}_[0-9]{6}$",
+      "description": "UTC timestamp identifier, shared with the archive filename"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC3339 UTC creation timestamp"
+    },
+    "tool_version": {
+      "type": "string",
+      "description": "infrahub-collect build revision"
+    },
+    "infrahub_version": {
+      "type": "string",
+      "description": "Detected Infrahub version; empty when the server was unreachable"
+    },
+    "environment": {
+      "type": "string",
+      "enum": ["docker", "kubernetes"]
+    },
+    "log_lines": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Effective per-container log line cap for this run"
+    },
+    "collectors": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name", "status"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Stable collector identifier, e.g. logs/infrahub-server, cache-status, benchmark"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["success", "failed", "skipped"]
+          },
+          "reason": {
+            "type": "string",
+            "description": "Required when status is failed or skipped"
+          }
+        },
+        "if": {
+          "properties": { "status": { "enum": ["failed", "skipped"] } }
+        },
+        "then": {
+          "required": ["name", "status", "reason"]
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}
