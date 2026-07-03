@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/sirupsen/logrus"
 )
@@ -87,6 +86,7 @@ func collectServiceLogs(cc *collectContext, service string) error {
 
 	counts := podContainerCounts(replicas)
 	failures := []string{}
+	var timeout *timeoutError
 	for _, replica := range replicas {
 		multiContainer := counts[replica.Pod] > 1
 
@@ -94,6 +94,7 @@ func collectServiceLogs(cc *collectContext, service string) error {
 		if err := writeReplicaLog(cb, replica, cc.opts.LogLines, false, filepath.Join(serviceDir, filename)); err != nil {
 			logrus.Warnf("Failed to collect logs for %s: %v", filename, err)
 			failures = append(failures, fmt.Sprintf("%s: %v", filename, err))
+			timeout = captureTimeout(timeout, err)
 			continue
 		}
 
@@ -107,13 +108,11 @@ func collectServiceLogs(cc *collectContext, service string) error {
 		if err := writeReplicaLog(cb, replica, cc.opts.LogLines, true, filepath.Join(serviceDir, previousName)); err != nil {
 			logrus.Warnf("Previous logs unavailable for %s: %v", filename, err)
 			failures = append(failures, fmt.Sprintf("previous logs unavailable for %s: %v", filename, err))
+			timeout = captureTimeout(timeout, err)
 		}
 	}
 
-	if len(failures) > 0 {
-		return fmt.Errorf("partial log collection for %s: %s", service, strings.Join(failures, "; "))
-	}
-	return nil
+	return partialError(fmt.Sprintf("partial log collection for %s", service), failures, timeout)
 }
 
 // podContainerCounts counts replicas per pod, detecting multi-container pods
@@ -163,12 +162,18 @@ func writeReplicaLog(cb collectBackend, replica Replica, tailLines int, previous
 	if err != nil {
 		return fmt.Errorf("failed to start log stream: %w", err)
 	}
-
-	file, err := os.Create(path)
-	if err != nil {
+	// Always close the reader: on the Docker combined-pipe path it is the read
+	// end of an os.Pipe that leaks a file descriptor otherwise (FIX-6). On the
+	// kubectl stdout-pipe path Wait already closes it, so this is a harmless
+	// second close.
+	defer func() {
 		if closeErr := reader.Close(); closeErr != nil {
 			logrus.Debugf("Failed to close log stream for %s: %v", path, closeErr)
 		}
+	}()
+
+	file, err := os.Create(path)
+	if err != nil {
 		if waitErr := wait(); waitErr != nil {
 			logrus.Debugf("Log command for %s exited with error: %v", path, waitErr)
 		}

@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -11,6 +12,27 @@ import (
 
 	"github.com/sirupsen/logrus"
 )
+
+// errNoPodsMatched is returned by GetAllPods when kubectl calls succeeded but
+// no pod matched the service. It is distinct from a real kubectl/cluster
+// failure so callers (ServiceReplicas) can record "service not deployed"
+// (skipped) only for a genuine empty match, and surface API/RBAC/cluster
+// errors as collector failures instead of masking them (FIX-2).
+var errNoPodsMatched = errors.New("no pods matched the service")
+
+// podRunner executes a kubectl command and returns its trimmed output. The
+// shared pod-resolution helpers (getPodForService, GetAllPods — used by the
+// backup tool) pass the unbounded executor.runCommand; the collect primitives
+// pass a timeout-bounded runner so a wedged API server cannot hang the bundle
+// run before the exec/copy timeout even applies (research R2, FIX-5).
+type podRunner func(name string, args ...string) (string, error)
+
+// boundedRunner returns a podRunner that bounds every kubectl call by timeout.
+func (k *KubernetesBackend) boundedRunner(ctx context.Context, timeout time.Duration) podRunner {
+	return func(name string, args ...string) (string, error) {
+		return k.executor.runCommandContext(ctx, timeout, name, args...)
+	}
+}
 
 type KubernetesBackend struct {
 	config       *Configuration
@@ -238,14 +260,31 @@ func (k *KubernetesBackend) getPodStatuses(service string) ([]string, error) {
 	return statuses, nil
 }
 
+// getPodForService resolves a single pod for a service using the unbounded
+// executor. It is the shared helper used by the backup tool; its behavior is
+// unchanged.
 func (k *KubernetesBackend) getPodForService(service string) (string, error) {
+	return k.getPodForServiceWith(k.executor.runCommand, service)
+}
+
+// getPodForServiceContext is the timeout-bounded pod resolver the collect
+// primitives use so a hung API server cannot stall the run before the exec/copy
+// timeout applies (research R2, FIX-5). It shares getPodForServiceWith with the
+// unbounded getPodForService, differing only in the runner.
+func (k *KubernetesBackend) getPodForServiceContext(ctx context.Context, timeout time.Duration, service string) (string, error) {
+	return k.getPodForServiceWith(k.boundedRunner(ctx, timeout), service)
+}
+
+// getPodForServiceWith resolves a single pod for a service via the supplied
+// runner, caching the result. HA clusters resolve to the primary pod.
+func (k *KubernetesBackend) getPodForServiceWith(run podRunner, service string) (string, error) {
 	if pod, ok := k.podCache[service]; ok && pod != "" {
 		return pod, nil
 	}
 
 	selectors := k.podSelectors(service)
 	for _, selector := range selectors {
-		output, err := k.executor.runCommand("kubectl", "get", "pods", "-n", k.namespace, "-l", selector, "-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}")
+		output, err := run("kubectl", "get", "pods", "-n", k.namespace, "-l", selector, "-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}")
 		if err != nil {
 			continue
 		}
@@ -253,7 +292,7 @@ func (k *KubernetesBackend) getPodForService(service string) (string, error) {
 		if len(pods) > 0 {
 			// If multiple pods found, try to find the primary (for HA clusters like CloudNativePG)
 			if len(pods) > 1 {
-				if primary := k.findPrimaryPod(pods); primary != "" {
+				if primary := k.findPrimaryPod(run, pods); primary != "" {
 					k.podCache[service] = primary
 					return primary, nil
 				}
@@ -263,7 +302,7 @@ func (k *KubernetesBackend) getPodForService(service string) (string, error) {
 		}
 	}
 
-	output, err := k.executor.runCommand("kubectl", "get", "pods", "-n", k.namespace, "-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}")
+	output, err := run("kubectl", "get", "pods", "-n", k.namespace, "-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}")
 	if err != nil {
 		return "", err
 	}
@@ -277,11 +316,28 @@ func (k *KubernetesBackend) getPodForService(service string) (string, error) {
 	return "", fmt.Errorf("no pods found for service %s in namespace %s", service, k.namespace)
 }
 
-// GetAllPods returns all pod names for a given service
+// GetAllPods returns all pod names for a given service using the unbounded
+// executor (shared helper used by the backup tool). It returns errNoPodsMatched
+// only when kubectl calls succeeded but nothing matched, and the wrapped
+// kubectl error when the cluster/API itself is unreachable (FIX-2).
 func (k *KubernetesBackend) GetAllPods(service string) ([]string, error) {
+	return k.getAllPodsWith(k.executor.runCommand, service)
+}
+
+// getAllPodsContext is the timeout-bounded pod enumerator the collect primitives
+// use (research R2, FIX-5).
+func (k *KubernetesBackend) getAllPodsContext(ctx context.Context, timeout time.Duration, service string) ([]string, error) {
+	return k.getAllPodsWith(k.boundedRunner(ctx, timeout), service)
+}
+
+// getAllPodsWith enumerates every pod backing a service via the supplied
+// runner. A successful-but-empty match returns errNoPodsMatched; a failed
+// fallback kubectl call returns the wrapped kubectl error so cluster failures
+// are never mistaken for an undeployed service (FIX-2).
+func (k *KubernetesBackend) getAllPodsWith(run podRunner, service string) ([]string, error) {
 	selectors := k.podSelectors(service)
 	for _, selector := range selectors {
-		output, err := k.executor.runCommand("kubectl", "get", "pods", "-n", k.namespace, "-l", selector, "-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}")
+		output, err := run("kubectl", "get", "pods", "-n", k.namespace, "-l", selector, "-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}")
 		if err != nil {
 			continue
 		}
@@ -294,21 +350,23 @@ func (k *KubernetesBackend) GetAllPods(service string) ([]string, error) {
 	// Fallback: substring match on pod names, mirroring getPodForService. The
 	// Helm chart labels some pods with a different service value than the
 	// canonical name (e.g. infrahub-server pods carry infrahub/service=server),
-	// so label selectors alone would miss them.
-	output, err := k.executor.runCommand("kubectl", "get", "pods", "-n", k.namespace, "-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}")
-	if err == nil {
-		pods := []string{}
-		for _, name := range nonEmptyLines(output) {
-			if strings.Contains(name, service) {
-				pods = append(pods, name)
-			}
-		}
-		if len(pods) > 0 {
-			return pods, nil
+	// so label selectors alone would miss them. A failure here means the
+	// cluster/API is unreachable, not that the service is absent.
+	output, err := run("kubectl", "get", "pods", "-n", k.namespace, "-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}")
+	if err != nil {
+		return nil, fmt.Errorf("failed to list pods in namespace %s: %w", k.namespace, err)
+	}
+	pods := []string{}
+	for _, name := range nonEmptyLines(output) {
+		if strings.Contains(name, service) {
+			pods = append(pods, name)
 		}
 	}
+	if len(pods) > 0 {
+		return pods, nil
+	}
 
-	return nil, fmt.Errorf("no pods found for service %s", service)
+	return nil, fmt.Errorf("no pods found for service %s in namespace %s: %w", service, k.namespace, errNoPodsMatched)
 }
 
 // KubernetesBackend implements the collect-side primitives (spec
@@ -318,16 +376,48 @@ var (
 	_ collectBackend = (*KubernetesBackend)(nil)
 	_ contextExecer  = (*KubernetesBackend)(nil)
 	_ replicaExecer  = (*KubernetesBackend)(nil)
+	_ contextCopier  = (*KubernetesBackend)(nil)
 )
 
+// buildExecArgsContext resolves the pod under a bounded runner and constructs
+// kubectl exec arguments, so the pod-resolution kubectl call is bounded too
+// (FIX-5) rather than only the exec that follows.
+func (k *KubernetesBackend) buildExecArgsContext(ctx context.Context, timeout time.Duration, service string, command []string, opts *ExecOptions) ([]string, error) {
+	pod, err := k.getPodForServiceContext(ctx, timeout, service)
+	if err != nil {
+		return nil, err
+	}
+	finalCmd := k.prepareCommand(command, opts)
+	args := []string{"exec", "-n", k.namespace, pod, "--"}
+	args = append(args, finalCmd...)
+	return args, nil
+}
+
 // ExecContext is the timeout-bounded variant of Exec used by the bundle
-// collectors (research R2: 60s per status dump).
+// collectors (research R2: 60s per status dump). Both the pod resolution and
+// the exec itself are bounded (FIX-5).
 func (k *KubernetesBackend) ExecContext(ctx context.Context, timeout time.Duration, service string, command []string, opts *ExecOptions) (string, error) {
-	args, err := k.buildExecArgs(service, command, opts)
+	args, err := k.buildExecArgsContext(ctx, timeout, service, command, opts)
 	if err != nil {
 		return "", err
 	}
 	return k.executor.runCommandContext(ctx, timeout, "kubectl", args...)
+}
+
+// CopyFromContext is the timeout-bounded variant of CopyFrom used by the bundle
+// collectors (research R2, FIX-1). Pod resolution is bounded by the exec
+// timeout (a quick metadata lookup) while the copy itself gets the supplied
+// transfer timeout. The shared CopyFrom is left untouched for the backup tool.
+func (k *KubernetesBackend) CopyFromContext(ctx context.Context, timeout time.Duration, service, src, dest string) error {
+	pod, err := k.getPodForServiceContext(ctx, collectExecTimeout, service)
+	if err != nil {
+		return err
+	}
+	source := fmt.Sprintf("%s/%s:%s", k.namespace, pod, src)
+	if _, err := k.executor.runCommandContext(ctx, timeout, "kubectl", "cp", source, dest); err != nil {
+		return err
+	}
+	return nil
 }
 
 // ExecReplica executes a command in one specific replica (pod container),
@@ -377,11 +467,17 @@ func parsePodContainerStatuses(service, pod, output string) ([]Replica, error) {
 // valid empty enumeration (nil, nil) so callers can record it as skipped
 // rather than failed.
 func (k *KubernetesBackend) ServiceReplicas(service string) ([]Replica, error) {
-	pods, err := k.GetAllPods(service)
+	pods, err := k.getAllPodsContext(context.Background(), collectExecTimeout, service)
 	if err != nil {
-		// GetAllPods only errors when no pods matched any selector: the
-		// service is not deployed in this namespace.
-		return nil, nil
+		if errors.Is(err, errNoPodsMatched) {
+			// kubectl succeeded but nothing matched: the service is genuinely
+			// not deployed in this namespace, so callers record it as skipped.
+			return nil, nil
+		}
+		// A real kubectl/cluster failure (API/RBAC/unreachable) must surface so
+		// the collector records failed with the reason instead of masquerading
+		// as "service not deployed" (FIX-2).
+		return nil, fmt.Errorf("failed to enumerate %s pods: %w", service, err)
 	}
 
 	replicas := []Replica{}
