@@ -86,10 +86,10 @@ Single Go project: binaries in `src/cmd/<name>/main.go`, all logic in `src/inter
 
 ### Implementation for User Story 2
 
-- [ ] T029 [US2] Implement `ServiceReplicas` on `DockerBackend` in `src/internal/app/environment_docker.go`: `docker compose -p <proj> ps <service>` → one `Replica` per container using the container **name** (critique P2)
-- [ ] T030 [US2] Implement `ReplicaLogs` on `DockerBackend`: `docker logs --tail <n> <container>` via the timeout-bounded pipe primitive; `previous` never requested on Docker
-- [ ] T031 [P] [US2] Implement `Metrics` on `DockerBackend`: `docker stats --no-stream` over the project's containers
-- [ ] T032 [US2] E2E test `tests/e2e/test_docker_collect.py` (`-m docker`): full bundle with parity content and schema-validated manifest; project selection with/without `--project` (US2 scenario 2); degraded case — stop `cache`, expect exit 0 + `{"name": "cache-status", "status": "failed"}` (FR-009/SC-005); masked env output contains no plaintext secrets (FR-008); `--log-lines=500` and `INFRAHUB_LOG_LINES` precedence recorded in manifest (FR-011)
+- [X] T029 [US2] Implement `ServiceReplicas` on `DockerBackend` in `src/internal/app/environment_docker.go`: `docker compose -p <proj> ps <service>` → one `Replica` per container using the container **name** (critique P2)
+- [X] T030 [US2] Implement `ReplicaLogs` on `DockerBackend`: `docker logs --tail <n> <container>` via the timeout-bounded pipe primitive; `previous` never requested on Docker
+- [X] T031 [P] [US2] Implement `Metrics` on `DockerBackend`: `docker stats --no-stream` over the project's containers
+- [X] T032 [US2] E2E test `tests/e2e/test_docker_collect.py` (`-m docker`): full bundle with parity content and schema-validated manifest; project selection with/without `--project` (US2 scenario 2); degraded case — stop `cache`, expect exit 0 + `{"name": "cache-status", "status": "failed"}` (FR-009/SC-005); masked env output contains no plaintext secrets (FR-008); `--log-lines=500` and `INFRAHUB_LOG_LINES` precedence recorded in manifest (FR-011)
 
 **Checkpoint**: US1 and US2 both work; bundle layout identical across environments (SC-004).
 

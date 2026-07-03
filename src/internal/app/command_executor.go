@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -140,6 +141,57 @@ func (ce *CommandExecutor) runCommandPipeContext(ctx context.Context, timeout ti
 	}
 
 	return stdout, wait, nil
+}
+
+// runCommandCombinedPipeContext is runCommandPipeContext with the command's
+// stderr merged into the returned stream. `docker logs` demuxes a container's
+// output onto the matching process streams and Infrahub services log to
+// stderr, so capturing stdout alone would drop most of the log content. The
+// caller must drain the reader and then call wait(); wait() returns a
+// *timeoutError when the timeout expired before the command finished.
+func (ce *CommandExecutor) runCommandCombinedPipeContext(ctx context.Context, timeout time.Duration, name string, args ...string) (io.ReadCloser, func() error, error) {
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+
+	cmd := exec.CommandContext(cctx, name, args...)
+	logrus.Debugf("exec combined pipe (timeout %s): %s %s", timeout, name, strings.Join(args, " "))
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		cancel()
+		return nil, nil, err
+	}
+	cmd.Stdout = writer
+	cmd.Stderr = writer
+
+	if err := cmd.Start(); err != nil {
+		cancel()
+		if closeErr := reader.Close(); closeErr != nil {
+			logrus.Debugf("Failed to close pipe reader: %v", closeErr)
+		}
+		if closeErr := writer.Close(); closeErr != nil {
+			logrus.Debugf("Failed to close pipe writer: %v", closeErr)
+		}
+		return nil, nil, err
+	}
+
+	// The child process holds its own descriptor; closing the parent's copy
+	// lets the reader observe EOF as soon as the command exits.
+	if closeErr := writer.Close(); closeErr != nil {
+		logrus.Debugf("Failed to close pipe writer: %v", closeErr)
+	}
+
+	wait := func() error {
+		defer cancel()
+		if err := cmd.Wait(); err != nil {
+			if errors.Is(cctx.Err(), context.DeadlineExceeded) {
+				return &timeoutError{timeout: timeout}
+			}
+			return err
+		}
+		return nil
+	}
+
+	return reader, wait, nil
 }
 
 func (ce *CommandExecutor) runCommandQuiet(name string, args ...string) error {
