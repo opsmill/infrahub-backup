@@ -32,7 +32,12 @@ EXPECTED_COLLECTORS = {f"logs/{service}" for service in LOG_SERVICES} | {
     "task-manager-state",
     "server-info",
     "metrics",
+    "backup",
 }
+
+# Opt-in extras: always present in the manifest, skipped ("not requested")
+# unless their flag is set.
+OPT_IN_COLLECTORS = {"backup"}
 
 # Bundle directory owned by each non-log collector (contracts/bundle-layout.md).
 COLLECTOR_DIRS = {
@@ -126,6 +131,13 @@ def validate_manifest_schema(manifest: dict) -> None:
         if entry["status"] in ("failed", "skipped"):
             assert isinstance(entry.get("reason"), str) and entry["reason"], (
                 f"Collector {entry['name']!r} is {entry['status']} but has no reason"
+            )
+        if "artifact" in entry:
+            assert isinstance(entry["artifact"], str) and entry["artifact"], (
+                f"Collector {entry['name']!r} has a non-string or empty artifact: {entry['artifact']!r}"
+            )
+            assert entry["status"] == "success", (
+                f"Collector {entry['name']!r} carries an artifact but is {entry['status']}"
             )
 
 

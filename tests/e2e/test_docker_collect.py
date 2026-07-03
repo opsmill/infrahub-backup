@@ -4,16 +4,22 @@ Covers spec 003-collect-tool US2 (quickstart scenarios 3, 4, and 6): full
 bundle with parity content and a schema-validated manifest, project selection
 with and without --project, the degraded case (stopped cache container →
 exit 0 + failed manifest entry, FR-009/SC-005), masked env output (FR-008),
-and --log-lines / INFRAHUB_LOG_LINES precedence (FR-011).
+--log-lines / INFRAHUB_LOG_LINES precedence (FR-011), and US3
+(--include-backup: standard backup next to the bundle, referenced in the
+manifest, FR-014).
 
-The tests share one class-scoped compose stack; the degraded-cache test runs
-last so the stack stays healthy for the earlier scenarios.
+The tests share one class-scoped compose stack; the disruptive scenarios run
+last so the stack stays healthy for the earlier ones: the degraded-cache test
+stops/starts the cache container, and the include-backup test — the very last
+— stops and restarts application containers through the inherited backup
+behavior.
 """
 
 import json
 import os
 import re
 import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -21,6 +27,7 @@ from infrahub_sdk.testing.docker import TestInfrahubDockerClient
 from infrahub_testcontainers.container import InfrahubDockerCompose
 
 from tests.helpers.bundle import (
+    OPT_IN_COLLECTORS,
     assert_bundle_layout,
     assert_collector_outcomes,
     find_bundle,
@@ -28,7 +35,7 @@ from tests.helpers.bundle import (
     read_bundle_member,
     validate_manifest_schema,
 )
-from tests.helpers.utils import run_collect
+from tests.helpers.utils import find_latest_backup, run_collect, wait_for_http
 
 # The compose stack scales task-worker to 2 so per-replica collection on a
 # scaled compose service is observable (FR-002).
@@ -165,10 +172,14 @@ class TestDockerCollect(TestInfrahubDockerClient):
         statuses = assert_collector_outcomes(manifest)
 
         # Parity content (US2 scenario 1): every collector succeeds on a
-        # healthy stack except the optional service that is scaled to zero.
+        # healthy stack except the optional service that is scaled to zero
+        # and the opt-in extras, which are skipped when not requested.
         assert statuses["logs/task-manager-background-svc"] == "skipped"
         failed = {name: status for name, status in statuses.items() if status != "success"}
         failed.pop("logs/task-manager-background-svc")
+        for extra in OPT_IN_COLLECTORS:
+            assert statuses[extra] == "skipped", f"Opt-in collector {extra} must be skipped when not requested"
+            failed.pop(extra)
         assert not failed, f"Collectors did not succeed on a healthy stack: {failed}"
 
         # Layout per contracts/bundle-layout.md — identical to Kubernetes (SC-004)
@@ -263,8 +274,8 @@ class TestDockerCollect(TestInfrahubDockerClient):
     async def test_collect_degraded_cache(self, infrahub_compose, infrahub_port, collect_binary, tmp_path):
         """FR-009/SC-005 (quickstart scenario 4): stopped cache → exit 0 + failed entry.
 
-        Runs last in the class: it degrades the shared stack and restores it
-        afterwards.
+        Runs after the healthy-stack scenarios: it degrades the shared stack
+        and restores it afterwards.
         """
         project = infrahub_compose.project_name
         output_dir = tmp_path / "bundles"
@@ -295,3 +306,62 @@ class TestDockerCollect(TestInfrahubDockerClient):
         # A deployed-but-stopped container still yields its logs (FR-009)
         assert statuses["logs/cache"] == "success", "logs of the stopped cache container must still be collected"
         assert any(name.startswith("bundle/logs/cache/") for name in file_names)
+
+    async def test_collect_include_backup(self, infrahub_compose, infrahub_port, collect_binary, tmp_path):
+        """US3 scenario 1 (FR-014): --include-backup creates a standard backup
+        next to the bundle and records it in the manifest.
+
+        Runs last in the class: the delegated backup follows the standard
+        backup behavior, which stops and restarts application containers.
+        """
+        project = infrahub_compose.project_name
+        output_dir = tmp_path / "bundles"
+        backup_dir = tmp_path / "backups"
+
+        # run_collect raises on a non-zero exit, so returning proves exit 0
+        run_collect(
+            collect_binary,
+            [
+                "--project",
+                project,
+                "--output-dir",
+                str(output_dir),
+                "--backup-dir",
+                str(backup_dir),
+                "create",
+                "--include-backup",
+            ],
+        )
+
+        try:
+            # The backup artifact is a standard backup archive next to the
+            # bundle (not embedded in it), carrying the backup metadata.
+            backup_file = find_latest_backup(backup_dir)
+            with tarfile.open(backup_file, "r:gz") as tar:
+                metadata_file = tar.extractfile("backup/backup_information.json")
+                assert metadata_file is not None, "backup archive is missing backup_information.json"
+                backup_metadata = json.loads(metadata_file.read())
+            assert backup_metadata["backup_id"] == backup_file.name.removesuffix(".tar.gz"), (
+                f"Backup metadata id {backup_metadata['backup_id']!r} does not match {backup_file.name}"
+            )
+
+            # The manifest references the backup; the rest of the plan still ran
+            bundle_path = find_bundle(output_dir)
+            file_names, manifest = read_bundle_archive(bundle_path)
+            validate_manifest_schema(manifest)
+            statuses = assert_collector_outcomes(manifest)
+            assert statuses["backup"] == "success", f"backup collector = {statuses['backup']}, want success"
+
+            entries = {entry["name"]: entry for entry in manifest["collectors"]}
+            assert entries["backup"].get("artifact") == str(backup_file), (
+                f"Manifest backup artifact {entries['backup'].get('artifact')!r} "
+                f"does not reference the produced backup {backup_file}"
+            )
+
+            # The backup stays a sibling artifact, never embedded in the bundle
+            embedded_archives = [name for name in file_names if name.endswith(".tar.gz")]
+            assert not embedded_archives, f"Backup archive embedded in the bundle: {embedded_archives}"
+        finally:
+            # The inherited backup behavior stopped/restarted app containers;
+            # wait for recovery so class teardown sees a healthy deployment.
+            await wait_for_http(f"http://localhost:{infrahub_port}/api/config", timeout=180.0, interval=5.0)

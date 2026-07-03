@@ -28,11 +28,15 @@ const (
 )
 
 // CollectorResult records the outcome of one collector in the bundle
-// manifest. Reason is required whenever Status is not success.
+// manifest. Reason is required whenever Status is not success. Artifact
+// optionally references a filesystem artifact the collector produced outside
+// the bundle (e.g. the --include-backup archive path); it is only ever set
+// on success.
 type CollectorResult struct {
-	Name   string          `json:"name"`
-	Status collectorStatus `json:"status"`
-	Reason string          `json:"reason,omitempty"`
+	Name     string          `json:"name"`
+	Status   collectorStatus `json:"status"`
+	Reason   string          `json:"reason,omitempty"`
+	Artifact string          `json:"artifact,omitempty"`
 }
 
 // BundleManifest is the collect-side sibling of BackupMetadata, serialized as
@@ -73,6 +77,12 @@ func newBundleManifest(collectID, environment string, logLines int) *BundleManif
 // recordSuccess appends a success outcome for a collector.
 func (m *BundleManifest) recordSuccess(name string) {
 	m.Collectors = append(m.Collectors, CollectorResult{Name: name, Status: collectorStatusSuccess})
+}
+
+// recordSuccessArtifact appends a success outcome referencing a filesystem
+// artifact produced outside the bundle (e.g. the --include-backup archive).
+func (m *BundleManifest) recordSuccessArtifact(name, artifact string) {
+	m.Collectors = append(m.Collectors, CollectorResult{Name: name, Status: collectorStatusSuccess, Artifact: artifact})
 }
 
 // recordFailed appends a failed outcome with a human-readable reason.

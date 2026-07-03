@@ -63,6 +63,10 @@
           "reason": {
             "type": "string",
             "description": "Required when status is failed or skipped"
+          },
+          "artifact": {
+            "type": "string",
+            "description": "Optional path of a filesystem artifact the collector produced outside the bundle (e.g. the --include-backup archive); only present on success"
           }
         },
         "if": {
