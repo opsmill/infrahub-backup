@@ -1,7 +1,7 @@
 .PHONY: build build-all clean install test lint fmt vet help docker-build docker-build-multi docker-push
 
 # Variables
-BINARIES=infrahub-backup infrahub-taskmanager
+BINARIES=infrahub-backup infrahub-taskmanager infrahub-collect
 BUILD_DIR=$(shell pwd)/bin
 SRC_ROOT=./src
 VERSION?=

@@ -76,11 +76,21 @@
             };
           });
 
+          infrahub-collect = pkgs.buildGoModule (commonAttrs // {
+            pname = "infrahub-collect";
+            subPackages = [ "src/cmd/infrahub-collect" ];
+            meta = commonAttrs.meta // {
+              description = "Troubleshooting bundle collection tool for Infrahub instances";
+              mainProgram = "infrahub-collect";
+            };
+          });
+
           default = pkgs.symlinkJoin {
             name = "infrahub-ops-cli-${version}";
             paths = [
               self.packages.${system}.infrahub-backup
               self.packages.${system}.infrahub-taskmanager
+              self.packages.${system}.infrahub-collect
             ];
           };
         };
