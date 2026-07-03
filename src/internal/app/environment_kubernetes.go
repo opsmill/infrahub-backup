@@ -1,8 +1,10 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -288,4 +290,111 @@ func (k *KubernetesBackend) GetAllPods(service string) ([]string, error) {
 		}
 	}
 	return nil, fmt.Errorf("no pods found for service %s", service)
+}
+
+// KubernetesBackend implements the collect-side primitives (spec
+// 003-collect-tool, research R3/R4).
+var _ collectBackend = (*KubernetesBackend)(nil)
+
+// kubectlContainerStatusArgs builds the kubectl arguments that list one
+// "<container> <restartCount>" pair per line for a pod's containers.
+func kubectlContainerStatusArgs(namespace, pod string) []string {
+	return []string{
+		"get", "pod", pod, "-n", namespace,
+		"-o", "jsonpath={range .status.containerStatuses[*]}{.name}{\" \"}{.restartCount}{\"\\n\"}{end}",
+	}
+}
+
+// parsePodContainerStatuses converts kubectlContainerStatusArgs output into
+// one Replica per pod container, with Restarted derived from that container's
+// restartCount (critique E2: restart counts live per container).
+func parsePodContainerStatuses(service, pod, output string) ([]Replica, error) {
+	replicas := []Replica{}
+	for _, line := range nonEmptyLines(output) {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			return nil, fmt.Errorf("unexpected container status line %q for pod %s", line, pod)
+		}
+		restarts, err := strconv.Atoi(fields[1])
+		if err != nil {
+			return nil, fmt.Errorf("invalid restart count %q for container %s/%s: %w", fields[1], pod, fields[0], err)
+		}
+		replicas = append(replicas, Replica{
+			Service:   service,
+			Pod:       pod,
+			Container: fields[0],
+			Restarted: restarts > 0,
+		})
+	}
+	return replicas, nil
+}
+
+// ServiceReplicas enumerates one Replica per container of every pod backing a
+// service, sorted by pod then container. A service with no matching pods is a
+// valid empty enumeration (nil, nil) so callers can record it as skipped
+// rather than failed.
+func (k *KubernetesBackend) ServiceReplicas(service string) ([]Replica, error) {
+	pods, err := k.GetAllPods(service)
+	if err != nil {
+		// GetAllPods only errors when no pods matched any selector: the
+		// service is not deployed in this namespace.
+		return nil, nil
+	}
+
+	replicas := []Replica{}
+	for _, pod := range pods {
+		args := kubectlContainerStatusArgs(k.namespace, pod)
+		output, err := k.executor.runCommandContext(context.Background(), collectExecTimeout, "kubectl", args...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read container statuses for pod %s: %w", pod, err)
+		}
+		podReplicas, err := parsePodContainerStatuses(service, pod, output)
+		if err != nil {
+			return nil, err
+		}
+		replicas = append(replicas, podReplicas...)
+	}
+
+	sort.Slice(replicas, func(i, j int) bool {
+		if replicas[i].Pod != replicas[j].Pod {
+			return replicas[i].Pod < replicas[j].Pod
+		}
+		return replicas[i].Container < replicas[j].Container
+	})
+	return replicas, nil
+}
+
+// kubectlLogArgs builds the kubectl logs arguments for one replica.
+func kubectlLogArgs(namespace string, replica Replica, tailLines int, previous bool) []string {
+	args := []string{
+		"logs", "-n", namespace, replica.Pod,
+		"-c", replica.Container,
+		fmt.Sprintf("--tail=%d", tailLines),
+	}
+	if previous {
+		args = append(args, "--previous")
+	}
+	return args
+}
+
+// ReplicaLogs streams a replica's logs through kubectl, bounded by the
+// collect transfer timeout (research R2) so a hung kubelet cannot stall the
+// whole run.
+func (k *KubernetesBackend) ReplicaLogs(replica Replica, tailLines int, previous bool) (io.ReadCloser, func() error, error) {
+	args := kubectlLogArgs(k.namespace, replica, tailLines, previous)
+	return k.executor.runCommandPipeContext(context.Background(), collectTransferTimeout, "kubectl", args...)
+}
+
+// Metrics captures one-shot pod resource metrics via kubectl top. A missing
+// metrics-server surfaces as a normal error so the metrics collector records
+// failed in the manifest without aborting the run (research R4).
+func (k *KubernetesBackend) Metrics() (string, error) {
+	output, err := k.executor.runCommandContext(context.Background(), collectExecTimeout, "kubectl", "top", "pods", "-n", k.namespace)
+	if err != nil {
+		if output != "" {
+			return "", fmt.Errorf("kubectl top pods failed: %w: %s", err, output)
+		}
+		return "", fmt.Errorf("kubectl top pods failed: %w", err)
+	}
+	return output, nil
 }
