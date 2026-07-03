@@ -103,9 +103,9 @@ Single Go project: binaries in `src/cmd/<name>/main.go`, all logic in `src/inter
 
 ### Implementation for User Story 3
 
-- [ ] T033 [US3] Implement the include-backup collector in `src/internal/app/collect_extras.go`: invoke existing `CreateBackup` unmodified (non-interactive defaults: no S3 upload, no redaction, no encryption — research R10), record the backup's identity/path in the manifest; backup failure → manifest `failed` + bundle still produced (US3 scenario 2)
-- [ ] T034 [US3] Unit test in `src/internal/app/collect_extras_test.go`: include-backup outcome recording for success and failure paths (fake backup runner seam), skipped when flag unset
-- [ ] T035 [US3] Extend `tests/e2e/test_docker_collect.py` with an `--include-backup` case: backup artifact created next to the bundle, manifest references it, collect exit 0
+- [X] T033 [US3] Implement the include-backup collector in `src/internal/app/collect_extras.go`: invoke existing `CreateBackup` unmodified (non-interactive defaults: no S3 upload, no redaction, no encryption — research R10), record the backup's identity/path in the manifest; backup failure → manifest `failed` + bundle still produced (US3 scenario 2)
+- [X] T034 [US3] Unit test in `src/internal/app/collect_extras_test.go`: include-backup outcome recording for success and failure paths (fake backup runner seam), skipped when flag unset
+- [X] T035 [US3] Extend `tests/e2e/test_docker_collect.py` with an `--include-backup` case: backup artifact created next to the bundle, manifest references it, collect exit 0
 
 **Checkpoint**: All three user stories independently functional.
 

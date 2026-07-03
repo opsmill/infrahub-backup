@@ -70,6 +70,24 @@ type collectContext struct {
 	// server-info collector fills infrahub_version best-effort). Outcome
 	// entries stay the orchestrator's job.
 	manifest *BundleManifest
+	// artifact is a filesystem reference handed off by the running collector
+	// (e.g. the --include-backup archive path); the orchestrator moves it
+	// into that collector's manifest entry after a successful run.
+	artifact string
+}
+
+// setArtifact hands the orchestrator a filesystem artifact reference to
+// record on the current collector's manifest entry.
+func (cc *collectContext) setArtifact(path string) {
+	cc.artifact = path
+}
+
+// takeArtifact returns and clears the pending artifact reference so it never
+// leaks into a later collector's entry.
+func (cc *collectContext) takeArtifact() string {
+	artifact := cc.artifact
+	cc.artifact = ""
+	return artifact
 }
 
 // collect resolves the active environment backend to the collect-side
@@ -125,8 +143,10 @@ func (iops *InfrahubOps) collectPlan(opts CollectOptions) []collector {
 	)
 
 	// Opt-in extras run last so the always-on diagnostics are already staged
-	// when they start:
-	// TODO(003-collect-tool T033): append the --include-backup collector.
+	// when they start. The include-backup collector inherits the standard
+	// backup behavior — it may stop/restart application containers — so it
+	// must never run before the read-only collectors.
+	plan = append(plan, includeBackupCollector(runStandardBackup))
 	// TODO(003-collect-tool T036): append the --benchmark collector.
 	return plan
 }
@@ -201,10 +221,15 @@ func (iops *InfrahubOps) runCollectPlan(backend EnvironmentBackend, opts Collect
 				reason = timeout.Error()
 			}
 			logrus.Warnf("Collector %s failed: %v", c.name, err)
+			cc.takeArtifact() // drop a failed collector's artifact reference
 			manifest.recordFailed(c.name, reason)
 			continue
 		}
-		manifest.recordSuccess(c.name)
+		if artifact := cc.takeArtifact(); artifact != "" {
+			manifest.recordSuccessArtifact(c.name, artifact)
+		} else {
+			manifest.recordSuccess(c.name)
+		}
 	}
 
 	// The manifest is finalized last so it reflects every collector outcome.

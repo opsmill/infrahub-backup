@@ -333,6 +333,7 @@ func TestCollectBundle_RegisteredPlan(t *testing.T) {
 		{Name: "task-manager-state", Status: collectorStatusSkipped, Reason: notDeployed},
 		{Name: "server-info", Status: collectorStatusSuccess},
 		{Name: "metrics", Status: collectorStatusSuccess},
+		{Name: "backup", Status: collectorStatusSkipped, Reason: "not requested"},
 	}
 	if len(manifest.Collectors) != len(wantResults) {
 		t.Fatalf("manifest has %d collector entries %+v, want %d", len(manifest.Collectors), manifest.Collectors, len(wantResults))
