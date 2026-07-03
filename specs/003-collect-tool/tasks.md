@@ -23,10 +23,10 @@ Single Go project: binaries in `src/cmd/<name>/main.go`, all logic in `src/inter
 
 **Purpose**: A buildable third binary with the full CLI surface wired (create initially a stub), so every later phase is testable via `make build`.
 
-- [ ] T001 Create `src/cmd/infrahub-collect/main.go` mirroring `src/cmd/infrahub-taskmanager/main.go`: `app.SetVersion`, `app.NewInfrahubOps`, `app.ConfigureRootCommand`, `app.AttachEnvironmentCommands`, `version` command, and a `create` command (stub RunE) registering flags per `specs/003-collect-tool/contracts/cli.md` — persistent `--output-dir` (default `./infrahub_bundles`) and create-local `--log-lines` (default 100000), `--include-backup`, `--include-queries`, `--benchmark`, each viper-bound for `INFRAHUB_*` env equivalents
-- [ ] T002 [P] Add `infrahub-collect` to the `BINARIES` variable in `Makefile` (wires `build`, `build-all`, `install`)
-- [ ] T003 [P] Add an `infrahub-collect` `buildGoModule` package and symlinkJoin entry in `flake.nix` (no `vendorHash` change — `go.mod` untouched)
-- [ ] T004 Verify `make build` produces `bin/infrahub-collect` and that `--help`, `create --help`, `version`, `environment detect|list` match `specs/003-collect-tool/contracts/cli.md`
+- [X] T001 Create `src/cmd/infrahub-collect/main.go` mirroring `src/cmd/infrahub-taskmanager/main.go`: `app.SetVersion`, `app.NewInfrahubOps`, `app.ConfigureRootCommand`, `app.AttachEnvironmentCommands`, `version` command, and a `create` command (stub RunE) registering flags per `specs/003-collect-tool/contracts/cli.md` — persistent `--output-dir` (default `./infrahub_bundles`) and create-local `--log-lines` (default 100000), `--include-backup`, `--include-queries`, `--benchmark`, each viper-bound for `INFRAHUB_*` env equivalents
+- [X] T002 [P] Add `infrahub-collect` to the `BINARIES` variable in `Makefile` (wires `build`, `build-all`, `install`)
+- [X] T003 [P] Add an `infrahub-collect` `buildGoModule` package and symlinkJoin entry in `flake.nix` (no `vendorHash` change — `go.mod` untouched)
+- [X] T004 Verify `make build` produces `bin/infrahub-collect` and that `--help`, `create --help`, `version`, `environment detect|list` match `specs/003-collect-tool/contracts/cli.md`
 
 **Checkpoint**: `bin/infrahub-collect` builds; CLI surface matches the published contract.
 
