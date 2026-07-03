@@ -116,6 +116,7 @@ var (
 	_ collectBackend = (*DockerBackend)(nil)
 	_ contextExecer  = (*DockerBackend)(nil)
 	_ replicaExecer  = (*DockerBackend)(nil)
+	_ contextCopier  = (*DockerBackend)(nil)
 )
 
 // ExecContext is the timeout-bounded variant of Exec used by the bundle
@@ -377,6 +378,19 @@ func (d *DockerBackend) CopyFrom(service, src, dest string) error {
 	source := fmt.Sprintf("%s:%s", service, src)
 	cmd := d.composeArgs("cp", source, dest)
 	if _, err := d.executor.runCommand("docker", cmd...); err != nil {
+		return err
+	}
+	return nil
+}
+
+// CopyFromContext is the timeout-bounded variant of CopyFrom used by the bundle
+// collectors (research R2, FIX-1): a wedged container or daemon can accept a
+// `docker compose cp` and never return, so the collect path must never call the
+// unbounded CopyFrom. The shared CopyFrom is left untouched for the backup tool.
+func (d *DockerBackend) CopyFromContext(ctx context.Context, timeout time.Duration, service, src, dest string) error {
+	source := fmt.Sprintf("%s:%s", service, src)
+	cmd := d.composeArgs("cp", source, dest)
+	if _, err := d.executor.runCommandContext(ctx, timeout, "docker", cmd...); err != nil {
 		return err
 	}
 	return nil

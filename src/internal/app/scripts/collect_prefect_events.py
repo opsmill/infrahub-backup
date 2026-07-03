@@ -15,6 +15,10 @@ import httpx
 DEFAULT_API_URL = "http://localhost:4200/api"
 PAGE_SIZE = 50
 EVENT_LIMIT = 200
+# Hard cap on pages followed. With PAGE_SIZE=50 and EVENT_LIMIT=200 four pages
+# suffice; the bound stops a runaway loop if the API keeps returning a truthy
+# next_page (FIX-9).
+MAX_PAGES = 20
 
 
 def main() -> int:
@@ -32,11 +36,18 @@ def main() -> int:
         total = page.get("total", 0)
         events.extend(page.get("events", []))
 
-        while len(events) < EVENT_LIMIT and page.get("next_page"):
+        pages = 1
+        while len(events) < EVENT_LIMIT and page.get("next_page") and pages < MAX_PAGES:
             response = client.get(page["next_page"])
             response.raise_for_status()
             page = response.json()
-            events.extend(page.get("events", []))
+            new_events = page.get("events", [])
+            # A truthy next_page pointing at an empty page would otherwise spin
+            # forever; stop as soon as a page yields nothing (FIX-9).
+            if not new_events:
+                break
+            events.extend(new_events)
+            pages += 1
 
     json.dump(
         {"total": total, "collected": len(events), "events": events[:EVENT_LIMIT]},

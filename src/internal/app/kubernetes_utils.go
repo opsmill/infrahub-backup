@@ -17,16 +17,19 @@ func (k *KubernetesBackend) podSelectors(service string) []string {
 	}
 }
 
-// findPrimaryPod searches for a pod with primary role label (for HA PostgreSQL clusters like CloudNativePG)
-func (k *KubernetesBackend) findPrimaryPod(pods []string) string {
+// findPrimaryPod searches for a pod with primary role label (for HA PostgreSQL
+// clusters like CloudNativePG). The runner is supplied by the caller so the
+// collect path can bound these lookups while the backup path keeps the
+// unbounded executor (FIX-5).
+func (k *KubernetesBackend) findPrimaryPod(run podRunner, pods []string) string {
 	for _, pod := range pods {
-		output, err := k.executor.runCommand("kubectl", "get", "pod", pod, "-n", k.namespace, "-o", "jsonpath={.metadata.labels.cnpg\\.io/instanceRole}")
+		output, err := run("kubectl", "get", "pod", pod, "-n", k.namespace, "-o", "jsonpath={.metadata.labels.cnpg\\.io/instanceRole}")
 		if err == nil && output == "primary" {
 			logrus.Debugf("Found primary pod via cnpg.io/instanceRole: %s", pod)
 			return pod
 		}
 		// Fallback to legacy role label
-		output, err = k.executor.runCommand("kubectl", "get", "pod", pod, "-n", k.namespace, "-o", "jsonpath={.metadata.labels.role}")
+		output, err = run("kubectl", "get", "pod", pod, "-n", k.namespace, "-o", "jsonpath={.metadata.labels.role}")
 		if err == nil && output == "primary" {
 			logrus.Debugf("Found primary pod via role label: %s", pod)
 			return pod

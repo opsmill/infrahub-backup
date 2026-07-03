@@ -166,6 +166,34 @@ func (iops *InfrahubOps) collectPlan(opts CollectOptions) []collector {
 	return plan
 }
 
+// safeRun executes a collector's run function, converting a panic into a
+// recorded failure so one misbehaving collector never aborts the whole run
+// (FR-009, FIX-3).
+func safeRun(c collector, cc *collectContext) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic: %v", r)
+		}
+	}()
+	return c.run(cc)
+}
+
+// safeSkip evaluates a collector's optional skip precondition, converting a
+// panic into an error so the orchestrator records the collector as failed
+// rather than crashing the whole run (FIX-3).
+func safeSkip(c collector, cc *collectContext) (skip bool, reason string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic: %v", r)
+		}
+	}()
+	if c.skip == nil {
+		return false, "", nil
+	}
+	skip, reason = c.skip(cc)
+	return skip, reason, nil
+}
+
 // runCollectPlan stages the bundle, runs every collector in order, finalizes
 // the manifest, and packages the archive. The staging directory is removed on
 // success, failure, and interrupt (SIGINT/SIGTERM).
@@ -216,16 +244,20 @@ func (iops *InfrahubOps) runCollectPlan(backend EnvironmentBackend, opts Collect
 			return fmt.Errorf("bundle collection interrupted: %w", ctxErr)
 		}
 
-		if c.skip != nil {
-			if skip, reason := c.skip(cc); skip {
-				logrus.Infof("Skipping %s: %s", c.name, reason)
-				manifest.recordSkipped(c.name, reason)
-				continue
-			}
+		if skip, reason, skipErr := safeSkip(c, cc); skipErr != nil {
+			// A panicking skip precondition must not abort the run (FR-009):
+			// record it as a failure and continue.
+			logrus.Warnf("Collector %s failed: %v", c.name, skipErr)
+			manifest.recordFailed(c.name, skipErr.Error())
+			continue
+		} else if skip {
+			logrus.Infof("Skipping %s: %s", c.name, reason)
+			manifest.recordSkipped(c.name, reason)
+			continue
 		}
 
 		logrus.Infof("Collecting %s", c.name)
-		if err := c.run(cc); err != nil {
+		if err := safeRun(c, cc); err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return fmt.Errorf("bundle collection interrupted: %w", ctxErr)
 			}
