@@ -2,9 +2,11 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -105,14 +107,179 @@ func (d *DockerBackend) ExecStream(service string, command []string, opts *ExecO
 	return d.executor.runCommandWithStream("docker", d.buildExecArgs(service, command, opts)...)
 }
 
-// DockerBackend provides the optional timeout-bounded exec capability the
-// bundle diagnostics collectors prefer (spec 003-collect-tool, research R2).
-var _ contextExecer = (*DockerBackend)(nil)
+// DockerBackend implements the collect-side primitives (spec 003-collect-tool,
+// research R3/R4) and the optional timeout-bounded and per-replica exec
+// capabilities the bundle diagnostics collectors prefer (research R2).
+var (
+	_ collectBackend = (*DockerBackend)(nil)
+	_ contextExecer  = (*DockerBackend)(nil)
+	_ replicaExecer  = (*DockerBackend)(nil)
+)
 
 // ExecContext is the timeout-bounded variant of Exec used by the bundle
 // collectors (research R2: 60s per status dump).
 func (d *DockerBackend) ExecContext(ctx context.Context, timeout time.Duration, service string, command []string, opts *ExecOptions) (string, error) {
 	return d.executor.runCommandContext(ctx, timeout, "docker", d.buildExecArgs(service, command, opts)...)
+}
+
+// ExecReplica executes a command in one specific container by name, unlike
+// Exec which targets a compose service (and therefore one arbitrary replica of
+// a scaled service). The bundle collectors use it to capture per-replica
+// task-worker state.
+func (d *DockerBackend) ExecReplica(ctx context.Context, timeout time.Duration, replica Replica, command []string) (string, error) {
+	args := append([]string{"exec", replica.Container}, command...)
+	return d.executor.runCommandContext(ctx, timeout, "docker", args...)
+}
+
+// composePSContainer is the subset of one `docker compose ps --format json`
+// entry the collect primitives consume.
+type composePSContainer struct {
+	Name    string `json:"Name"`
+	Service string `json:"Service"`
+	State   string `json:"State"`
+	Labels  string `json:"Labels"`
+}
+
+// parseComposePSContainers decodes `docker compose ps --format json` output.
+// Recent Compose releases emit NDJSON (one object per line); older ones emit a
+// single JSON array — both are accepted. One-off containers created by
+// `docker compose run` are excluded, and container names are normalized
+// without the leading slash some Docker APIs prepend.
+func parseComposePSContainers(output string) ([]composePSContainer, error) {
+	trimmed := strings.TrimSpace(output)
+	if trimmed == "" {
+		return []composePSContainer{}, nil
+	}
+
+	containers := []composePSContainer{}
+	if strings.HasPrefix(trimmed, "[") {
+		if err := json.Unmarshal([]byte(trimmed), &containers); err != nil {
+			return nil, fmt.Errorf("failed to parse docker compose ps output: %w", err)
+		}
+	} else {
+		for _, line := range nonEmptyLines(trimmed) {
+			var container composePSContainer
+			if err := json.Unmarshal([]byte(line), &container); err != nil {
+				return nil, fmt.Errorf("failed to parse docker compose ps line %q: %w", line, err)
+			}
+			containers = append(containers, container)
+		}
+	}
+
+	kept := make([]composePSContainer, 0, len(containers))
+	for _, container := range containers {
+		if strings.Contains(container.Labels, "com.docker.compose.oneoff=True") {
+			continue
+		}
+		container.Name = strings.TrimPrefix(container.Name, "/")
+		kept = append(kept, container)
+	}
+	return kept, nil
+}
+
+// replicasFromComposePS converts compose ps entries for one service into
+// Replicas sorted by container name: every replica of a scaled service
+// appears, each carrying its human-meaningful container name (critique P2).
+// Pod stays empty and Restarted false — previous logs do not exist on Docker.
+func replicasFromComposePS(service string, containers []composePSContainer) []Replica {
+	replicas := []Replica{}
+	for _, container := range containers {
+		if container.Service != service || container.Name == "" {
+			continue
+		}
+		replicas = append(replicas, Replica{Service: service, Container: container.Name})
+	}
+	sort.Slice(replicas, func(i, j int) bool {
+		return replicas[i].Container < replicas[j].Container
+	})
+	return replicas
+}
+
+// composePSContainers runs `docker compose ps --format json` (optionally
+// including stopped containers) and parses the entries. stdout is read through
+// the pipe primitive so compose warnings on stderr never pollute the JSON
+// stream.
+func (d *DockerBackend) composePSContainers(all bool, services ...string) ([]composePSContainer, error) {
+	psArgs := []string{"ps", "--format", "json"}
+	if all {
+		psArgs = append(psArgs, "-a")
+	}
+	psArgs = append(psArgs, services...)
+
+	reader, wait, err := d.executor.runCommandPipeContext(context.Background(), collectExecTimeout, "docker", d.composeArgs(psArgs...)...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to run docker compose ps: %w", err)
+	}
+	data, readErr := io.ReadAll(reader)
+	if waitErr := wait(); waitErr != nil {
+		return nil, fmt.Errorf("docker compose ps failed: %w", waitErr)
+	}
+	if readErr != nil {
+		return nil, fmt.Errorf("failed to read docker compose ps output: %w", readErr)
+	}
+	return parseComposePSContainers(string(data))
+}
+
+// ServiceReplicas enumerates the project's containers for one compose service.
+// Stopped containers are included (`ps -a`): a deployed-but-stopped service
+// must surface as a failed collector with its logs still collected, not vanish
+// as skipped (FR-009). A service with no containers is a valid empty
+// enumeration so callers record it as skipped.
+func (d *DockerBackend) ServiceReplicas(service string) ([]Replica, error) {
+	containers, err := d.composePSContainers(true, service)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list %s containers: %w", service, err)
+	}
+	return replicasFromComposePS(service, containers), nil
+}
+
+// dockerLogArgs builds the docker logs arguments for one replica.
+func dockerLogArgs(replica Replica, tailLines int) []string {
+	return []string{"logs", "--tail", strconv.Itoa(tailLines), replica.Container}
+}
+
+// ReplicaLogs streams one container's logs via docker logs, bounded by the
+// collect transfer timeout (research R2). The daemon demuxes container output
+// onto stdout and stderr — Infrahub services log to stderr — so both streams
+// are merged into the returned reader. Previous-container logs do not exist on
+// Docker (Restarted is always false), so previous must never be requested.
+func (d *DockerBackend) ReplicaLogs(replica Replica, tailLines int, previous bool) (io.ReadCloser, func() error, error) {
+	if previous {
+		return nil, nil, fmt.Errorf("previous container logs are not available on docker")
+	}
+	return d.executor.runCommandCombinedPipeContext(context.Background(), collectTransferTimeout, "docker", dockerLogArgs(replica, tailLines)...)
+}
+
+// Metrics captures one-shot resource statistics for the project's running
+// containers via `docker stats --no-stream` (research R4). Container names are
+// part of the default stats columns, so support can map rows to replicas.
+// Stopped containers are excluded — docker stats errors on them.
+func (d *DockerBackend) Metrics() (string, error) {
+	containers, err := d.composePSContainers(false)
+	if err != nil {
+		return "", fmt.Errorf("failed to enumerate project containers: %w", err)
+	}
+
+	names := []string{}
+	for _, container := range containers {
+		if container.Name != "" {
+			names = append(names, container.Name)
+		}
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return "", fmt.Errorf("no running containers found for project %s", d.project)
+	}
+
+	args := append([]string{"stats", "--no-stream"}, names...)
+	output, err := d.executor.runCommandContext(context.Background(), collectExecTimeout, "docker", args...)
+	if err != nil {
+		if output != "" {
+			return "", fmt.Errorf("docker stats failed: %w: %s", err, output)
+		}
+		return "", fmt.Errorf("docker stats failed: %w", err)
+	}
+	return output, nil
 }
 
 func (d *DockerBackend) ExecStreamPipe(service string, command []string, opts *ExecOptions) (io.ReadCloser, func() error, error) {

@@ -144,6 +144,69 @@ func TestRunCommandPipeContext_Timeout(t *testing.T) {
 	}
 }
 
+func TestRunCommandCombinedPipeContext_MergesStderr(t *testing.T) {
+	ce := NewCommandExecutor()
+	reader, wait, err := ce.runCommandCombinedPipeContext(context.Background(), 10*time.Second, "sh", "-c", "printf 'out\\n'; printf 'err\\n' >&2")
+	if err != nil {
+		t.Fatalf("runCommandCombinedPipeContext failed to start: %v", err)
+	}
+
+	content, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("reading combined output failed: %v", err)
+	}
+	if err := wait(); err != nil {
+		t.Fatalf("wait failed: %v", err)
+	}
+	for _, want := range []string{"out\n", "err\n"} {
+		if !strings.Contains(string(content), want) {
+			t.Errorf("combined output = %q, want it to contain %q", content, want)
+		}
+	}
+}
+
+func TestRunCommandCombinedPipeContext_ReaderSeesEOFWhenCommandExits(t *testing.T) {
+	ce := NewCommandExecutor()
+	reader, wait, err := ce.runCommandCombinedPipeContext(context.Background(), 10*time.Second, "echo", "done")
+	if err != nil {
+		t.Fatalf("runCommandCombinedPipeContext failed to start: %v", err)
+	}
+
+	// io.ReadAll only returns if the parent's write end was closed correctly;
+	// a leaked descriptor would block this read forever (test timeout).
+	if _, err := io.ReadAll(reader); err != nil {
+		t.Fatalf("reading combined output failed: %v", err)
+	}
+	if err := wait(); err != nil {
+		t.Fatalf("wait failed: %v", err)
+	}
+}
+
+func TestRunCommandCombinedPipeContext_Timeout(t *testing.T) {
+	ce := NewCommandExecutor()
+	reader, wait, err := ce.runCommandCombinedPipeContext(context.Background(), 100*time.Millisecond, "sh", "-c", "echo started; exec sleep 5")
+	if err != nil {
+		t.Fatalf("runCommandCombinedPipeContext failed to start: %v", err)
+	}
+
+	content, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("reading combined output failed: %v", err)
+	}
+	if !strings.Contains(string(content), "started") {
+		t.Errorf("output before timeout = %q, want to contain %q", content, "started")
+	}
+
+	err = wait()
+	if err == nil {
+		t.Fatal("wait succeeded, want timeout error")
+	}
+	var timeout *timeoutError
+	if !errors.As(err, &timeout) {
+		t.Fatalf("error = %v (%T), want *timeoutError", err, err)
+	}
+}
+
 func TestRunCommandPipeContext_CommandFailureKeepsStderr(t *testing.T) {
 	ce := NewCommandExecutor()
 	stdout, wait, err := ce.runCommandPipeContext(context.Background(), 10*time.Second, "sh", "-c", "echo oops >&2; exit 2")
