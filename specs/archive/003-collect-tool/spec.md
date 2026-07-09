@@ -4,7 +4,7 @@
 
 **Created**: 2026-07-02
 
-**Status**: Draft
+**Status**: Extracted
 
 **Input**: User description: "Add a new third CLI binary `infrahub-collect` (troubleshooting-bundle collection tool) to the infrahub-ops codebase, replacing the Python `invoke bundle collect` script from the main Infrahub repo and adding first-class Kubernetes support. Source: Jira INFP-415 and its Discovery Brief; upload is explicitly out of scope (deferred to INFP-581)." (Full grilled idea brief provided in conversation; confirmed decisions: third binary, parity minus benchmark with benchmark opt-in, key-name secret masking.)
 
