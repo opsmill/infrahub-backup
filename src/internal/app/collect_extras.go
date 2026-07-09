@@ -49,13 +49,21 @@ func includeBackupCollector(run backupRunner) collector {
 	}
 }
 
-// runStandardBackup delegates to the existing CreateBackup unmodified, with
-// the non-interactive `infrahub-backup create` defaults: no --force (the
-// running-tasks safety check is preserved, Principle II), all Neo4j metadata,
-// task-manager database included, no S3 upload, no sleep, no redaction, no
-// encryption (research R10). CreateBackup does not return the path it wrote,
-// so the new archive is identified by diffing the backup directory listing
-// around the call.
+// runStandardBackup delegates to the existing CreateBackup: force=true, all
+// Neo4j metadata, task-manager database included, no S3 upload, no sleep, no
+// redaction, no encryption (research R10). CreateBackup does not return the
+// path it wrote, so the new archive is identified by diffing the backup
+// directory listing around the call.
+//
+// force=true is deliberate. Without it, CreateBackup runs waitForRunningTasks,
+// an unbounded loop that only returns once zero Prefect tasks are
+// running/pending. A troubleshooting bundle is collected non-interactively
+// against a live — often busy — instance whose recurring background tasks and
+// automations never fully drain (this is why every collector is
+// timeout-bounded), so the wait would hang or, on failure, abort the backup
+// and leave no artifact. --force skips only that consistency gate; it is how
+// backups are taken non-interactively (the backup e2e suite uses it) and does
+// not weaken the backup's own integrity guarantees (metadata + checksums).
 func runStandardBackup(cc *collectContext) (string, error) {
 	backupDir := cc.iops.config.BackupDir
 
@@ -64,7 +72,7 @@ func runStandardBackup(cc *collectContext) (string, error) {
 		return "", err
 	}
 
-	if err := cc.iops.CreateBackup(false, "all", false, false, false, 0, false, false, ""); err != nil {
+	if err := cc.iops.CreateBackup(true, "all", false, false, false, 0, false, false, ""); err != nil {
 		return "", err
 	}
 
