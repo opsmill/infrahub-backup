@@ -373,10 +373,11 @@ func (k *KubernetesBackend) getAllPodsWith(run podRunner, service string) ([]str
 // 003-collect-tool, research R3/R4) and the optional timeout-bounded and
 // per-replica exec capabilities the diagnostics collectors prefer.
 var (
-	_ collectBackend = (*KubernetesBackend)(nil)
-	_ contextExecer  = (*KubernetesBackend)(nil)
-	_ replicaExecer  = (*KubernetesBackend)(nil)
-	_ contextCopier  = (*KubernetesBackend)(nil)
+	_ collectBackend      = (*KubernetesBackend)(nil)
+	_ contextExecer       = (*KubernetesBackend)(nil)
+	_ replicaExecer       = (*KubernetesBackend)(nil)
+	_ contextCopier       = (*KubernetesBackend)(nil)
+	_ deploymentDescriber = (*KubernetesBackend)(nil)
 )
 
 // buildExecArgsContext resolves the pod under a bounded runner and constructs
@@ -581,4 +582,67 @@ func (k *KubernetesBackend) Metrics() (string, error) {
 		return "", fmt.Errorf("kubectl top pods failed: %w", err)
 	}
 	return output, nil
+}
+
+// helmChartJSONPath reads, per workload in the namespace, the standard Helm
+// stamps: the helm.sh/chart label ("<name>-<version>") and the
+// meta.helm.sh/release-name annotation, tab-separated, one workload per line.
+// The dotted keys are escaped for kubectl jsonpath; the "/" needs no escaping.
+const helmChartJSONPath = `jsonpath={range .items[*]}` +
+	`{.metadata.labels.helm\.sh/chart}{"\t"}` +
+	`{.metadata.annotations.meta\.helm\.sh/release-name}{"\n"}{end}`
+
+// HelmRelease reports the Helm chart and version a Kubernetes install was
+// templated from, read from the labels/annotations Helm stamps on its
+// resources. It needs only kubectl — the helm CLI is not required — and
+// returns (nil, nil) when the workloads carry no Helm metadata (e.g. an
+// install not managed by Helm).
+func (k *KubernetesBackend) HelmRelease() (*HelmRelease, error) {
+	output, err := k.executor.runCommandContext(context.Background(), collectExecTimeout,
+		"kubectl", "get", "deployments,statefulsets", "-n", k.namespace, "-o", helmChartJSONPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read Helm metadata from namespace %s: %w", k.namespace, err)
+	}
+	return parseHelmChartLabels(output), nil
+}
+
+// parseHelmChartLabels extracts the release/chart/version from the
+// tab-separated "<chart-label>\t<release-name>" lines HelmRelease's jsonpath
+// query produces. It returns the first workload carrying a chart label, or nil
+// when none do (kubectl emits empty fields for resources without the stamps).
+func parseHelmChartLabels(output string) *HelmRelease {
+	for _, line := range nonEmptyLines(output) {
+		fields := strings.SplitN(line, "\t", 2)
+		chart := strings.TrimSpace(fields[0])
+		if chart == "" {
+			continue
+		}
+		release := &HelmRelease{}
+		if len(fields) == 2 {
+			release.ReleaseName = strings.TrimSpace(fields[1])
+		}
+		if name, version, ok := splitHelmChartLabel(chart); ok {
+			release.Chart = name
+			release.ChartVersion = version
+		} else {
+			release.Chart = chart
+		}
+		return release
+	}
+	return nil
+}
+
+// splitHelmChartLabel splits a Helm "<name>-<version>" chart label at the
+// first hyphen that begins the version — a hyphen followed by a digit, since
+// chart versions are semver. This preserves chart names with embedded hyphens
+// (infrahub-enterprise-1.2.3 → "infrahub-enterprise", "1.2.3") and versions
+// with prerelease suffixes (infrahub-1.2.3-alpha.1 → "infrahub",
+// "1.2.3-alpha.1"). It returns ok=false when no version segment is found.
+func splitHelmChartLabel(chart string) (name, version string, ok bool) {
+	for i := 0; i < len(chart)-1; i++ {
+		if chart[i] == '-' && chart[i+1] >= '0' && chart[i+1] <= '9' {
+			return chart[:i], chart[i+1:], true
+		}
+	}
+	return "", "", false
 }

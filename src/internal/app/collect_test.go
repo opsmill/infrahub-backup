@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -82,6 +83,64 @@ func newFakeCollectBackend() *fakeCollectBackend {
 		logs:    map[string]string{"infrahub-server-1": "log line\n"},
 		metrics: "CONTAINER CPU% MEM%\ninfrahub-server-1 1% 2%\n",
 	}
+}
+
+// helmDescriberBackend is a backend that reports Helm chart provenance,
+// standing in for the Kubernetes backend in populateHelmRelease tests.
+type helmDescriberBackend struct {
+	bareBackend
+	release *HelmRelease
+	err     error
+}
+
+func (h *helmDescriberBackend) HelmRelease() (*HelmRelease, error) {
+	return h.release, h.err
+}
+
+var _ deploymentDescriber = (*helmDescriberBackend)(nil)
+
+func TestPopulateHelmRelease(t *testing.T) {
+	t.Run("backend without the capability leaves helm unset", func(t *testing.T) {
+		manifest := newBundleManifest("20260703_101530", "docker", 100)
+		populateHelmRelease(&bareBackend{name: "docker"}, manifest)
+		if manifest.Helm != nil {
+			t.Errorf("Helm = %+v, want nil on a non-Helm backend", manifest.Helm)
+		}
+	})
+
+	t.Run("a detected release is recorded on the manifest", func(t *testing.T) {
+		manifest := newBundleManifest("20260703_101530", "kubernetes", 100)
+		want := &HelmRelease{ReleaseName: "infrahub", Chart: "infrahub", ChartVersion: "1.2.3"}
+		populateHelmRelease(&helmDescriberBackend{
+			bareBackend: bareBackend{name: "kubernetes"},
+			release:     want,
+		}, manifest)
+		if manifest.Helm == nil || *manifest.Helm != *want {
+			t.Errorf("Helm = %+v, want %+v", manifest.Helm, want)
+		}
+	})
+
+	t.Run("a detection error leaves helm unset without failing the run", func(t *testing.T) {
+		manifest := newBundleManifest("20260703_101530", "kubernetes", 100)
+		populateHelmRelease(&helmDescriberBackend{
+			bareBackend: bareBackend{name: "kubernetes"},
+			err:         errors.New("forbidden"),
+		}, manifest)
+		if manifest.Helm != nil {
+			t.Errorf("Helm = %+v, want nil when detection errored", manifest.Helm)
+		}
+	})
+
+	t.Run("no Helm metadata leaves helm unset", func(t *testing.T) {
+		manifest := newBundleManifest("20260703_101530", "kubernetes", 100)
+		populateHelmRelease(&helmDescriberBackend{
+			bareBackend: bareBackend{name: "kubernetes"},
+			release:     nil,
+		}, manifest)
+		if manifest.Helm != nil {
+			t.Errorf("Helm = %+v, want nil when the install is not Helm-managed", manifest.Helm)
+		}
+	})
 }
 
 // extractBundleManifest extracts the archive and parses bundle/bundle_information.json.

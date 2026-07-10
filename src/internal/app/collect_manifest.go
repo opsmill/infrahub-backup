@@ -39,6 +39,17 @@ type CollectorResult struct {
 	Artifact string          `json:"artifact,omitempty"`
 }
 
+// HelmRelease captures the Helm chart provenance of a Kubernetes install: the
+// release name and the chart name/version it was templated from. It is only
+// populated on the kubernetes backend and is best-effort — an install not
+// managed by Helm, or one whose metadata cannot be read, leaves the manifest's
+// helm field unset (omitempty).
+type HelmRelease struct {
+	ReleaseName  string `json:"release_name,omitempty"`
+	Chart        string `json:"chart,omitempty"`
+	ChartVersion string `json:"chart_version,omitempty"`
+}
+
 // BundleManifest is the collect-side sibling of BackupMetadata, serialized as
 // bundle_information.json at the bundle root. JSON field names are normative
 // (specs/003-collect-tool/contracts/manifest.schema.json).
@@ -49,6 +60,7 @@ type BundleManifest struct {
 	ToolVersion     string            `json:"tool_version"`
 	InfrahubVersion string            `json:"infrahub_version"`
 	Environment     string            `json:"environment"`
+	Helm            *HelmRelease      `json:"helm,omitempty"`
 	LogLines        int               `json:"log_lines"`
 	Collectors      []CollectorResult `json:"collectors"`
 }

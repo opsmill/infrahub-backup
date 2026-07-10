@@ -166,6 +166,33 @@ func (iops *InfrahubOps) collectPlan(opts CollectOptions) []collector {
 	return plan
 }
 
+// deploymentDescriber is an optional backend capability: report the Helm
+// chart provenance of the deployment (release name, chart, chart version) for
+// the bundle manifest. Only the Kubernetes backend implements it; Docker
+// installs are never Helm-managed.
+type deploymentDescriber interface {
+	HelmRelease() (*HelmRelease, error)
+}
+
+// populateHelmRelease best-effort fills the manifest's Helm field on backends
+// that can report it (Kubernetes). Helm metadata is deployment provenance, not
+// a collector, so a detection failure is logged at debug and simply leaves the
+// field unset rather than being recorded as a collector outcome.
+func populateHelmRelease(backend EnvironmentBackend, manifest *BundleManifest) {
+	describer, ok := backend.(deploymentDescriber)
+	if !ok {
+		return
+	}
+	helm, err := describer.HelmRelease()
+	if err != nil {
+		logrus.Debugf("Could not detect Helm chart metadata: %v", err)
+		return
+	}
+	if helm != nil {
+		manifest.Helm = helm
+	}
+}
+
 // safeRun executes a collector's run function, converting a panic into a
 // recorded failure so one misbehaving collector never aborts the whole run
 // (FR-009, FIX-3).
@@ -223,6 +250,7 @@ func (iops *InfrahubOps) runCollectPlan(backend EnvironmentBackend, opts Collect
 	collectID := generateCollectID()
 	archivePath := filepath.Join(opts.OutputDir, fmt.Sprintf("support_bundle_%s.tar.gz", collectID))
 	manifest := newBundleManifest(collectID, backend.Name(), opts.LogLines)
+	populateHelmRelease(backend, manifest)
 
 	logrus.WithFields(logrus.Fields{
 		"collect_id":  collectID,
