@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,7 +26,14 @@ type telemetryBackend struct {
 	rmPaths     []string
 }
 
+// ExecContext scripts the export and records the bounded rm cleanup. The
+// cleanup runs through cc.execDump → ExecContext (not the unbounded Exec), so
+// rm commands are separated out here rather than counted as export runs.
 func (b *telemetryBackend) ExecContext(ctx context.Context, timeout time.Duration, service string, command []string, opts *ExecOptions) (string, error) {
+	if len(command) > 0 && command[0] == "rm" {
+		b.rmPaths = append(b.rmPaths, command[len(command)-1])
+		return "", nil
+	}
 	b.ranCommands = append(b.ranCommands, command)
 	return b.execOutput, b.execErr
 }
@@ -34,13 +42,6 @@ func (b *telemetryBackend) CopyFromContext(ctx context.Context, timeout time.Dur
 	b.copiedSrc = src
 	b.copiedDest = dest
 	return os.WriteFile(dest, []byte(b.copyContent), 0644)
-}
-
-func (b *telemetryBackend) Exec(service string, command []string, opts *ExecOptions) (string, error) {
-	if len(command) > 0 && command[0] == "rm" {
-		b.rmPaths = append(b.rmPaths, command[len(command)-1])
-	}
-	return "", nil
 }
 
 func newTelemetryBackend() *telemetryBackend {
@@ -139,43 +140,69 @@ func TestCollectTelemetry_Success(t *testing.T) {
 	}
 }
 
-func TestCollectTelemetry_ExportFailure(t *testing.T) {
-	backend := newTelemetryBackend()
-	backend.execErr = fmt.Errorf("exit status 2")
-	backend.execOutput = "Usage: infrahubctl telemetry [OPTIONS]\nError: No such command 'export'."
-	cc := newTelemetryCC(t, backend, CollectOptions{TelemetryDays: 30})
+func TestCollectTelemetry_ExportFailureSkips(t *testing.T) {
+	tests := []struct {
+		name       string
+		execOutput string
+		execErr    error
+		wantReason string
+		wantErrTxt string
+	}{
+		{
+			name:       "no snapshots degrades to a friendly skip",
+			execOutput: "No telemetry snapshots found.",
+			execErr:    fmt.Errorf("exit status 2"),
+			wantReason: "no telemetry snapshots found in the requested window",
+			wantErrTxt: "No telemetry snapshots found.",
+		},
+		{
+			name:       "other CLI error keeps the reported line",
+			execOutput: "Usage: infrahubctl telemetry [OPTIONS]\nError: No such command 'export'.",
+			execErr:    fmt.Errorf("exit status 2"),
+			wantReason: "infrahubctl telemetry export could not be run: Error: No such command 'export'.",
+			wantErrTxt: "No such command",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			backend := newTelemetryBackend()
+			backend.execOutput = tt.execOutput
+			backend.execErr = tt.execErr
+			cc := newTelemetryCC(t, backend, CollectOptions{TelemetryDays: 30})
 
-	err := collectTelemetry(cc)
-	if err == nil {
-		t.Fatal("collectTelemetry succeeded, want a failure when the export command errors")
-	}
-	if !strings.Contains(err.Error(), "infrahubctl telemetry export failed") {
-		t.Errorf("error = %q, want it to name the failed export", err)
-	}
+			err := collectTelemetry(cc)
 
-	// The CLI's combined output is preserved for support; no export.json is
-	// staged when the export fails.
-	errPath := filepath.Join(cc.bundleDir, telemetryBundleDir, telemetryErrorFilename)
-	errData, readErr := os.ReadFile(errPath)
-	if readErr != nil {
-		t.Fatalf("telemetry error output missing from bundle: %v", readErr)
-	}
-	if !strings.Contains(string(errData), "No such command") {
-		t.Errorf("error output = %q, want it to preserve the CLI message", errData)
-	}
-	if _, statErr := os.Stat(filepath.Join(cc.bundleDir, telemetryBundleDir, telemetryExportFilename)); !os.IsNotExist(statErr) {
-		t.Errorf("a telemetry-export.json was staged despite the export failing (stat err: %v)", statErr)
-	}
+			// A failing export degrades to skipped, not failed.
+			var skip *collectSkipError
+			if !errors.As(err, &skip) {
+				t.Fatalf("collectTelemetry returned %v, want a *collectSkipError", err)
+			}
+			if skip.reason != tt.wantReason {
+				t.Errorf("skip reason = %q, want %q", skip.reason, tt.wantReason)
+			}
 
-	// Cleanup still runs on the failure path.
-	if !reflect.DeepEqual(backend.rmPaths, []string{telemetryExportContainerPath}) {
-		t.Errorf("cleanup rm paths = %v, want [%q]", backend.rmPaths, telemetryExportContainerPath)
+			// The CLI's combined output is preserved; no export.json is staged.
+			errData, readErr := os.ReadFile(filepath.Join(cc.bundleDir, telemetryBundleDir, telemetryErrorFilename))
+			if readErr != nil {
+				t.Fatalf("telemetry output missing from bundle: %v", readErr)
+			}
+			if !strings.Contains(string(errData), tt.wantErrTxt) {
+				t.Errorf("preserved output = %q, want it to contain %q", errData, tt.wantErrTxt)
+			}
+			if _, statErr := os.Stat(filepath.Join(cc.bundleDir, telemetryBundleDir, telemetryExportFilename)); !os.IsNotExist(statErr) {
+				t.Errorf("a telemetry-export.json was staged despite the export failing (stat err: %v)", statErr)
+			}
+
+			// Cleanup still runs on the failure path, through the bounded path.
+			if !reflect.DeepEqual(backend.rmPaths, []string{telemetryExportContainerPath}) {
+				t.Errorf("cleanup rm paths = %v, want [%q]", backend.rmPaths, telemetryExportContainerPath)
+			}
+		})
 	}
 }
 
-// telemetryTimeoutBackend times out the export exec, proving the command
-// timeout survives collectTelemetry's %w-wrap and reaches the manifest as the
-// bare contract reason (FIX-4).
+// telemetryTimeoutBackend times out the export exec, proving a command timeout
+// also degrades to skipped with the timeout surfaced in the reason.
 type telemetryTimeoutBackend struct {
 	telemetryBackend
 	timeout time.Duration
@@ -187,7 +214,7 @@ func (b *telemetryTimeoutBackend) ExecContext(ctx context.Context, timeout time.
 
 var _ contextExecer = (*telemetryTimeoutBackend)(nil)
 
-func TestCollectTelemetry_TimeoutReasonSurvivesAggregation(t *testing.T) {
+func TestCollectTelemetry_TimeoutSkips(t *testing.T) {
 	iops := NewInfrahubOps()
 	backend := &telemetryTimeoutBackend{
 		telemetryBackend: *newTelemetryBackend(),
@@ -204,8 +231,11 @@ func TestCollectTelemetry_TimeoutReasonSurvivesAggregation(t *testing.T) {
 	if len(manifest.Collectors) != 1 {
 		t.Fatalf("manifest has %d entries %+v, want 1", len(manifest.Collectors), manifest.Collectors)
 	}
-	want := CollectorResult{Name: "telemetry", Status: collectorStatusFailed, Reason: "timed out after 300s"}
-	if manifest.Collectors[0] != want {
-		t.Errorf("collector result = %+v, want %+v (bare timeout reason, FIX-4)", manifest.Collectors[0], want)
+	got := manifest.Collectors[0]
+	if got.Name != "telemetry" || got.Status != collectorStatusSkipped {
+		t.Fatalf("collector result = %+v, want telemetry skipped", got)
+	}
+	if !strings.Contains(got.Reason, "timed out after 300s") {
+		t.Errorf("skip reason = %q, want it to surface the timeout", got.Reason)
 	}
 }

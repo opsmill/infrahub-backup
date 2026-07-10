@@ -31,6 +31,7 @@ EXPECTED_COLLECTORS = {f"logs/{service}" for service in LOG_SERVICES} | {
     "task-worker-state",
     "task-manager-state",
     "server-info",
+    "telemetry",
     "metrics",
     "benchmark",
     "backup",
@@ -48,6 +49,7 @@ COLLECTOR_DIRS = {
     "task-worker-state": "task-worker",
     "task-manager-state": "task-manager",
     "server-info": "server",
+    "telemetry": "telemetry",
     "metrics": "metrics",
 }
 

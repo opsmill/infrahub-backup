@@ -19,10 +19,10 @@ const telemetryBundleDir = "telemetry"
 // recognizable to anyone who has run the CLI directly.
 const telemetryExportFilename = "telemetry-export.json"
 
-// telemetryErrorFilename preserves infrahubctl's combined output when the
-// export fails, so support can read what the CLI reported (mirrors the
-// task-manager events.err.txt convention, FIX-8). The manifest still records
-// the failed reason.
+// telemetryErrorFilename preserves infrahubctl's combined output whenever the
+// export produces no file, so support can read what the CLI reported (mirrors
+// the task-manager events.err.txt convention, FIX-8). The manifest still
+// records the skip reason.
 const telemetryErrorFilename = "telemetry-export.err.txt"
 
 // telemetryExportContainerPath is where infrahubctl writes the export inside
@@ -48,6 +48,12 @@ const telemetryStartDateLayout = "2006-01-02"
 // export` inside the task-worker container and stages the JSON into
 // bundle/telemetry/. It is read-only: the export pulls stored snapshots
 // through the Infrahub API and mutates nothing in the deployment.
+//
+// The export producing nothing is not a bundle defect — a deployment may have
+// no telemetry snapshots in the window, or run an Infrahub version without the
+// telemetry API — so a failing export degrades to skipped (like --benchmark),
+// with the CLI's own output preserved for support. Only a local staging error
+// (creating the directory, copying the file out) marks the collector failed.
 func telemetryCollector() collector {
 	return collector{
 		name: "telemetry",
@@ -92,27 +98,25 @@ func collectTelemetry(cc *collectContext) error {
 	output, err := cc.execDumpTimeout(collectTransferTimeout, telemetryService, command)
 
 	// Best-effort cleanup of the in-container export file, regardless of
-	// outcome (mirrors runEmbeddedScriptDump).
+	// outcome. Routed through the bounded collect exec path so a wedged
+	// container cannot hang the run during cleanup.
 	defer func() {
-		if _, rmErr := cc.backend.Exec(telemetryService, []string{"rm", "-f", telemetryExportContainerPath}, nil); rmErr != nil {
+		if _, rmErr := cc.execDump(telemetryService, []string{"rm", "-f", telemetryExportContainerPath}); rmErr != nil {
 			logrus.Warnf("Failed to clean up telemetry export %s on %s: %v", telemetryExportContainerPath, telemetryService, rmErr)
 		}
 	}()
 
 	if err != nil {
 		// infrahubctl runs under combined output, so a failure merges its
-		// traceback/message into output. Preserve it beside the (absent)
-		// export so support sees what the CLI reported; the failed reason is
-		// recorded from the returned error.
+		// message/traceback into output. Preserve it beside the (absent)
+		// export so support sees what the CLI reported, then degrade to
+		// skipped: a missing export is not a bundle defect.
 		if strings.TrimSpace(output) != "" {
 			if writeErr := writeDumpFile(filepath.Join(dir, telemetryErrorFilename), output, nil); writeErr != nil {
-				logrus.Warnf("Failed to write telemetry error output: %v", writeErr)
+				logrus.Warnf("Failed to write telemetry export output: %v", writeErr)
 			}
 		}
-		// %w-wrap so a command timeout still reaches the orchestrator's
-		// errors.As and collapses the manifest reason to the bare
-		// "timed out after <duration>" contract string (FIX-4).
-		return fmt.Errorf("infrahubctl telemetry export failed: %w", err)
+		return &collectSkipError{reason: telemetrySkipReason(output, err)}
 	}
 
 	if err := cc.copyFrom(telemetryService, telemetryExportContainerPath, filepath.Join(dir, telemetryExportFilename)); err != nil {
@@ -120,4 +124,19 @@ func collectTelemetry(cc *collectContext) error {
 	}
 
 	return nil
+}
+
+// telemetrySkipReason renders the manifest reason for a telemetry export that
+// produced no file. The common empty case ("No telemetry snapshots found.")
+// gets a friendly reason; anything else keeps the CLI's own error line, or the
+// raw error when the CLI printed nothing (e.g. a timeout).
+func telemetrySkipReason(output string, err error) string {
+	if strings.Contains(strings.ToLower(output), "no telemetry snapshots") {
+		return "no telemetry snapshots found in the requested window"
+	}
+	line := commandErrorLine(output)
+	if line == "" {
+		line = err.Error()
+	}
+	return "infrahubctl telemetry export could not be run: " + line
 }
