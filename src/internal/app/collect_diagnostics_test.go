@@ -28,6 +28,7 @@ func TestCollectPlanOrdering(t *testing.T) {
 		"task-worker-state",
 		"task-manager-state",
 		"server-info",
+		"telemetry",
 		"metrics",
 		// Opt-in extras stay last: the benchmark generates load, and the
 		// include-backup collector may stop/restart application containers

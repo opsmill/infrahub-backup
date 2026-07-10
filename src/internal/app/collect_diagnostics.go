@@ -111,13 +111,22 @@ func partialError(prefix string, failures []string, timeout *timeoutError) error
 	return fmt.Errorf("%s: %s", prefix, joined)
 }
 
+// execDumpTimeout runs a command inside a service container bounded by the
+// given timeout when the backend supports it, falling back to the shared
+// unbounded Exec on backends (or test fakes) that do not implement the bounded
+// variant. Collectors whose command may run longer than a status dump (e.g. the
+// telemetry export, which pages the API) pass collectTransferTimeout.
+func (cc *collectContext) execDumpTimeout(timeout time.Duration, service string, command []string) (string, error) {
+	if execer, ok := cc.backend.(contextExecer); ok {
+		return execer.ExecContext(cc.ctx, timeout, service, command, nil)
+	}
+	return cc.backend.Exec(service, command, nil)
+}
+
 // execDump runs a command inside a service container, bounded by the collect
 // exec timeout when the backend supports it.
 func (cc *collectContext) execDump(service string, command []string) (string, error) {
-	if execer, ok := cc.backend.(contextExecer); ok {
-		return execer.ExecContext(cc.ctx, collectExecTimeout, service, command, nil)
-	}
-	return cc.backend.Exec(service, command, nil)
+	return cc.execDumpTimeout(collectExecTimeout, service, command)
 }
 
 // execReplicaDump runs a command inside one specific replica, falling back to
