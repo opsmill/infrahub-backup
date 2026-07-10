@@ -290,6 +290,25 @@ func TestServerAPIFetchCommand(t *testing.T) {
 	}
 }
 
+func TestServerPackagesCommand(t *testing.T) {
+	cmd := serverPackagesCommand()
+
+	if len(cmd) != 3 || cmd[0] != "python" || cmd[1] != "-c" {
+		t.Fatalf("serverPackagesCommand = %v, want a python -c invocation", cmd)
+	}
+	script := cmd[2]
+	// The whole point of the fix: list via the venv's python + stdlib metadata,
+	// never `pip list` (which resolves to a base interpreter in a uv venv).
+	if strings.Contains(script, "pip") {
+		t.Errorf("packages script must not shell out to pip:\n%s", script)
+	}
+	for _, fragment := range []string{"importlib.metadata", "distributions()", "dist.version"} {
+		if !strings.Contains(script, fragment) {
+			t.Errorf("packages script missing %q:\n%s", fragment, script)
+		}
+	}
+}
+
 // timeoutExecBackend is a collect backend whose bounded exec always times out,
 // used to prove a command timeout survives a real aggregating collector's
 // string aggregation and reaches the manifest as the bare contract reason

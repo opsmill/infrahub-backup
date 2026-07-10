@@ -539,6 +539,34 @@ func serverAPIFetchCommand(url string) []string {
 	return []string{"python", "-c", script, url}
 }
 
+// serverPackagesCommand lists the packages installed in the same interpreter
+// that imports infrahub, using the stdlib importlib.metadata. Infrahub runs
+// from a uv-managed virtualenv that does not install pip, so `pip list`
+// resolves to a base interpreter and reports only that environment's handful
+// of packages (packaging/pip/wheel). Going through `python` — which correctly
+// resolves to the venv, as version detection already relies on — lists the
+// real dependency set. Output is `name==version` (pip-freeze style), sorted
+// case-insensitively and de-duplicated across metadata directories.
+func serverPackagesCommand() []string {
+	script := strings.Join([]string{
+		"import importlib.metadata as md",
+		"seen = {}",
+		"for dist in md.distributions():",
+		"    try:",
+		"        name = dist.metadata['Name']",
+		"        version = dist.version",
+		"    except Exception:",
+		"        continue",
+		"    if not name:",
+		"        continue",
+		"    seen[name.lower()] = (name, version)",
+		"for key in sorted(seen):",
+		"    name, version = seen[key]",
+		"    print('%s==%s' % (name, version))",
+	}, "\n")
+	return []string{"python", "-c", script}
+}
+
 // serverInfoCollector captures the Infrahub version, installed packages,
 // masked environment, and API info/config/schema into bundle/server/.
 func serverInfoCollector() collector {
@@ -592,7 +620,7 @@ func collectServerInfo(cc *collectContext) error {
 	}
 
 	dumps := []execDumpSpec{
-		{filename: "packages.txt", command: []string{"pip", "list"}},
+		{filename: "packages.txt", command: serverPackagesCommand()},
 		{filename: "environment.txt", command: []string{"env"}, mask: maskEnvOutput},
 	}
 

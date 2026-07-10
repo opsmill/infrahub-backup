@@ -7,6 +7,64 @@ import (
 	"testing"
 )
 
+func TestSplitHelmChartLabel(t *testing.T) {
+	tests := []struct {
+		label       string
+		wantName    string
+		wantVersion string
+		wantOK      bool
+	}{
+		{"infrahub-1.2.3", "infrahub", "1.2.3", true},
+		{"infrahub-enterprise-1.2.3", "infrahub-enterprise", "1.2.3", true},
+		{"infrahub-1.2.3-alpha.1", "infrahub", "1.2.3-alpha.1", true},
+		{"infrahub-0.16.0-dev0", "infrahub", "0.16.0-dev0", true},
+		// Helm replaces "+" with "_" in the chart label's version.
+		{"infrahub-1.2.3_build5", "infrahub", "1.2.3_build5", true},
+		{"infrahub", "", "", false}, // no version segment
+	}
+	for _, tt := range tests {
+		name, version, ok := splitHelmChartLabel(tt.label)
+		if ok != tt.wantOK || name != tt.wantName || version != tt.wantVersion {
+			t.Errorf("splitHelmChartLabel(%q) = (%q, %q, %v), want (%q, %q, %v)",
+				tt.label, name, version, ok, tt.wantName, tt.wantVersion, tt.wantOK)
+		}
+	}
+}
+
+func TestParseHelmChartLabels(t *testing.T) {
+	t.Run("first workload with a chart label wins", func(t *testing.T) {
+		// kubectl emits one line per workload; resources without Helm stamps
+		// yield an empty chart field (leading tab or blank) and are skipped.
+		output := "\t\ninfrahub-1.2.3\tinfrahub\ninfrahub-1.2.3\tinfrahub\n"
+		release := parseHelmChartLabels(output)
+		if release == nil {
+			t.Fatal("parseHelmChartLabels returned nil, want a release")
+		}
+		if release.Chart != "infrahub" || release.ChartVersion != "1.2.3" || release.ReleaseName != "infrahub" {
+			t.Errorf("release = %+v, want chart=infrahub version=1.2.3 release=infrahub", release)
+		}
+	})
+
+	t.Run("chart label without a version segment keeps the whole label", func(t *testing.T) {
+		release := parseHelmChartLabels("weirdchart\tmyrelease\n")
+		if release == nil {
+			t.Fatal("parseHelmChartLabels returned nil, want a release")
+		}
+		if release.Chart != "weirdchart" || release.ChartVersion != "" || release.ReleaseName != "myrelease" {
+			t.Errorf("release = %+v, want chart=weirdchart version=\"\" release=myrelease", release)
+		}
+	})
+
+	t.Run("no Helm metadata returns nil", func(t *testing.T) {
+		if release := parseHelmChartLabels("\t\n\t\n"); release != nil {
+			t.Errorf("parseHelmChartLabels = %+v, want nil for an install with no chart labels", release)
+		}
+		if release := parseHelmChartLabels(""); release != nil {
+			t.Errorf("parseHelmChartLabels(\"\") = %+v, want nil", release)
+		}
+	})
+}
+
 // TestGetAllPodsWith_Branches covers the two failure modes GetAllPods must keep
 // distinct (FIX-2): kubectl succeeds but nothing matches (errNoPodsMatched, so
 // callers record "service not deployed"/skipped) versus a real cluster/API

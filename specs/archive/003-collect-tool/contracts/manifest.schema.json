@@ -40,6 +40,25 @@
       "type": "string",
       "enum": ["docker", "kubernetes"]
     },
+    "helm": {
+      "type": "object",
+      "description": "Helm chart provenance of a Kubernetes install; omitted on Docker or when the install is not Helm-managed / its metadata cannot be read",
+      "properties": {
+        "release_name": {
+          "type": "string",
+          "description": "Helm release name (meta.helm.sh/release-name)"
+        },
+        "chart": {
+          "type": "string",
+          "description": "Chart name parsed from the helm.sh/chart label"
+        },
+        "chart_version": {
+          "type": "string",
+          "description": "Chart version parsed from the helm.sh/chart label"
+        }
+      },
+      "additionalProperties": true
+    },
     "log_lines": {
       "type": "integer",
       "minimum": 1,

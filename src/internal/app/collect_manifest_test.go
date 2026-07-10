@@ -149,6 +149,46 @@ func TestBundleManifest_JSONShape(t *testing.T) {
 	}
 }
 
+// TestBundleManifest_HelmField asserts the optional helm object is omitted
+// entirely when unset (Docker / non-Helm installs) and serialized with the
+// contract's field names when populated.
+func TestBundleManifest_HelmField(t *testing.T) {
+	t.Run("omitted when unset", func(t *testing.T) {
+		manifest := newBundleManifest(generateCollectID(), "docker", 100)
+		data, err := json.Marshal(manifest)
+		if err != nil {
+			t.Fatalf("Marshal failed: %v", err)
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if _, ok := decoded["helm"]; ok {
+			t.Errorf("helm present in %s, want omitted when unset", data)
+		}
+	})
+
+	t.Run("serialized with contract field names when set", func(t *testing.T) {
+		manifest := newBundleManifest(generateCollectID(), "kubernetes", 100)
+		manifest.Helm = &HelmRelease{ReleaseName: "infrahub", Chart: "infrahub", ChartVersion: "1.2.3"}
+		data, err := json.Marshal(manifest)
+		if err != nil {
+			t.Fatalf("Marshal failed: %v", err)
+		}
+		var decoded struct {
+			Helm map[string]any `json:"helm"`
+		}
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			t.Fatalf("Unmarshal failed: %v", err)
+		}
+		if decoded.Helm["release_name"] != "infrahub" ||
+			decoded.Helm["chart"] != "infrahub" ||
+			decoded.Helm["chart_version"] != "1.2.3" {
+			t.Errorf("helm = %v, want release_name/chart/chart_version populated", decoded.Helm)
+		}
+	})
+}
+
 func TestBundleManifest_EmptyCollectorsSerializesAsArray(t *testing.T) {
 	manifest := newBundleManifest(generateCollectID(), "docker", 100000)
 
