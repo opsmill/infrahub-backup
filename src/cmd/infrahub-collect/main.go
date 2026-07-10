@@ -38,6 +38,7 @@ func main() {
 	var includeBackup bool
 	var includeQueries bool
 	var benchmark bool
+	var telemetryDays int
 
 	createCmd := &cobra.Command{
 		Use:          "create",
@@ -56,6 +57,7 @@ func main() {
 				IncludeBackup:  viper.GetBool("include-backup"),
 				IncludeQueries: viper.GetBool("include-queries"),
 				Benchmark:      viper.GetBool("benchmark"),
+				TelemetryDays:  viper.GetInt("telemetry-days"),
 			}
 
 			return iops.CollectBundle(opts)
@@ -65,12 +67,14 @@ func main() {
 	createCmd.Flags().BoolVar(&includeBackup, "include-backup", false, "Also create a backup using the standard backup behavior")
 	createCmd.Flags().BoolVar(&includeQueries, "include-queries", false, "Include database query logs (may contain customer data)")
 	createCmd.Flags().BoolVar(&benchmark, "benchmark", false, "Run the OpsMill benchmark and include its results (requires image download; skipped with a warning if unavailable)")
+	createCmd.Flags().IntVar(&telemetryDays, "telemetry-days", 30, "Look-back window in days for the Infrahub product-telemetry export")
 
 	// Bind create flags to Viper for environment variable support (INFRAHUB_<FLAG_NAME>)
 	viper.BindPFlag("log-lines", createCmd.Flags().Lookup("log-lines"))
 	viper.BindPFlag("include-backup", createCmd.Flags().Lookup("include-backup"))
 	viper.BindPFlag("include-queries", createCmd.Flags().Lookup("include-queries"))
 	viper.BindPFlag("benchmark", createCmd.Flags().Lookup("benchmark"))
+	viper.BindPFlag("telemetry-days", createCmd.Flags().Lookup("telemetry-days"))
 
 	rootCmd.AddCommand(createCmd)
 

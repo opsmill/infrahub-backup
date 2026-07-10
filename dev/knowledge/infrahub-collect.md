@@ -30,6 +30,7 @@ Flags and their `INFRAHUB_*` environment equivalents:
 | `--include-backup` | `false` | `INFRAHUB_INCLUDE_BACKUP` | `create` |
 | `--include-queries` | `false` | `INFRAHUB_INCLUDE_QUERIES` | `create` |
 | `--benchmark` | `false` | `INFRAHUB_BENCHMARK` | `create` |
+| `--telemetry-days` | `30` | `INFRAHUB_TELEMETRY_DAYS` | `create` |
 
 `create` exits 0 whenever the archive is produced — including a partial bundle with failed collectors. It exits 1 only for no usable environment, an unwritable output directory, or an archiving failure.
 
@@ -47,9 +48,12 @@ bundle/
 ├── task-worker/<replica>/    # Prefect worker state per replica
 ├── task-manager/             # work pools, queues, flow runs, events, automations
 ├── server/                   # version, pip list, API info/config/schema, env (masked)
+├── telemetry/                # infrahubctl telemetry export (last --telemetry-days, default 30)
 ├── metrics/                  # docker stats / kubectl top
 └── benchmark/                # only when --benchmark ran successfully
 ```
+
+The telemetry collector runs `infrahubctl telemetry export --start-date <now-N days>` inside `task-worker` (the container whose infrahubctl already targets the API, per `infrahub-backup`'s `infrahubctl task list`), then copies the JSON out to `telemetry/telemetry-export.json`. It is read-only — the export pulls stored snapshots through the API — and always-on; a non-positive `--telemetry-days` falls back to 30. Telemetry is anonymous product-usage data (no PII/secrets), so the export is staged unmasked. `task-worker` not deployed → `skipped`; an infrahubctl/export error → `failed` with the CLI output preserved in `telemetry/telemetry-export.err.txt`.
 
 ## Manifest (`bundle_information.json`)
 

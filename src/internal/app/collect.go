@@ -33,6 +33,10 @@ type CollectOptions struct {
 	IncludeBackup  bool
 	IncludeQueries bool
 	Benchmark      bool
+	// TelemetryDays is the look-back window (in days) for the Infrahub
+	// product-telemetry export; a non-positive value falls back to
+	// defaultTelemetryDays (30).
+	TelemetryDays int
 }
 
 // Replica is a read-only descriptor of one running container of a service.
@@ -139,9 +143,10 @@ func (iops *InfrahubOps) CollectBundle(opts CollectOptions) error {
 
 // collectPlan builds the ordered collector run plan for this run: logs per
 // canonical service, then the parity diagnostics (database → message-queue →
-// cache → task-worker → task-manager → server), then metrics (research R9).
-// The manifest's environment and log_lines are set at construction; the
-// server-info collector fills infrahub_version best-effort.
+// cache → task-worker → task-manager → server), then the product-telemetry
+// export, then metrics (research R9). The manifest's environment and log_lines
+// are set at construction; the server-info collector fills infrahub_version
+// best-effort.
 func (iops *InfrahubOps) collectPlan(opts CollectOptions) []collector {
 	plan := serviceLogCollectors()
 	plan = append(plan,
@@ -151,6 +156,7 @@ func (iops *InfrahubOps) collectPlan(opts CollectOptions) []collector {
 		taskWorkerCollector(),
 		taskManagerCollector(),
 		serverInfoCollector(),
+		telemetryCollector(),
 		metricsCollector(),
 	)
 
