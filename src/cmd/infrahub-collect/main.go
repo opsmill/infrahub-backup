@@ -28,6 +28,7 @@ func main() {
 
 	app.ConfigureRootCommand(rootCmd, iops)
 	app.AttachEnvironmentCommands(rootCmd, iops)
+	app.AttachUpdateCommand(rootCmd, "infrahub-collect")
 
 	// Collect-specific persistent flag (INFRAHUB_OUTPUT_DIR)
 	rootCmd.PersistentFlags().String("output-dir", "./infrahub_bundles", "Directory for bundle files")

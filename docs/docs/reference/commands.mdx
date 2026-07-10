@@ -180,7 +180,7 @@ Version: 1.0.0
 
 Updates the running binary to a newer release. Downloads the matching artifact
 from GitHub Releases, verifies its SHA-256 checksum, and replaces the binary
-atomically.
+atomically. Available on both `infrahub-backup` and `infrahub-collect`.
 
 **Syntax:**
 
@@ -287,7 +287,7 @@ A single archive named `support_bundle_<timestamp>.tar.gz` in the output directo
 
 ### Environment and utility commands
 
-`infrahub-collect` provides the same `environment detect`, `environment list`, and `version` commands as `infrahub-backup`, with identical behavior.
+`infrahub-collect` provides the same `environment detect`, `environment list`, `version`, and `update` commands as `infrahub-backup`, with identical behavior. See [`update`](#update) for the self-update flags and refusal cases.
 
 ## Configuration precedence
 
