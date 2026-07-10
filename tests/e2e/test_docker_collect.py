@@ -180,6 +180,13 @@ class TestDockerCollect(TestInfrahubDockerClient):
         for extra in OPT_IN_COLLECTORS:
             assert statuses[extra] == "skipped", f"Opt-in collector {extra} must be skipped when not requested"
             failed.pop(extra)
+        # Telemetry export depends on runtime-accumulated snapshots (and the
+        # deployment's Infrahub version); a freshly started e2e instance has
+        # none, so the collector degrades to skipped rather than failed.
+        assert statuses["telemetry"] in ("success", "skipped"), (
+            f"telemetry collector = {statuses['telemetry']}, want success or skipped"
+        )
+        failed.pop("telemetry", None)
         assert not failed, f"Collectors did not succeed on a healthy stack: {failed}"
 
         # Layout per contracts/bundle-layout.md — identical to Kubernetes (SC-004)
