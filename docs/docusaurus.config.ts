@@ -45,6 +45,25 @@ const config: Config = {
     ],
   ],
 
+  plugins: [
+    [
+      "@docusaurus/plugin-client-redirects",
+      {
+        // Preserve links to the pre-hub-and-spoke `/guides/*` URLs.
+        redirects: [
+          {from: "/guides/install", to: "/backup/install"},
+          {from: "/guides/backup-instance", to: "/backup/create"},
+          {from: "/guides/restore-backup", to: "/backup/restore"},
+          {from: "/guides/kubernetes-backup", to: "/backup/kubernetes-backup"},
+          {from: "/guides/kubernetes-restore", to: "/backup/kubernetes-restore"},
+          {from: "/guides/install-collect", to: "/collect/install"},
+          {from: "/guides/collect-troubleshooting-bundle", to: "/collect/create"},
+          {from: "/guides/self-update", to: "/self-update"},
+        ],
+      },
+    ],
+  ],
+
   themeConfig: {
     navbar: {
       logo: {
