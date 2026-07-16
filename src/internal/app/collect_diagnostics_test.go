@@ -224,7 +224,10 @@ func TestPrefectServerCommand(t *testing.T) {
 func TestTaskManagerDumps(t *testing.T) {
 	dumps := taskManagerDumps()
 
-	wantFiles := []string{"work-pools.txt", "work-queues.txt", "flow-runs.txt", "automations.txt"}
+	wantFiles := []string{
+		"work-pools.txt", "work-queues.txt", "flow-runs.txt",
+		"flow-runs-pending-running.txt", "task-runs-pending-running.txt", "automations.txt",
+	}
 	if len(dumps) != len(wantFiles) {
 		t.Fatalf("taskManagerDumps() has %d dumps, want %d", len(dumps), len(wantFiles))
 	}
@@ -237,6 +240,38 @@ func TestTaskManagerDumps(t *testing.T) {
 			t.Errorf("dumps[%d] (%s) command = %v, want a wrapped prefect invocation", i, dump.filename, dump.command)
 		}
 	}
+
+	// The pending/running dumps must filter both flow runs and task runs on the
+	// in-flight state types; every other dump is unfiltered.
+	byFile := map[string][]string{}
+	for _, dump := range dumps {
+		byFile[dump.filename] = dump.command
+	}
+	for _, tc := range []struct{ file, resource string }{
+		{"flow-runs-pending-running.txt", "flow-run"},
+		{"task-runs-pending-running.txt", "task-run"},
+	} {
+		command := byFile[tc.file]
+		if !contains(command, tc.resource) || !contains(command, "ls") {
+			t.Errorf("%s command = %v, want a %q ls invocation", tc.file, command, tc.resource)
+		}
+		for _, state := range []string{"PENDING", "RUNNING"} {
+			if !stateTypeFiltered(command, state) {
+				t.Errorf("%s command = %v, want --state-type %s", tc.file, command, state)
+			}
+		}
+	}
+}
+
+// stateTypeFiltered reports whether command contains a `--state-type <state>`
+// pair.
+func stateTypeFiltered(command []string, state string) bool {
+	for i := 0; i+1 < len(command); i++ {
+		if command[i] == "--state-type" && command[i+1] == state {
+			return true
+		}
+	}
+	return false
 }
 
 func TestServerAPITargets(t *testing.T) {
