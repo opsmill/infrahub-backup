@@ -224,20 +224,34 @@ func TestPrefectServerCommand(t *testing.T) {
 func TestTaskManagerDumps(t *testing.T) {
 	dumps := taskManagerDumps()
 
-	wantFiles := []string{
-		"work-pools.txt", "work-queues.txt", "flow-runs.txt",
-		"flow-runs-pending-running.txt", "task-runs-pending-running.txt", "automations.txt",
+	// Only `flow-run ls` accepts --output json, so the flow-run dumps are JSON
+	// and every other list command stays plain text.
+	want := []struct {
+		file string
+		json bool
+	}{
+		{"work-pools.txt", false},
+		{"work-queues.txt", false},
+		{"flow-runs.json", true},
+		{"flow-runs-pending-running.json", true},
+		{"task-runs-pending-running.txt", false},
+		{"automations.txt", false},
 	}
-	if len(dumps) != len(wantFiles) {
-		t.Fatalf("taskManagerDumps() has %d dumps, want %d", len(dumps), len(wantFiles))
+	if len(dumps) != len(want) {
+		t.Fatalf("taskManagerDumps() has %d dumps, want %d", len(dumps), len(want))
 	}
 
 	for i, dump := range dumps {
-		if dump.filename != wantFiles[i] {
-			t.Errorf("dumps[%d].filename = %q, want %q", i, dump.filename, wantFiles[i])
+		if dump.filename != want[i].file {
+			t.Errorf("dumps[%d].filename = %q, want %q", i, dump.filename, want[i].file)
 		}
 		if dump.command[0] != "sh" || !contains(dump.command, "prefect") {
 			t.Errorf("dumps[%d] (%s) command = %v, want a wrapped prefect invocation", i, dump.filename, dump.command)
+		}
+		// The .json dumps must request JSON output; the .txt dumps must not
+		// (their CLI commands have no --output option).
+		if got := jsonRequested(dump.command); got != want[i].json {
+			t.Errorf("dumps[%d] (%s) JSON output = %v, want %v", i, dump.filename, got, want[i].json)
 		}
 	}
 
@@ -248,7 +262,7 @@ func TestTaskManagerDumps(t *testing.T) {
 		byFile[dump.filename] = dump.command
 	}
 	for _, tc := range []struct{ file, resource string }{
-		{"flow-runs-pending-running.txt", "flow-run"},
+		{"flow-runs-pending-running.json", "flow-run"},
 		{"task-runs-pending-running.txt", "task-run"},
 	} {
 		command := byFile[tc.file]
@@ -261,6 +275,16 @@ func TestTaskManagerDumps(t *testing.T) {
 			}
 		}
 	}
+}
+
+// jsonRequested reports whether command selects JSON output (`--output json`).
+func jsonRequested(command []string) bool {
+	for i := 0; i+1 < len(command); i++ {
+		if command[i] == "--output" && command[i+1] == "json" {
+			return true
+		}
+	}
+	return false
 }
 
 // stateTypeFiltered reports whether command contains a `--state-type <state>`
