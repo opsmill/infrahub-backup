@@ -428,20 +428,45 @@ func prefectServerCommand(command ...string) []string {
 	return append([]string{"sh", "-c", script, "sh"}, command...)
 }
 
+// taskManagerActiveStates are the flow/task-run state types treated as
+// "in flight" for troubleshooting: work accepted and awaiting execution
+// (PENDING) or actively running (RUNNING). Passed to the CLI as repeated
+// --state-type filters (stable across Prefect 2.x and 3.x).
+var taskManagerActiveStates = []string{"PENDING", "RUNNING"}
+
 // taskManagerDumps lists the Prefect server state dumps collected via the
-// Prefect CLI inside the task-manager container (research R9). Recent events
-// have no CLI equivalent and are collected separately via an embedded script.
+// Prefect CLI inside the task-manager container (research R9). Alongside the
+// recent flow runs, the PENDING and RUNNING flow runs and task runs are
+// captured explicitly: `prefect flow-run ls` returns only the most recent runs
+// regardless of state, so in-flight work can be buried beyond its limit on a
+// busy instance, and there is no unfiltered task-run listing at all. Recent
+// events have no CLI equivalent and are collected separately (see
+// collectTaskManagerState).
 func taskManagerDumps() []execDumpSpec {
 	return []execDumpSpec{
 		{filename: "work-pools.txt", command: prefectServerCommand("prefect", "work-pool", "ls")},
 		{filename: "work-queues.txt", command: prefectServerCommand("prefect", "work-queue", "ls")},
 		{filename: "flow-runs.txt", command: prefectServerCommand("prefect", "flow-run", "ls", "--limit", "200")},
+		{filename: "flow-runs-pending-running.txt", command: prefectServerCommand(activeRunsCommand("flow-run")...)},
+		{filename: "task-runs-pending-running.txt", command: prefectServerCommand(activeRunsCommand("task-run")...)},
 		{filename: "automations.txt", command: prefectServerCommand("prefect", "automation", "ls")},
 	}
 }
 
+// activeRunsCommand builds a `prefect <resource> ls` invocation filtered to the
+// in-flight state types, where resource is "flow-run" or "task-run". Both
+// subcommands accept repeated --state-type filters and --limit.
+func activeRunsCommand(resource string) []string {
+	command := []string{"prefect", resource, "ls"}
+	for _, state := range taskManagerActiveStates {
+		command = append(command, "--state-type", state)
+	}
+	return append(command, "--limit", "200")
+}
+
 // taskManagerCollector captures work pools, work queues, recent flow runs,
-// automations, and recent events into bundle/task-manager/.
+// the pending/running flow and task runs, automations, and recent events into
+// bundle/task-manager/.
 func taskManagerCollector() collector {
 	return collector{
 		name: "task-manager-state",
