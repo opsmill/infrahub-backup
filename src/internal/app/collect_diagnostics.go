@@ -586,6 +586,34 @@ func serverInfoCollector() collector {
 	}
 }
 
+// kubectlDefaultedContainerNotice is the prefix of the message kubectl writes
+// to stderr when it execs into a multi-container pod without an explicit
+// container: `Defaulted container "x" out of: x, y`. Collect execs capture
+// merged stdout+stderr (CombinedOutput), so this notice is prepended to a
+// command's real output. Single-value reads (an env var, a version string)
+// must strip it, or the value carries an embedded newline — e.g. a
+// contaminated INFRAHUB_INTERNAL_ADDRESS yields a URL httpx rejects.
+const kubectlDefaultedContainerNotice = `Defaulted container "`
+
+// stripKubectlExecNotices removes kubectl's "Defaulted container" notice lines
+// from merged exec output and returns the remainder trimmed. Output from
+// backends that emit no such notice (Docker exec) passes through as a plain
+// trim.
+func stripKubectlExecNotices(output string) string {
+	if !strings.Contains(output, kubectlDefaultedContainerNotice) {
+		return strings.TrimSpace(output)
+	}
+	lines := strings.Split(output, "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), kubectlDefaultedContainerNotice) {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n"))
+}
+
 // collectInfrahubVersion detects the Infrahub version bounded by the collect
 // exec timeout (FIX-5). It mirrors iops.getInfrahubVersion but goes through the
 // bounded execDump so a wedged infrahub-server cannot hang the run; it does not
@@ -596,7 +624,7 @@ func (cc *collectContext) collectInfrahubVersion() string {
 		logrus.Warnf("Could not detect Infrahub version: %v", err)
 		return "unknown"
 	}
-	return strings.TrimSpace(output)
+	return stripKubectlExecNotices(output)
 }
 
 // collectInfrahubInternalAddress fetches INFRAHUB_INTERNAL_ADDRESS from the
@@ -609,7 +637,7 @@ func (cc *collectContext) collectInfrahubInternalAddress() string {
 		logrus.Debugf("INFRAHUB_INTERNAL_ADDRESS not set in task-worker container: %v", err)
 		return ""
 	}
-	return strings.TrimSpace(output)
+	return stripKubectlExecNotices(output)
 }
 
 func collectServerInfo(cc *collectContext) error {

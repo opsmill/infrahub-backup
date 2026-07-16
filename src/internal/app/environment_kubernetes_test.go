@@ -45,6 +45,29 @@ func TestParseHelmChartLabels(t *testing.T) {
 		}
 	})
 
+	t.Run("prefers an Infrahub product chart over a co-hosted chart", func(t *testing.T) {
+		// A namespace hosting both infrahub-observability and the product chart
+		// must report the product chart's version, whichever kubectl lists first.
+		output := "infrahub-observability-0.2.0\tobs\ninfrahub-enterprise-1.2.3\tinfrahub\n"
+		release := parseHelmChartLabels(output)
+		if release == nil {
+			t.Fatal("parseHelmChartLabels returned nil, want a release")
+		}
+		if release.Chart != "infrahub-enterprise" || release.ChartVersion != "1.2.3" || release.ReleaseName != "infrahub" {
+			t.Errorf("release = %+v, want chart=infrahub-enterprise version=1.2.3 release=infrahub", release)
+		}
+	})
+
+	t.Run("falls back to the first chart when no product chart is present", func(t *testing.T) {
+		release := parseHelmChartLabels("infrahub-observability-0.2.0\tobs\n")
+		if release == nil {
+			t.Fatal("parseHelmChartLabels returned nil, want a release")
+		}
+		if release.Chart != "infrahub-observability" || release.ChartVersion != "0.2.0" || release.ReleaseName != "obs" {
+			t.Errorf("release = %+v, want chart=infrahub-observability version=0.2.0 release=obs", release)
+		}
+	})
+
 	t.Run("chart label without a version segment keeps the whole label", func(t *testing.T) {
 		release := parseHelmChartLabels("weirdchart\tmyrelease\n")
 		if release == nil {
