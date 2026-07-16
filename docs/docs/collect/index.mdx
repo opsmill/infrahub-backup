@@ -8,7 +8,7 @@ Use Infrahub Collect to gather everything OpsMill support needs to investigate a
 
 Collection is strictly read-only. Unlike `infrahub-backup create`, the collect command never stops, restarts, or scales any container or pod, so it is safe to run against a production instance at any time — including while the instance is degraded. If a service is down, collection continues with the rest and records the failure in the manifest. A partial bundle is still a useful bundle — a degraded instance is precisely when you need one.
 
-The binary is self-contained and works offline: it uses your existing Docker or kubectl access and performs no network access beyond the deployment itself.
+The binary is self-contained. By default, collection works offline: it uses your existing Docker or kubectl access and performs no network access beyond the deployment itself. The one exception is the opt-in `--benchmark`, which downloads a benchmark image.
 
 ## Collect or back up?
 
@@ -28,7 +28,7 @@ Each bundle is a single `tar.gz` archive. Inside, every file lives under a top-l
 | Task manager | Work pools, work queues, recent flow runs, events, and automations |
 | Server | Version, installed packages, API information, configuration, schema, and masked environment variables |
 | Metrics | Container resource usage |
-| Backup (opt-in) | A backup produced by the standard backup behavior (`--include-backup`) |
+| Backup (opt-in) | A standalone backup produced by the standard backup behavior and referenced in the manifest, not embedded in the archive (`--include-backup`) |
 | Benchmark (opt-in) | Host resource benchmark results (`--benchmark`) |
 
 The layout is identical on Docker Compose and Kubernetes.
