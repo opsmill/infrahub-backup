@@ -442,26 +442,37 @@ var taskManagerActiveStates = []string{"PENDING", "RUNNING"}
 // busy instance, and there is no unfiltered task-run listing at all. Recent
 // events have no CLI equivalent and are collected separately (see
 // collectTaskManagerState).
+//
+// Only `prefect flow-run ls` accepts --output json, so the flow-run dumps are
+// captured as JSON (.json); the other list commands (work-pool, work-queue,
+// task-run, automation) have no JSON option and stay plain text (.txt).
 func taskManagerDumps() []execDumpSpec {
 	return []execDumpSpec{
 		{filename: "work-pools.txt", command: prefectServerCommand("prefect", "work-pool", "ls")},
 		{filename: "work-queues.txt", command: prefectServerCommand("prefect", "work-queue", "ls")},
-		{filename: "flow-runs.txt", command: prefectServerCommand("prefect", "flow-run", "ls", "--limit", "200")},
-		{filename: "flow-runs-pending-running.txt", command: prefectServerCommand(activeRunsCommand("flow-run")...)},
-		{filename: "task-runs-pending-running.txt", command: prefectServerCommand(activeRunsCommand("task-run")...)},
+		{filename: "flow-runs.json", command: prefectServerCommand(runListCommand("flow-run", nil, true)...)},
+		{filename: "flow-runs-pending-running.json", command: prefectServerCommand(runListCommand("flow-run", taskManagerActiveStates, true)...)},
+		{filename: "task-runs-pending-running.txt", command: prefectServerCommand(runListCommand("task-run", taskManagerActiveStates, false)...)},
 		{filename: "automations.txt", command: prefectServerCommand("prefect", "automation", "ls")},
 	}
 }
 
-// activeRunsCommand builds a `prefect <resource> ls` invocation filtered to the
-// in-flight state types, where resource is "flow-run" or "task-run". Both
-// subcommands accept repeated --state-type filters and --limit.
-func activeRunsCommand(resource string) []string {
+// runListCommand builds a `prefect <resource> ls` invocation. states, when
+// non-empty, adds a repeated --state-type filter per state; jsonOutput adds
+// --output json (supported only by `flow-run ls`, so callers pass false for
+// task-run and the other list commands). The limit matches the recent
+// flow-runs dump so a busy instance never silently truncates the in-flight set
+// below what the recent listing shows.
+func runListCommand(resource string, states []string, jsonOutput bool) []string {
 	command := []string{"prefect", resource, "ls"}
-	for _, state := range taskManagerActiveStates {
+	for _, state := range states {
 		command = append(command, "--state-type", state)
 	}
-	return append(command, "--limit", "200")
+	command = append(command, "--limit", "200")
+	if jsonOutput {
+		command = append(command, "--output", "json")
+	}
+	return command
 }
 
 // taskManagerCollector captures work pools, work queues, recent flow runs,
