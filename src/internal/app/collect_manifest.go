@@ -54,15 +54,19 @@ type HelmRelease struct {
 // bundle_information.json at the bundle root. JSON field names are normative
 // (specs/003-collect-tool/contracts/manifest.schema.json).
 type BundleManifest struct {
-	ManifestVersion int               `json:"manifest_version"`
-	CollectID       string            `json:"collect_id"`
-	CreatedAt       string            `json:"created_at"`
-	ToolVersion     string            `json:"tool_version"`
-	InfrahubVersion string            `json:"infrahub_version"`
-	Environment     string            `json:"environment"`
-	Helm            *HelmRelease      `json:"helm,omitempty"`
-	LogLines        int               `json:"log_lines"`
-	Collectors      []CollectorResult `json:"collectors"`
+	ManifestVersion int    `json:"manifest_version"`
+	CollectID       string `json:"collect_id"`
+	CreatedAt       string `json:"created_at"`
+	ToolVersion     string `json:"tool_version"`
+	InfrahubVersion string `json:"infrahub_version"`
+	Environment     string `json:"environment"`
+	// Edition is the Infrahub edition (community or enterprise) of the running
+	// deployment, detected best-effort. It is unset (omitted) when the edition
+	// cannot be determined, so support never reads a guessed value.
+	Edition    string            `json:"edition,omitempty"`
+	Helm       *HelmRelease      `json:"helm,omitempty"`
+	LogLines   int               `json:"log_lines"`
+	Collectors []CollectorResult `json:"collectors"`
 }
 
 // generateCollectID returns a UTC timestamp identifier shared by the bundle

@@ -40,6 +40,11 @@
       "type": "string",
       "enum": ["docker", "kubernetes"]
     },
+    "edition": {
+      "type": "string",
+      "enum": ["community", "enterprise"],
+      "description": "Detected Infrahub edition; omitted when it cannot be determined. On Docker it is classified from the infrahub-server image, on Kubernetes from the Helm chart name."
+    },
     "helm": {
       "type": "object",
       "description": "Helm chart provenance of a Kubernetes install; omitted on Docker or when the install is not Helm-managed / its metadata cannot be read",

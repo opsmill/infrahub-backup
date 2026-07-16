@@ -113,10 +113,11 @@ func (d *DockerBackend) ExecStream(service string, command []string, opts *ExecO
 // research R3/R4) and the optional timeout-bounded and per-replica exec
 // capabilities the bundle diagnostics collectors prefer (research R2).
 var (
-	_ collectBackend = (*DockerBackend)(nil)
-	_ contextExecer  = (*DockerBackend)(nil)
-	_ replicaExecer  = (*DockerBackend)(nil)
-	_ contextCopier  = (*DockerBackend)(nil)
+	_ collectBackend  = (*DockerBackend)(nil)
+	_ contextExecer   = (*DockerBackend)(nil)
+	_ replicaExecer   = (*DockerBackend)(nil)
+	_ contextCopier   = (*DockerBackend)(nil)
+	_ editionDetector = (*DockerBackend)(nil)
 )
 
 // ExecContext is the timeout-bounded variant of Exec used by the bundle
@@ -140,6 +141,7 @@ type composePSContainer struct {
 	Name    string `json:"Name"`
 	Service string `json:"Service"`
 	State   string `json:"State"`
+	Image   string `json:"Image"`
 	Labels  string `json:"Labels"`
 }
 
@@ -234,6 +236,32 @@ func (d *DockerBackend) ServiceReplicas(service string) ([]Replica, error) {
 		return nil, fmt.Errorf("failed to list %s containers: %w", service, err)
 	}
 	return replicasFromComposePS(service, containers), nil
+}
+
+// InfrahubEdition reports the Infrahub edition of the deployment by classifying
+// the infrahub-server container image (.../infrahub-enterprise vs .../infrahub),
+// mirroring how the Kubernetes backend's Helm chart name identifies the edition.
+// Stopped containers are inspected too (ps -a) so a shut-down deployment is still
+// classified. It returns "" (edition unknown) when the service is absent or its
+// image is unrecognized, so the manifest field is simply omitted.
+func (d *DockerBackend) InfrahubEdition() (string, error) {
+	containers, err := d.composePSContainers(true, "infrahub-server")
+	if err != nil {
+		return "", fmt.Errorf("failed to inspect infrahub-server image: %w", err)
+	}
+	return editionFromContainers("infrahub-server", containers), nil
+}
+
+// editionFromContainers classifies the Infrahub edition from the image of the
+// first container belonging to service, returning "" when none match or the
+// image is unrecognized.
+func editionFromContainers(service string, containers []composePSContainer) string {
+	for _, container := range containers {
+		if container.Service == service && container.Image != "" {
+			return classifyInfrahubEdition(container.Image)
+		}
+	}
+	return ""
 }
 
 // dockerLogArgs builds the docker logs arguments for one replica.

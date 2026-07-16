@@ -57,6 +57,13 @@ func TestParseComposePSContainers(t *testing.T) {
 			},
 		},
 		{
+			name:   "image is parsed (used for edition detection)",
+			output: `{"Name":"proj-infrahub-server-1","Service":"infrahub-server","State":"running","Image":"registry.opsmill.io/opsmill/infrahub-enterprise:1.5.2"}`,
+			want: []composePSContainer{
+				{Name: "proj-infrahub-server-1", Service: "infrahub-server", State: "running", Image: "registry.opsmill.io/opsmill/infrahub-enterprise:1.5.2"},
+			},
+		},
+		{
 			name:    "invalid JSON line",
 			output:  "not-json\n",
 			wantErr: "failed to parse docker compose ps line",
