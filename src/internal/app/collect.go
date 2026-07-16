@@ -257,6 +257,7 @@ func (iops *InfrahubOps) runCollectPlan(backend EnvironmentBackend, opts Collect
 	archivePath := filepath.Join(opts.OutputDir, fmt.Sprintf("support_bundle_%s.tar.gz", collectID))
 	manifest := newBundleManifest(collectID, backend.Name(), opts.LogLines)
 	populateHelmRelease(backend, manifest)
+	populateEdition(backend, manifest)
 
 	logrus.WithFields(logrus.Fields{
 		"collect_id":  collectID,
