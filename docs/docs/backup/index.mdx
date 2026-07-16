@@ -2,7 +2,7 @@
 title: Infrahub Backup
 ---
 
-Use Infrahub Backup to create and restore complete, verifiable recovery points for an Infrahub deployment. Run it as a CLI against Docker Compose, or as a Helm chart on Kubernetes, to capture the graph database, the task-manager database, and artifact storage as a single archive you can restore from later.
+Use Infrahub Backup to create and restore verifiable recovery points for an Infrahub deployment. Run it as a CLI against Docker Compose, or as a Helm chart on Kubernetes, to capture the graph database and the task-manager database as a single archive you can restore from later. Artifact storage lives outside those databases, so you snapshot it as a separate, coordinated step to keep a recovery complete.
 
 ## Why reliable backups matter
 
@@ -10,7 +10,7 @@ Infrahub keeps critical infrastructure state across several systems: the Neo4j g
 
 ## How it works
 
-Infrahub Backup coordinates backup and restore across deployment targets. During a backup it stops the relevant services, captures each database with the correct credentials, and packages everything so a restore is deterministic. During a restore it brings services back in dependency order, reapplies the data, and records logs so you can confirm the operation succeeded. The CLI runs the provider-specific Docker or Kubernetes commands for you and sequences each step.
+Infrahub Backup coordinates backup and restore across deployment targets. During a backup it captures each database with the correct credentials and packages everything so a restore is deterministic. Enterprise deployments are backed up online, with no downtime; Community Edition is dumped offline, so the tool first stops the Infrahub services and restarts them once the snapshot is complete. During a restore it brings services back in dependency order, reapplies the data, and records logs so you can confirm the operation succeeded. The CLI runs the provider-specific Docker or Kubernetes commands for you and sequences each step.
 
 On Kubernetes, the `infrahub-backup` Helm chart manages backups declaratively through your existing GitOps pipeline. Schedule backups with a CronJob, push archives to S3-compatible storage, and run restores — all without direct kubectl access.
 
