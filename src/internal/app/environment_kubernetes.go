@@ -606,11 +606,26 @@ func (k *KubernetesBackend) HelmRelease() (*HelmRelease, error) {
 	return parseHelmChartLabels(output), nil
 }
 
+// infrahubProductCharts are the Helm chart names for the Infrahub product
+// itself. A namespace commonly co-hosts auxiliary Infrahub charts — most
+// notably infrahub-observability — whose workloads carry their own
+// helm.sh/chart stamp. The manifest must report the product chart's version,
+// so parseHelmChartLabels prefers a workload templated from one of these.
+var infrahubProductCharts = map[string]bool{
+	"infrahub":            true,
+	"infrahub-enterprise": true,
+}
+
 // parseHelmChartLabels extracts the release/chart/version from the
 // tab-separated "<chart-label>\t<release-name>" lines HelmRelease's jsonpath
-// query produces. It returns the first workload carrying a chart label, or nil
-// when none do (kubectl emits empty fields for resources without the stamps).
+// query produces. It prefers the first workload templated from an Infrahub
+// product chart (infrahub / infrahub-enterprise), so a co-hosted chart such as
+// infrahub-observability never shadows the product's version regardless of the
+// order kubectl lists workloads. When no product chart is present it falls back
+// to the first workload carrying any chart label, and returns nil when none do
+// (kubectl emits empty fields for resources without the stamps).
 func parseHelmChartLabels(output string) *HelmRelease {
+	var fallback *HelmRelease
 	for _, line := range nonEmptyLines(output) {
 		fields := strings.SplitN(line, "\t", 2)
 		chart := strings.TrimSpace(fields[0])
@@ -627,9 +642,14 @@ func parseHelmChartLabels(output string) *HelmRelease {
 		} else {
 			release.Chart = chart
 		}
-		return release
+		if infrahubProductCharts[release.Chart] {
+			return release
+		}
+		if fallback == nil {
+			fallback = release
+		}
 	}
-	return nil
+	return fallback
 }
 
 // splitHelmChartLabel splits a Helm "<name>-<version>" chart label at the

@@ -291,6 +291,44 @@ func TestServerAPIFetchCommand(t *testing.T) {
 	}
 }
 
+func TestStripKubectlExecNotices(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   string
+	}{
+		{
+			name:   "no notice passes through trimmed",
+			output: "  http://infrahub-server:8000\n",
+			want:   "http://infrahub-server:8000",
+		},
+		{
+			// The reported bug: the notice merged ahead of the value left a
+			// newline embedded in the URL httpx was given.
+			name:   "strips the defaulted-container notice ahead of the value",
+			output: "Defaulted container \"task-worker\" out of: task-worker, task-worker-init\nhttp://infrahub-server:8000",
+			want:   "http://infrahub-server:8000",
+		},
+		{
+			name:   "strips the notice ahead of a version string",
+			output: "Defaulted container \"infrahub-server\" out of: infrahub-server, init\n1.2.3",
+			want:   "1.2.3",
+		},
+		{
+			name:   "empty output stays empty",
+			output: "",
+			want:   "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := stripKubectlExecNotices(tt.output); got != tt.want {
+				t.Errorf("stripKubectlExecNotices(%q) = %q, want %q", tt.output, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestServerPackagesCommand(t *testing.T) {
 	cmd := serverPackagesCommand()
 
