@@ -347,6 +347,8 @@ func TestCollectBundle_RegisteredPlan(t *testing.T) {
 			return `{"version":"1.5.2"}`, nil
 		case strings.HasSuffix(joined, "/api/schema"):
 			return `{"nodes":[]}`, nil
+		case strings.Contains(joined, "InfrahubStatus"):
+			return `{"data":{"InfrahubStatus":{"summary":{"schema_hash_synced":true},"workers":{"edges":[]}}}}`, nil
 		default:
 			return "", nil
 		}
@@ -428,6 +430,12 @@ func TestCollectBundle_RegisteredPlan(t *testing.T) {
 		t.Errorf("server/version.txt missing from archive: %v", err)
 	} else if strings.TrimSpace(string(versionDump)) != "1.5.2" {
 		t.Errorf("version.txt = %q, want %q", versionDump, "1.5.2")
+	}
+	statusDump, err := os.ReadFile(filepath.Join(destDir, "bundle", "server", "infrahub_status.json"))
+	if err != nil {
+		t.Errorf("server/infrahub_status.json missing from archive: %v", err)
+	} else if !strings.Contains(string(statusDump), "schema_hash_synced") {
+		t.Errorf("infrahub_status.json = %q, want the InfrahubStatus query result", statusDump)
 	}
 
 	logDump, err := os.ReadFile(filepath.Join(destDir, "bundle", "logs", "infrahub-server", "infrahub-server-1.log"))

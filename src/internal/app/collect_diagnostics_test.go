@@ -350,6 +350,32 @@ func TestServerAPIFetchCommand(t *testing.T) {
 	}
 }
 
+func TestServerGraphQLFetchCommand(t *testing.T) {
+	url := "http://infrahub-server:8000/graphql"
+	cmd := serverGraphQLFetchCommand(url, infrahubStatusQuery)
+
+	if len(cmd) != 5 || cmd[0] != "python" || cmd[1] != "-c" {
+		t.Fatalf("serverGraphQLFetchCommand = %v, want a python -c invocation with url and query arguments", cmd)
+	}
+	if cmd[3] != url {
+		t.Errorf("URL argument = %q, want %q", cmd[3], url)
+	}
+	if cmd[4] != infrahubStatusQuery {
+		t.Errorf("query argument = %q, want the InfrahubStatus query", cmd[4])
+	}
+	script := cmd[2]
+	// A POST of the query, best-effort token auth via X-INFRAHUB-KEY (so hardened
+	// deployments still answer), and the same non-2xx-fails contract as the REST fetch.
+	for _, fragment := range []string{"httpx.post", "sys.argv[1]", "sys.argv[2]", "X-INFRAHUB-KEY", "INFRAHUB_API_TOKEN", "resp.status_code >= 400", "sys.exit(1)"} {
+		if !strings.Contains(script, fragment) {
+			t.Errorf("GraphQL fetch script missing %q:\n%s", fragment, script)
+		}
+	}
+	if strings.Contains(infrahubStatusQuery, "InfrahubStatus") == false || !strings.Contains(infrahubStatusQuery, "schema_hash_synced") {
+		t.Errorf("infrahubStatusQuery does not request InfrahubStatus.summary.schema_hash_synced:\n%s", infrahubStatusQuery)
+	}
+}
+
 func TestStripKubectlExecNotices(t *testing.T) {
 	tests := []struct {
 		name   string

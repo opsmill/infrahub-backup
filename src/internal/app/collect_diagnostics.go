@@ -584,6 +584,64 @@ func serverAPIFetchCommand(url string) []string {
 	return []string{"python", "-c", script, url}
 }
 
+// infrahubGraphQLPath is the Infrahub GraphQL endpoint for the default branch;
+// InfrahubStatus is a branch-agnostic internal query, so the default endpoint
+// is sufficient.
+const infrahubGraphQLPath = "/graphql"
+
+// infrahubStatusFilename is the bundle file holding the InfrahubStatus query
+// result.
+const infrahubStatusFilename = "infrahub_status.json"
+
+// infrahubStatusQuery reports whether every Infrahub worker agrees on the
+// active schema (summary.schema_hash_synced) together with each worker's
+// individual hash and active state. The REST /api/schema dump shows what the
+// schema is; only this query shows whether the workers are actually in sync,
+// which is the fastest signal for a schema-out-of-sync incident.
+const infrahubStatusQuery = `query {
+  InfrahubStatus {
+    summary {
+      schema_hash_synced
+    }
+    workers {
+      edges {
+        node {
+          id
+          active
+          schema_hash
+        }
+      }
+    }
+  }
+}`
+
+// serverGraphQLFetchCommand builds the Python command that POSTs a GraphQL
+// query to the Infrahub server from inside the infrahub-server container (the
+// image ships httpx, not necessarily curl; research R8). When the container
+// environment carries an API token it is sent as the X-INFRAHUB-KEY header so
+// the query still succeeds on deployments that disable anonymous access; the
+// token is used only for the request and is never written to the bundle. The
+// response body is printed as-is and a non-2xx status is reported via the exit
+// code, mirroring serverAPIFetchCommand. GraphQL-level errors return HTTP 200
+// with an "errors" array, so they stay observable in the written file.
+func serverGraphQLFetchCommand(url, query string) []string {
+	script := strings.Join([]string{
+		"import os",
+		"import sys",
+		"import httpx",
+		"headers = {}",
+		`token = os.environ.get("INFRAHUB_API_TOKEN") or os.environ.get("INFRAHUB_INITIAL_ADMIN_TOKEN")`,
+		"if token:",
+		`    headers["X-INFRAHUB-KEY"] = token`,
+		"resp = httpx.post(sys.argv[1], json={'query': sys.argv[2]}, headers=headers, timeout=30)",
+		"sys.stdout.write(resp.text)",
+		"if resp.status_code >= 400:",
+		"    sys.stderr.write('\\nHTTP %d\\n' % resp.status_code)",
+		"    sys.exit(1)",
+	}, "\n")
+	return []string{"python", "-c", script, url, query}
+}
+
 // serverPackagesCommand lists the packages installed in the same interpreter
 // that imports infrahub, using the stdlib importlib.metadata. Infrahub runs
 // from a uv-managed virtualenv that does not install pip, so `pip list`
@@ -709,6 +767,14 @@ func collectServerInfo(cc *collectContext) error {
 			mask:     target.mask,
 		})
 	}
+
+	// The InfrahubStatus GraphQL query reports schema-hash sync across workers,
+	// which the REST endpoints above cannot. Its result carries no credentials,
+	// so it is written unmasked.
+	dumps = append(dumps, execDumpSpec{
+		filename: infrahubStatusFilename,
+		command:  serverGraphQLFetchCommand(baseURL+infrahubGraphQLPath, infrahubStatusQuery),
+	})
 
 	dumpFailures, timeout := cc.execDumpsInto("infrahub-server", dir, dumps)
 	failures = append(failures, dumpFailures...)
