@@ -227,6 +227,16 @@ class TestDockerCollect(TestInfrahubDockerClient):
         ]
         _assert_env_dump_masked(env_text, secrets)
 
+        # The InfrahubStatus GraphQL result is captured against the real server:
+        # this verifies the /graphql endpoint and best-effort token auth end to
+        # end, not just the collector's exit status — a GraphQL-level error comes
+        # back as HTTP 200 with an "errors" array, so assert on the payload.
+        status_doc = json.loads(read_bundle_member(bundle_path, "bundle/server/infrahub_status.json"))
+        assert "errors" not in status_doc, f"InfrahubStatus query returned errors: {status_doc.get('errors')}"
+        assert "schema_hash_synced" in status_doc["data"]["InfrahubStatus"]["summary"], (
+            f"InfrahubStatus result missing summary.schema_hash_synced: {status_doc}"
+        )
+
     async def test_collect_project_selection_without_flag(
         self, infrahub_compose, infrahub_port, collect_binary, tmp_path
     ):
