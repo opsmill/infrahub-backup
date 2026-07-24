@@ -351,27 +351,36 @@ func TestServerAPIFetchCommand(t *testing.T) {
 }
 
 func TestServerGraphQLFetchCommand(t *testing.T) {
-	url := "http://infrahub-server:8000/graphql"
-	cmd := serverGraphQLFetchCommand(url, infrahubStatusQuery)
+	address := "http://infrahub-server:8000"
+	cmd := serverGraphQLFetchCommand(address, infrahubStatusQuery)
 
 	if len(cmd) != 5 || cmd[0] != "python" || cmd[1] != "-c" {
-		t.Fatalf("serverGraphQLFetchCommand = %v, want a python -c invocation with url and query arguments", cmd)
+		t.Fatalf("serverGraphQLFetchCommand = %v, want a python -c invocation with address and query arguments", cmd)
 	}
-	if cmd[3] != url {
-		t.Errorf("URL argument = %q, want %q", cmd[3], url)
+	if cmd[3] != address {
+		t.Errorf("address argument = %q, want %q", cmd[3], address)
 	}
 	if cmd[4] != infrahubStatusQuery {
 		t.Errorf("query argument = %q, want the InfrahubStatus query", cmd[4])
 	}
 	script := cmd[2]
-	// A POST of the query, best-effort token auth via X-INFRAHUB-KEY (so hardened
-	// deployments still answer), and the same non-2xx-fails contract as the REST fetch.
-	for _, fragment := range []string{"httpx.post", "sys.argv[1]", "sys.argv[2]", "X-INFRAHUB-KEY", "INFRAHUB_API_TOKEN", "resp.status_code >= 400", "sys.exit(1)"} {
+	// The query runs through the bundled Infrahub SDK, which resolves the
+	// /graphql endpoint and auth header; the token comes from the container env,
+	// and any failure exits non-zero so the collector records it.
+	for _, fragment := range []string{"infrahub_sdk", "InfrahubClientSync", "execute_graphql", "sys.argv[1]", "sys.argv[2]", "INFRAHUB_API_TOKEN", "sys.exit(1)"} {
 		if !strings.Contains(script, fragment) {
 			t.Errorf("GraphQL fetch script missing %q:\n%s", fragment, script)
 		}
 	}
-	if strings.Contains(infrahubStatusQuery, "InfrahubStatus") == false || !strings.Contains(infrahubStatusQuery, "schema_hash_synced") {
+	// The SDK builds the endpoint and sends auth; the collector must not hardcode
+	// an httpx POST or the endpoint path.
+	if strings.Contains(script, "httpx") {
+		t.Errorf("GraphQL fetch script should use the Infrahub SDK, not httpx:\n%s", script)
+	}
+	if strings.Contains(strings.Join(cmd, " "), "/graphql") {
+		t.Errorf("command should pass the bare base address; the SDK appends /graphql:\n%v", cmd)
+	}
+	if !strings.Contains(infrahubStatusQuery, "InfrahubStatus") || !strings.Contains(infrahubStatusQuery, "schema_hash_synced") {
 		t.Errorf("infrahubStatusQuery does not request InfrahubStatus.summary.schema_hash_synced:\n%s", infrahubStatusQuery)
 	}
 }

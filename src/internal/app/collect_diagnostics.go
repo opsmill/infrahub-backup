@@ -584,11 +584,6 @@ func serverAPIFetchCommand(url string) []string {
 	return []string{"python", "-c", script, url}
 }
 
-// infrahubGraphQLPath is the Infrahub GraphQL endpoint for the default branch;
-// InfrahubStatus is a branch-agnostic internal query, so the default endpoint
-// is sufficient.
-const infrahubGraphQLPath = "/graphql"
-
 // infrahubStatusFilename is the bundle file holding the InfrahubStatus query
 // result.
 const infrahubStatusFilename = "infrahub_status.json"
@@ -615,31 +610,39 @@ const infrahubStatusQuery = `query {
   }
 }`
 
-// serverGraphQLFetchCommand builds the Python command that POSTs a GraphQL
-// query to the Infrahub server from inside the infrahub-server container (the
-// image ships httpx, not necessarily curl; research R8). When the container
-// environment carries an API token it is sent as the X-INFRAHUB-KEY header so
-// the query still succeeds on deployments that disable anonymous access; the
-// token is used only for the request and is never written to the bundle. The
-// response body is printed as-is and a non-2xx status is reported via the exit
-// code, mirroring serverAPIFetchCommand. GraphQL-level errors return HTTP 200
-// with an "errors" array, so they stay observable in the written file.
-func serverGraphQLFetchCommand(url, query string) []string {
+// serverGraphQLFetchCommand builds the Python command that runs a GraphQL query
+// against the Infrahub server from inside the infrahub-server container using
+// the bundled Infrahub SDK (infrahub_sdk), which the server already depends on.
+// The SDK resolves the branch-qualified /graphql endpoint and, when a token is
+// present, sends it with the correct auth header — so this collector hardcodes
+// neither. The token (INFRAHUB_API_TOKEN, falling back to
+// INFRAHUB_INITIAL_ADMIN_TOKEN) is read from the container environment and used
+// only for the request; it is never written to the bundle. On success the
+// result is re-wrapped in a {"data": ...} GraphQL envelope; any failure (import,
+// auth, transport, or a GraphQL error) is captured as {"errors": [...]} and
+// reported via the exit code, so the collector records the failure while the
+// payload stays observable. retry_on_failure defaults to false, so a wedged
+// server fails fast within the collector's exec budget rather than looping.
+func serverGraphQLFetchCommand(address, query string) []string {
 	script := strings.Join([]string{
+		"import json",
 		"import os",
 		"import sys",
-		"import httpx",
-		"headers = {}",
-		`token = os.environ.get("INFRAHUB_API_TOKEN") or os.environ.get("INFRAHUB_INITIAL_ADMIN_TOKEN")`,
-		"if token:",
-		`    headers["X-INFRAHUB-KEY"] = token`,
-		"resp = httpx.post(sys.argv[1], json={'query': sys.argv[2]}, headers=headers, timeout=30)",
-		"sys.stdout.write(resp.text)",
-		"if resp.status_code >= 400:",
-		"    sys.stderr.write('\\nHTTP %d\\n' % resp.status_code)",
+		"try:",
+		"    from infrahub_sdk import Config, InfrahubClientSync",
+		`    token = os.environ.get("INFRAHUB_API_TOKEN") or os.environ.get("INFRAHUB_INITIAL_ADMIN_TOKEN")`,
+		"    config = Config(api_token=token) if token else Config()",
+		"    client = InfrahubClientSync(address=sys.argv[1], config=config)",
+		"    data = client.execute_graphql(query=sys.argv[2], timeout=30)",
+		"except Exception as exc:",
+		`    json.dump({"errors": [{"message": str(exc)}]}, sys.stdout, indent=2)`,
+		`    sys.stdout.write("\n")`,
+		`    sys.stderr.write("InfrahubStatus query failed: %s\n" % exc)`,
 		"    sys.exit(1)",
+		`json.dump({"data": data}, sys.stdout, indent=2)`,
+		`sys.stdout.write("\n")`,
 	}, "\n")
-	return []string{"python", "-c", script, url, query}
+	return []string{"python", "-c", script, address, query}
 }
 
 // serverPackagesCommand lists the packages installed in the same interpreter
@@ -769,11 +772,12 @@ func collectServerInfo(cc *collectContext) error {
 	}
 
 	// The InfrahubStatus GraphQL query reports schema-hash sync across workers,
-	// which the REST endpoints above cannot. Its result carries no credentials,
-	// so it is written unmasked.
+	// which the REST endpoints above cannot. The SDK derives the /graphql
+	// endpoint from this base address. Its result carries no credentials, so it
+	// is written unmasked.
 	dumps = append(dumps, execDumpSpec{
 		filename: infrahubStatusFilename,
-		command:  serverGraphQLFetchCommand(baseURL+infrahubGraphQLPath, infrahubStatusQuery),
+		command:  serverGraphQLFetchCommand(baseURL, infrahubStatusQuery),
 	})
 
 	dumpFailures, timeout := cc.execDumpsInto("infrahub-server", dir, dumps)
