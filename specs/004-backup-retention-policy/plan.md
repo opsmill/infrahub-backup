@@ -26,7 +26,7 @@ Technical approach: a pure, table-testable selection function over parsed backup
 
 **Performance Goals**: prune adds negligible wall-clock to a backup run — selection over 10,000 candidates completes in well under 1 second; S3 listing is paginated and bounded by object count under the prefix, not bucket size
 
-**Constraints**: no `os.Exit`/direct printing in `src/internal/app` (errors wrapped with `%w`, returned to Cobra); real-time logging of each deletion; prune must never touch non-matching files/objects; new backup never rolled back on prune failure; S3 leg needs list+delete permissions (documented)
+**Constraints**: no `os.Exit`/direct printing in `src/internal/app` (errors wrapped with `%w`, returned to Cobra); real-time logging of each deletion; prune must never touch non-matching files/objects; new backup never rolled back on prune failure; S3 leg needs list+delete permissions (documented); retention S3 list/delete calls bounded by a context timeout (mirroring `S3Client.Upload`'s 30-minute bound, sized smaller for list/delete); interactive confirmation implemented behind an injectable seam (mirroring `updater.Proceed`) so decline/accept/non-TTY paths are unit-testable; Plakar backend + retention in v1 warns-and-skips on `create`, errors on `prune` (FR-012)
 
 **Scale/Scope**: backup directories with O(10³) archives; S3 prefixes with O(10⁴) objects; two commands touched, one new file plus focused edits; docs page updates under `docs/docs/backup/`
 

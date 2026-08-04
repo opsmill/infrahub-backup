@@ -71,6 +71,7 @@ An operator using the Plakar backend (snapshot groups in a Plakar repository ins
 - **Encrypted archives**: encrypted backups are selected and aged exactly like plain ones, by name only; their contents are never read.
 - **Archives produced from local dump files**: archives created by the `from-files` flow use the same naming pattern and receive the same retention treatment — this is intentional.
 - **Invalid policy values**: zero or negative values for either rule are rejected with a validation error before anything runs.
+- **Plakar backend selected before its slice ships (v1)**: `create` with the Plakar backend and retention configured completes the backup normally, emits an explicit warning that retention is not yet supported for this backend, performs no pruning, and exits successfully; `prune` with the Plakar backend fails with a validation error stating the same. Retention never silently pretends to run.
 - **Concurrent runs**: the tool has no cross-process locking today; scheduled jobs are assumed to be singletons (see Assumptions).
 
 ## Requirements *(mandatory)*
@@ -84,10 +85,11 @@ An operator using the Plakar backend (snapshot groups in a Plakar repository ins
 - **FR-005**: System MUST provide a standalone `prune` command that applies the identical policy evaluation, prompts for confirmation before deleting unless an explicit bypass option is passed, and offers a dry-run mode that deletes nothing and lists exactly the set a real run would delete.
 - **FR-006**: Pruning MUST consider only files and objects that match the established backup naming pattern (including the encrypted variant) with a parseable embedded timestamp; anything else at the location MUST remain untouched. A backup's age MUST be derived from that embedded timestamp.
 - **FR-007**: When S3 pruning is active, the policy MUST be evaluated independently over the objects under the configured bucket/prefix, with the keep-newest floor applied per location. On `create`, the S3 leg is active exactly when the run itself uploaded to S3; on `prune`, the S3 leg is active only when explicitly requested by the operator — the mere presence of S3 configuration MUST NOT trigger S3 deletion.
-- **FR-008**: When the backup succeeds but any prune leg fails, the run MUST exit non-zero with an error that distinguishes "backup succeeded; retention failed", MUST NOT remove or roll back the newly created backup, and MUST still attempt every other prune leg before exiting.
+- **FR-008**: When the backup succeeds but any prune leg fails, the run MUST exit non-zero with an error that distinguishes "backup succeeded; retention failed", MUST NOT remove or roll back the newly created backup, and MUST still attempt every other prune leg before exiting. Within a leg, deletion is best-effort: every eligible candidate MUST be attempted even after individual deletions fail, with all per-deletion errors collected and reported; a leg fails if any of its deletions failed.
 - **FR-009**: Every deletion — and every dry-run candidate — MUST be reported to the operator as it is processed, and every error MUST carry the operation context in which it occurred.
 - **FR-010**: On the Plakar backend (P3), the same policy MUST remove out-of-policy snapshot groups and reclaim repository space; the newest group overall and the newest complete group MUST never be removed; incomplete groups MUST NOT count toward the kept-count rule; remaining snapshots MUST stay restorable, including those created by prior released versions of the tool.
 - **FR-011**: Retention configuration MUST be expressible the same way as all existing options of the tool (command-line options, environment variables, configuration file), so unattended schedulers can supply it without wrapping scripts.
+- **FR-012**: Until the Plakar slice ships, combining the Plakar backend with retention MUST never be a silent no-op: `create` MUST complete the backup, emit an explicit warning that retention is not yet supported for this backend, and skip pruning; `prune` MUST fail with a validation error before touching anything.
 
 ### Key Entities
 
