@@ -94,7 +94,7 @@ class TestDockerTarball(TestInfrahubDockerClient):
         backup_file = find_latest_backup(backup_dir)
 
         # 6. Wait for Infrahub to recover
-        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=1.0)
 
         # 3. Modify data (delete the tag)
         await modify_infrahub_data(url, ADMIN_TOKEN, seed)
@@ -111,7 +111,7 @@ class TestDockerTarball(TestInfrahubDockerClient):
         )
 
         # 5. Wait for Infrahub to recover after restore
-        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=1.0)
 
         # 6. Verify the tag is back
         await verify_infrahub_data(url, ADMIN_TOKEN, seed)
@@ -153,7 +153,7 @@ class TestDockerTarball(TestInfrahubDockerClient):
         assert compose_container_runtimes(project) == before, "the deployment was touched despite the empty pool"
         assert not list(empty_pool.iterdir()), f"the rejected pool was written into: {list(empty_pool.iterdir())}"
 
-        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=1.0)
 
     async def test_restore_latest_from_local_pool(self, infrahub_compose, infrahub_port, backup_binary, tmp_path):
         """`restore --latest` restores the newest archive in the local backup directory.
@@ -188,7 +188,7 @@ class TestDockerTarball(TestInfrahubDockerClient):
         (backup_dir / older).write_text("an older archive --latest must never rank first")
         assert older < newest, f"{older} must be older than {newest}"
 
-        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=1.0)
 
         # 4. Delete the tag whose return proves the restore happened.
         await modify_infrahub_data(url, ADMIN_TOKEN, seed)
@@ -209,7 +209,7 @@ class TestDockerTarball(TestInfrahubDockerClient):
         assert older not in output, f"the older archive was ranked first:\n{output}"
 
         # 8. The restore ran to completion and the data is back.
-        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=1.0)
         await verify_infrahub_data(url, ADMIN_TOKEN, seed)
 
     async def test_restore_latest_encrypted_newest(self, infrahub_compose, infrahub_port, backup_binary, tmp_path):
@@ -261,7 +261,7 @@ class TestDockerTarball(TestInfrahubDockerClient):
         (backup_dir / older).write_text("an older archive --latest must never fall back to")
         assert older < selected, f"{older} must be older than the encrypted {selected}"
 
-        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=1.0)
 
         # 5. Delete the tag whose return proves the keyed restore happened.
         await modify_infrahub_data(url, ADMIN_TOKEN, seed)
@@ -330,5 +330,5 @@ class TestDockerTarball(TestInfrahubDockerClient):
         )
 
         # 9. The encrypted archive's data is back: it really was restored.
-        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=1.0)
         await verify_infrahub_data(url, ADMIN_TOKEN, seed)

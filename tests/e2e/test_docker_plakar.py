@@ -89,7 +89,7 @@ class TestDockerPlakar(TestInfrahubDockerClient):
         assert result.returncode == 0, f"snapshots list failed: {result.stderr}"
 
         # 6. Wait for Infrahub to recover
-        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=1.0)
 
         # 4. Modify data (delete the tag)
         await modify_infrahub_data(url, ADMIN_TOKEN, seed)
@@ -109,7 +109,7 @@ class TestDockerPlakar(TestInfrahubDockerClient):
         )
 
         # 6. Wait for Infrahub to recover
-        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=1.0)
 
         # 7. Verify the tag is back
         await verify_infrahub_data(url, ADMIN_TOKEN, seed)
@@ -154,7 +154,7 @@ class TestDockerPlakar(TestInfrahubDockerClient):
         assert result.returncode == 0, f"snapshots list failed: {result.stderr}"
 
         # 6. Wait for Infrahub to recover
-        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=1.0)
 
         # 4. Modify data (delete the tag)
         await modify_infrahub_data(url, ADMIN_TOKEN, seed)
@@ -163,7 +163,7 @@ class TestDockerPlakar(TestInfrahubDockerClient):
         run_restore(backup_binary, common_args + ["restore"], env=s3_env)
 
         # 6. Wait for Infrahub to recover
-        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=1.0)
 
         # 7. Verify the tag is back
         await verify_infrahub_data(url, ADMIN_TOKEN, seed)
@@ -199,9 +199,9 @@ class TestDockerPlakar(TestInfrahubDockerClient):
 
         # 2. Two groups, so the newer one has to be chosen rather than being the only option.
         run_backup(backup_binary, repo_args + ["create", "--force"])
-        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=1.0)
         run_backup(backup_binary, repo_args + ["create", "--force"])
-        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=1.0)
 
         groups = subprocess.run(
             [backup_binary, *repo_args, "--log-format", "json", "snapshots", "list"],
@@ -219,7 +219,7 @@ class TestDockerPlakar(TestInfrahubDockerClient):
         await modify_infrahub_data(url, ADMIN_TOKEN, seed)
         result = run_restore(backup_binary, repo_args + ["restore", "--latest"])
         resolved["--latest"] = _resolved_backup_group(result.stdout + result.stderr)
-        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=1.0)
         await verify_infrahub_data(url, ADMIN_TOKEN, seed)
 
         # 4. The bare form, against the same repository so the group it resolves is
@@ -228,7 +228,7 @@ class TestDockerPlakar(TestInfrahubDockerClient):
         #    meet a deployment that is still restarting.
         result = run_restore(backup_binary, repo_args + ["restore"])
         resolved["bare"] = _resolved_backup_group(result.stdout + result.stderr)
-        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=1.0)
 
         # 5. The parity claim itself.
         assert resolved["--latest"] == resolved["bare"], (

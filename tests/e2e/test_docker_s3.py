@@ -92,7 +92,7 @@ class TestDockerS3(TestInfrahubDockerClient):
         s3_uri = f"s3://{minio['bucket']}/{s3_key}"
 
         # 6. Wait for Infrahub to recover
-        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=1.0)
 
         # 4. Modify data (delete the tag)
         await modify_infrahub_data(url, ADMIN_TOKEN, seed)
@@ -116,7 +116,7 @@ class TestDockerS3(TestInfrahubDockerClient):
         )
 
         # 6. Wait for Infrahub to recover
-        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=1.0)
 
         # 7. Verify the tag is back
         await verify_infrahub_data(url, ADMIN_TOKEN, seed)
@@ -195,7 +195,7 @@ class TestDockerS3(TestInfrahubDockerClient):
             == f"{prefix}/{selected}"
         ), "the archive was not uploaded where the configured prefix says it should be"
 
-        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=1.0)
 
         # 3. Delete the tag whose return proves the restore happened.
         await modify_infrahub_data(url, ADMIN_TOKEN, seed)
@@ -228,5 +228,5 @@ class TestDockerS3(TestInfrahubDockerClient):
         assert not leftovers, f"temporary downloads were left behind: {leftovers}"
 
         # 8. The uploaded archive's data is back: the object was really restored.
-        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=1.0)
         await verify_infrahub_data(url, ADMIN_TOKEN, seed)

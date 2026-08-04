@@ -694,7 +694,7 @@ class TestDockerRetention(TestInfrahubDockerClient):
             assert f"Pruned backup {name}" in output, f"deletion of {name} was not reported:\n{output}"
 
         # 4. Wait for Infrahub to recover before the second backup.
-        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=1.0)
 
         # 5. Without retention options nothing is pruned (US1 scenario 3).
         for name in out_of_policy:
@@ -720,7 +720,7 @@ class TestDockerRetention(TestInfrahubDockerClient):
         )
         assert "Pruned backup" not in (result.stdout + result.stderr), "retention ran without being configured"
 
-        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=1.0)
 
     async def test_create_prunes_s3_only_when_the_run_uploaded(
         self, infrahub_compose, infrahub_port, backup_binary, minio_docker, s3_bucket, tmp_path
@@ -773,7 +773,7 @@ class TestDockerRetention(TestInfrahubDockerClient):
             f"unexpected reported deletions:\n{output}"
         )
 
-        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=1.0)
 
         # 2. A run that does not upload leaves the bucket alone, however complete the S3
         #    configuration is: the leg follows the upload, not the configuration.
@@ -793,4 +793,4 @@ class TestDockerRetention(TestInfrahubDockerClient):
         output = result.stdout + result.stderr
         assert _s3_location(s3_bucket) not in output, f"the S3 leg ran without an upload:\n{output}"
 
-        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=1.0)
