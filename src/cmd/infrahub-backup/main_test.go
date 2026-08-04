@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -347,4 +348,261 @@ func TestRetentionFlagsResolvePerCommand(t *testing.T) {
 			t.Errorf("prune retention = %+v, want %+v", got, want)
 		}
 	})
+}
+
+// TestResolveRestoreInvocation is the invocation matrix of contracts/cli.md, backend by
+// backend. Every rejected row is a command line that could mean two things on a command
+// that overwrites a deployment's data, so each one must fail rather than resolve to a
+// guess (FR-002, FR-003, FR-004, surface of FR-006).
+func TestResolveRestoreInvocation(t *testing.T) {
+	tests := []struct {
+		name    string
+		backend app.BackendType
+		args    []string
+		latest  bool
+		s3      bool
+		want    restoreRequest
+		// errContains are fragments the error must carry: what was wrong, and the flag or
+		// form that fixes it.
+		errContains []string
+	}{
+		{
+			name:    "tarball: a named archive is unchanged",
+			backend: app.BackendTarball,
+			args:    []string{"infrahub_backup_20260804_120000.tar.gz"},
+			want:    restoreRequest{Archive: "infrahub_backup_20260804_120000.tar.gz"},
+		},
+		{
+			name:    "tarball: an s3 URI argument is unchanged",
+			backend: app.BackendTarball,
+			args:    []string{"s3://bucket/prod/infrahub_backup_20260804_120000.tar.gz"},
+			want:    restoreRequest{Archive: "s3://bucket/prod/infrahub_backup_20260804_120000.tar.gz"},
+		},
+		{
+			name:    "tarball: --latest selects from the local pool",
+			backend: app.BackendTarball,
+			latest:  true,
+			want:    restoreRequest{Latest: true},
+		},
+		{
+			name:    "tarball: --latest --s3 selects from the bucket",
+			backend: app.BackendTarball,
+			latest:  true,
+			s3:      true,
+			want:    restoreRequest{Latest: true, S3: true},
+		},
+		{
+			// FR-003: bare `restore` stays an error, and now points at the flag that
+			// restores without a filename.
+			name:        "tarball: bare restore still fails and names --latest",
+			backend:     app.BackendTarball,
+			errContains: []string{"requires exactly 1 arg(s), only received 0", "--latest"},
+		},
+		{
+			name:        "tarball: more than one archive fails",
+			backend:     app.BackendTarball,
+			args:        []string{"one.tar.gz", "two.tar.gz"},
+			errContains: []string{"requires exactly 1 arg(s), only received 2", "--latest"},
+		},
+		{
+			// FR-002: nothing is restored when the command line asks for both.
+			name:        "tarball: --latest with an archive is rejected",
+			backend:     app.BackendTarball,
+			args:        []string{"infrahub_backup_20260804_120000.tar.gz"},
+			latest:      true,
+			errContains: []string{"mutually exclusive", "--latest", "infrahub_backup_20260804_120000.tar.gz"},
+		},
+		{
+			name:        "tarball: --s3 without --latest points at the URI form",
+			backend:     app.BackendTarball,
+			s3:          true,
+			errContains: []string{"--s3", "requires it", "s3://bucket/key"},
+		},
+		{
+			name:        "tarball: --s3 with an archive but no --latest is rejected",
+			backend:     app.BackendTarball,
+			args:        []string{"infrahub_backup_20260804_120000.tar.gz"},
+			s3:          true,
+			errContains: []string{"--s3", "s3://bucket/key"},
+		},
+		{
+			// FR-004: the no-argument form keeps working unchanged.
+			name:    "plakar: bare restore resolves the latest backup group",
+			backend: app.BackendPlakar,
+			want:    restoreRequest{},
+		},
+		{
+			// FR-004: --latest takes the very same route, so the two cannot drift apart.
+			name:    "plakar: --latest is an alias for the no-argument form",
+			backend: app.BackendPlakar,
+			latest:  true,
+			want:    restoreRequest{},
+		},
+		{
+			name:        "plakar: --latest --s3 is rejected",
+			backend:     app.BackendPlakar,
+			latest:      true,
+			s3:          true,
+			errContains: []string{"--s3", "plakar", "--repo"},
+		},
+		{
+			name:        "plakar: --s3 without --latest is rejected",
+			backend:     app.BackendPlakar,
+			s3:          true,
+			errContains: []string{"--s3"},
+		},
+		{
+			name:        "plakar: --latest with an archive is rejected",
+			backend:     app.BackendPlakar,
+			args:        []string{"infrahub_backup_20260804_120000.tar.gz"},
+			latest:      true,
+			errContains: []string{"mutually exclusive"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolveRestoreInvocation(tc.backend, tc.args, tc.latest, tc.s3)
+
+			if len(tc.errContains) > 0 {
+				if err == nil {
+					t.Fatalf("resolveRestoreInvocation() = %+v, nil, want an error", got)
+				}
+				for _, want := range tc.errContains {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error = %q, want it to contain %q", err, want)
+					}
+				}
+				// A rejected invocation resolves to nothing, so no route can be taken from it.
+				if got != (restoreRequest{}) {
+					t.Errorf("request = %+v, want the zero request alongside an error", got)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("resolveRestoreInvocation() = %v, want nil", err)
+			}
+			if got != tc.want {
+				t.Errorf("resolveRestoreInvocation() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRestoreCommandValidatesBeforeRunning drives the assembled `restore` command rather
+// than the resolution alone, so the wiring is covered too: the flags exist under the
+// names the contract publishes, and a rejected invocation is rejected before RunE — the
+// only ordering in which "nothing was restored" is guaranteed (FR-002, FR-003).
+func TestRestoreCommandValidatesBeforeRunning(t *testing.T) {
+	tests := []struct {
+		name        string
+		backend     app.BackendType
+		args        []string
+		wantRequest restoreRequest
+		errContains string
+	}{
+		{
+			name:        "a named archive runs",
+			backend:     app.BackendTarball,
+			args:        []string{"infrahub_backup_20260804_120000.tar.gz"},
+			wantRequest: restoreRequest{Archive: "infrahub_backup_20260804_120000.tar.gz"},
+		},
+		{
+			name:        "--latest runs without an archive",
+			backend:     app.BackendTarball,
+			args:        []string{"--latest"},
+			wantRequest: restoreRequest{Latest: true},
+		},
+		{
+			name:        "--latest --s3 runs against the bucket pool",
+			backend:     app.BackendTarball,
+			args:        []string{"--latest", "--s3"},
+			wantRequest: restoreRequest{Latest: true, S3: true},
+		},
+		{
+			name:        "bare restore never runs",
+			backend:     app.BackendTarball,
+			errContains: "--latest",
+		},
+		{
+			name:        "--latest with an archive never runs",
+			backend:     app.BackendTarball,
+			args:        []string{"--latest", "infrahub_backup_20260804_120000.tar.gz"},
+			errContains: "mutually exclusive",
+		},
+		{
+			name:        "--s3 alone never runs",
+			backend:     app.BackendTarball,
+			args:        []string{"--s3"},
+			errContains: "--s3",
+		},
+		{
+			name:        "plakar --latest runs the no-argument route",
+			backend:     app.BackendPlakar,
+			args:        []string{"--latest"},
+			wantRequest: restoreRequest{},
+		},
+		{
+			name:        "plakar --latest --s3 never runs",
+			backend:     app.BackendPlakar,
+			args:        []string{"--latest", "--s3"},
+			errContains: "--repo",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var latest, s3 bool
+			var ran bool
+			var request restoreRequest
+
+			cmd := &cobra.Command{
+				Use:          "restore [backup-file]",
+				SilenceUsage: true,
+				Args: func(cmd *cobra.Command, args []string) error {
+					_, err := resolveRestoreInvocation(tc.backend, args, latest, s3)
+					return err
+				},
+				RunE: func(cmd *cobra.Command, args []string) error {
+					resolved, err := resolveRestoreInvocation(tc.backend, args, latest, s3)
+					if err != nil {
+						return err
+					}
+					ran, request = true, resolved
+					return nil
+				},
+			}
+			cmd.Flags().BoolVar(&latest, "latest", false, "")
+			cmd.Flags().BoolVar(&s3, "s3", false, "")
+			cmd.SetArgs(tc.args)
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+
+			err := cmd.Execute()
+
+			if tc.errContains != "" {
+				if err == nil {
+					t.Fatalf("Execute(%v) = nil, want an error", tc.args)
+				}
+				if !strings.Contains(err.Error(), tc.errContains) {
+					t.Errorf("error = %q, want it to contain %q", err, tc.errContains)
+				}
+				if ran {
+					t.Error("RunE ran, want the invocation rejected before any restore work")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("Execute(%v) = %v, want nil", tc.args, err)
+			}
+			if !ran {
+				t.Fatal("RunE did not run, want the restore to proceed")
+			}
+			if request != tc.wantRequest {
+				t.Errorf("request = %+v, want %+v", request, tc.wantRequest)
+			}
+		})
+	}
 }
