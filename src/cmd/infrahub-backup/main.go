@@ -40,6 +40,55 @@ func validateBackendFlags(iops *app.InfrahubOps) error {
 	return nil
 }
 
+// retentionRuleFromFlag resolves one retention rule for the command being run.
+//
+// The flag registered on this command wins whenever the operator set it;
+// otherwise the value comes from viper (environment variable or configuration
+// file). Reading the command's own flag matters because `create` and `prune`
+// register the same viper keys, and viper resolves a bound flag through whichever
+// command bound the key last.
+//
+// An explicit 0 is rejected here: RetentionPolicy.Validate refuses negatives but
+// treats 0 as "rule inactive", and the flag layer is the only layer that can tell
+// an explicitly requested 0 from an omitted rule (contracts/cli.md, FR-001).
+func retentionRuleFromFlag(cmd *cobra.Command, name, rule string) (int, error) {
+	if !cmd.Flags().Changed(name) {
+		return viper.GetInt(name), nil
+	}
+
+	value, err := cmd.Flags().GetInt(name)
+	if err != nil {
+		return 0, err
+	}
+	if value == 0 {
+		return 0, fmt.Errorf("--%s must be at least 1 when set; omit it to disable the %s rule", name, rule)
+	}
+
+	return value, nil
+}
+
+// resolveRetentionFlags stores the validated retention rules on the configuration
+// so the operation can read them like any other option. It runs before any backup
+// work so an invalid policy aborts the run without touching the deployment.
+func resolveRetentionFlags(cmd *cobra.Command, iops *app.InfrahubOps) error {
+	days, err := retentionRuleFromFlag(cmd, "retention-days", "age")
+	if err != nil {
+		return err
+	}
+	count, err := retentionRuleFromFlag(cmd, "retention-count", "count")
+	if err != nil {
+		return err
+	}
+
+	retention := app.RetentionConfig{Days: days, Count: count}
+	if err := retention.Policy().Validate(); err != nil {
+		return err
+	}
+	iops.Config().Retention = retention
+
+	return nil
+}
+
 // version is set via ldflags at build time
 var version string
 
@@ -90,6 +139,9 @@ func main() {
 			if err := validateBackendFlags(iops); err != nil {
 				return err
 			}
+			if err := resolveRetentionFlags(cmd, iops); err != nil {
+				return err
+			}
 			return iops.CreateBackup(
 				viper.GetBool("force"),
 				viper.GetString("neo4jmetadata"),
@@ -112,6 +164,8 @@ func main() {
 	createCmd.Flags().DurationVar(&sleepDuration, "sleep", 0, "Sleep duration after backup creation (e.g., 5m, 300s) for manual file transfer")
 	createCmd.Flags().BoolVar(&encrypt, "encrypt", false, "Encrypt the backup archive (uses built-in OpsMill key unless --encrypt-key is set)")
 	createCmd.Flags().StringVar(&encryptKey, "encrypt-key", "", "Path to custom public key file for encryption (implies --encrypt)")
+	createCmd.Flags().Int("retention-days", 0, "Prune backups older than N days after a successful backup (N >= 1, omit to disable)")
+	createCmd.Flags().Int("retention-count", 0, "Keep only the N most recent backups after a successful backup (N >= 1, omit to disable)")
 
 	// Bind create flags to Viper for environment variable support (INFRAHUB_<FLAG_NAME>)
 	viper.BindPFlag("force", createCmd.Flags().Lookup("force"))
@@ -123,6 +177,8 @@ func main() {
 	viper.BindPFlag("sleep", createCmd.Flags().Lookup("sleep"))
 	viper.BindPFlag("encrypt", createCmd.Flags().Lookup("encrypt"))
 	viper.BindPFlag("encrypt-key", createCmd.Flags().Lookup("encrypt-key"))
+	viper.BindPFlag("retention-days", createCmd.Flags().Lookup("retention-days"))
+	viper.BindPFlag("retention-count", createCmd.Flags().Lookup("retention-count"))
 
 	// Undocumented subcommand: create from-files
 	fromFilesCmd := &cobra.Command{

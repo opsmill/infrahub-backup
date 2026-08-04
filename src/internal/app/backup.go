@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"crypto/ecdh"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,64 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// retentionLegsForCreate returns the storage locations a successful `create` run
+// prunes, and is the gate that decides whether retention runs at all.
+//
+// An inactive policy yields no legs, so a run without retention options behaves
+// exactly as it did before this feature existed (FR-004). When the policy is
+// active the local backup directory is always a leg, and S3 is a leg exactly when
+// this run uploaded there — the mere presence of S3 configuration never causes an
+// object to be deleted (FR-007).
+func retentionLegsForCreate(cfg *Configuration, s3UploadedThisRun bool) ([]storageLocation, error) {
+	if !cfg.Retention.Policy().Active() {
+		return nil, nil
+	}
+
+	legs := []storageLocation{newLocalLocation(cfg.BackupDir)}
+	if !s3UploadedThisRun {
+		return legs, nil
+	}
+
+	client, err := NewS3Client(cfg.S3)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create S3 client for retention: %w", err)
+	}
+
+	return append(legs, newS3Location(client)), nil
+}
+
+// warnRetentionUnsupportedBackend reports that an active retention policy will not
+// be applied because the selected backend has no retention implementation yet.
+// Warning instead of failing keeps the backup itself working, and warning at all
+// keeps the combination from being a silent no-op (FR-012).
+func warnRetentionUnsupportedBackend(cfg *Configuration) {
+	if !cfg.Retention.Policy().Active() {
+		return
+	}
+
+	logrus.Warnf("retention not yet supported for the %s backend; skipping retention (no backups will be pruned)", cfg.Backend)
+}
+
+// applyCreateRetention applies the configured retention policy after a backup has
+// fully succeeded. It reports the joined per-leg failures; every leg is attempted
+// before it returns (FR-008).
+func (iops *InfrahubOps) applyCreateRetention(s3UploadedThisRun bool) error {
+	legs, err := retentionLegsForCreate(iops.config, s3UploadedThisRun)
+	if err != nil {
+		return err
+	}
+	if len(legs) == 0 {
+		return nil
+	}
+
+	policy := iops.config.Retention.Policy()
+	logrus.Infof("Applying retention policy (days: %d, count: %d) to %d location(s)", policy.Days, policy.Count, len(legs))
+
+	_, err = applyRetention(context.Background(), legs, policy, false)
+
+	return err
+}
+
 // loadEncryptionKey loads the public key for encryption.
 // If keyPath is empty, returns the default hardcoded key.
 func loadEncryptionKey(keyPath string) (*ecdh.PublicKey, error) {
@@ -26,6 +85,10 @@ func loadEncryptionKey(keyPath string) (*ecdh.PublicKey, error) {
 // CreateBackup creates a full backup of the Infrahub deployment
 func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeTaskManager bool, s3Upload bool, s3KeepLocal bool, sleepDuration time.Duration, redact bool, encrypt bool, encryptKey string) (retErr error) {
 	if iops.config.Backend == BackendPlakar {
+		// The Plakar backend has no retention implementation yet. Warn up front so
+		// the operator cannot mistake the run for one that pruned, then run the
+		// backup normally and prune nothing (FR-012).
+		warnRetentionUnsupportedBackend(iops.config)
 		return iops.CreatePlakarBackup(force, neo4jMetadata, excludeTaskManager, sleepDuration, redact)
 	}
 
@@ -209,6 +272,15 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 				logrus.Infof("Local backup file deleted: %s", backupPath)
 			}
 		}
+	}
+
+	// Apply retention only now: the archive is written, checksummed, and — when an
+	// upload was requested — safely in S3, so a failed backup can never trigger a
+	// deletion and the fresh backup always anchors the keep-newest floor. The
+	// prune runs before the transfer sleep so an operator who interrupts the sleep
+	// does not skip it.
+	if err := iops.applyCreateRetention(s3Upload); err != nil {
+		return fmt.Errorf("backup succeeded (%s); retention failed: %w", backupFilename, err)
 	}
 
 	// Sleep if requested (for K8s users to transfer backup file)
