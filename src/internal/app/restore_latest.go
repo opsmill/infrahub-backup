@@ -85,11 +85,18 @@ func resolveLatestBackup(ctx context.Context, loc storageLocation) (backupRef, e
 // step: a local archive is already readable on this host, an S3 object has to be
 // downloaded first.
 //
-// Everything that can refuse the run happens before deliver is called, and therefore
-// before any download, before the --sleep wait, and before any container is touched
-// (FR-007). Refusing is the point: falling back to the newest archive that happens to
-// be readable would leave a staging deployment quietly holding stale data, which is
-// worse than a job that visibly failed.
+// The refusals this function owns — an unlistable pool, an empty pool, and an encrypted
+// newest archive with no key — all happen before deliver is called, and therefore before
+// any download, before the --sleep wait, and before any container is touched (FR-007).
+// Refusing is the point: falling back to the newest archive that happens to be readable
+// would leave a staging deployment quietly holding stale data, which is worse than a job
+// that visibly failed.
+//
+// It is not the only place a run can still fail. RestoreBackup rejects a --decrypt-key
+// passed for an archive that turns out not to be encrypted, and it does so after the
+// --sleep wait and after the S3 leg has downloaded — so a pool whose newest archive may
+// or may not be encrypted has no single command line that works unattended. That gate is
+// deliberately left where it is: it is content-based, and this function has only the name.
 func restoreLatestFrom(ctx context.Context, loc storageLocation, decryptKey string, deliver func(ref backupRef) error) error {
 	ref, err := resolveLatestBackup(ctx, loc)
 	if err != nil {
@@ -177,10 +184,20 @@ func downloadLatestS3Backup(ctx context.Context, client s3RestoreClient, dir str
 // fallback between them, so a run that asked for S3 can never restore a local archive,
 // nor the other way round (FR-006). Every other parameter is passed through to
 // RestoreBackup untouched: this entry point only chooses the archive, it does not change
-// how one is restored, so metadata validation, checksums, version compatibility, and the
-// container stop/start guarantees are the existing ones (constitution II).
+// how one is restored, so metadata validation, checksums, and the container stop/start
+// guarantees are the existing ones (constitution II).
 func (iops *InfrahubOps) RestoreLatestBackup(s3 bool, excludeTaskManager bool, restoreMigrateFormat bool, sleepDuration time.Duration, decryptKey string, force bool, resetDeploymentID bool) error {
 	ctx := context.Background()
+
+	// Pool selection is a tarball-backend concept. RestoreBackup ignores the archive path
+	// entirely when the backend is plakar and restores the repository's own latest
+	// snapshot instead, so listing a pool here and then delegating would download an
+	// archive, discard it, and restore something else while reporting success. The CLI
+	// already routes plakar --latest to the no-argument path, but the invariant belongs in
+	// the package that owns the restore, not in the argument parsing (constitution I).
+	if iops.config.Backend == BackendPlakar {
+		return fmt.Errorf("selecting the latest backup from a pool does not apply to the %s backend: its repository already resolves the latest snapshot, so restore without --latest", BackendPlakar)
+	}
 
 	// The one restore this entry point performs, wherever the archive came from: every
 	// parameter travels through untouched, so both legs inherit the same validation,

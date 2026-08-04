@@ -135,7 +135,7 @@ infrahub-backup restore --latest --s3 --s3-bucket my-backups --s3-prefix infrahu
 
 Exactly one location is consulted per run. With `--s3` the local backup directory is never read; without it the bucket is never read. The two are never merged, and there is no fallback from one to the other.
 
-Everything else about the restore is unchanged: `--latest` only decides which archive is used. Metadata validation, checksum verification, version compatibility checks, and the container stop and start sequence all behave exactly as they do when you name an archive, and every other `restore` flag composes with `--latest`.
+Everything else about the restore is unchanged: `--latest` only decides which archive is used. Metadata validation, checksum verification, and the container stop and start sequence all behave exactly as they do when you name an archive, and every other `restore` flag composes with `--latest`.
 
 #### How the newest archive is chosen
 
