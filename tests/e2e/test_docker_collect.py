@@ -381,4 +381,4 @@ class TestDockerCollect(TestInfrahubDockerClient):
         finally:
             # The inherited backup behavior stopped/restarted app containers;
             # wait for recovery so class teardown sees a healthy deployment.
-            await wait_for_http(f"http://localhost:{infrahub_port}/api/config", timeout=180.0, interval=5.0)
+            await wait_for_http(f"http://localhost:{infrahub_port}/api/config", timeout=180.0, interval=1.0)
