@@ -115,7 +115,9 @@ type RetentionRuleInput struct {
 	FlagSet bool
 	// EnvValue is the environment variable's raw text, exactly as the operator set it.
 	EnvValue string
-	// EnvSet reports whether the environment variable is present at all.
+	// EnvSet reports whether the environment variable is present at all. A variable
+	// present with an empty value resolves as if it were absent, because that is what
+	// an unsubstituted Compose or Kubernetes variable looks like.
 	EnvSet bool
 }
 
@@ -158,6 +160,12 @@ func ResolveRetentionConfig(inputs RetentionInputs) (RetentionConfig, error) {
 // negative, a fraction, or anything non-numeric is a configuration error, never a
 // request to disable the rule. Silence is the one outcome an operator who configured
 // retention must never get.
+//
+// The exception is an environment variable that is present but empty, which is a rule
+// nobody configured rather than a value someone got wrong: `INFRAHUB_RETENTION_DAYS=${RETENTION_DAYS}`
+// with nothing to substitute is how Docker Compose and Kubernetes render an unset
+// variable, and failing those deployments would be reading an intent into them that
+// their operators never expressed.
 func resolveRetentionRule(names retentionRuleNames, input RetentionRuleInput) (int, error) {
 	if input.FlagSet {
 		if input.FlagValue < 1 {
@@ -171,7 +179,14 @@ func resolveRetentionRule(names retentionRuleNames, input RetentionRuleInput) (i
 		return 0, nil
 	}
 
-	value, err := strconv.Atoi(strings.TrimSpace(input.EnvValue))
+	// Trimmed first so that a value carrying stray whitespace is read as the number
+	// the operator meant, and an empty or whitespace-only value as no value at all.
+	raw := strings.TrimSpace(input.EnvValue)
+	if raw == "" {
+		return 0, nil
+	}
+
+	value, err := strconv.Atoi(raw)
 	if err != nil || value < 1 {
 		return 0, fmt.Errorf("%s must be a whole number of at least 1 (got %q); omit it to disable the %s rule", names.env, input.EnvValue, names.label)
 	}
