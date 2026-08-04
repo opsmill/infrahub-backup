@@ -6,7 +6,7 @@
 
 ## Summary
 
-Add a `--latest` flag to `infrahub-backup restore` so the newest backup can be restored without naming an archive — the primitive the scheduled prod → staging sync (opsmill/infrahub-helm#80) needs. On the tarball backend, `--latest` lists the configured pool (local backup directory by default, the configured S3 bucket/prefix with `--s3`), ranks archives exactly as retention does (filename timestamp, name-descending tiebreak), fails fast on an encrypted newest archive without a key, logs the resolved archive, and delegates to the existing restore path. On the plakar backend, `--latest` is an explicit alias for the already-shipped no-argument behavior. All selection logic lives in `src/internal/app`; the binary entry point stays thin Cobra wiring.
+Add a `--latest` flag to `infrahub-backup restore` so the newest backup can be restored without naming an archive — the primitive the scheduled prod → staging sync (opsmill/infrahub-helm#80) needs. On the tarball backend, `--latest` lists the configured pool (local backup directory by default, the configured S3 bucket/prefix with `--s3`), ranks archives exactly as retention does (filename timestamp, name-descending tiebreak), fails fast on an encrypted newest archive without a key, logs the resolved archive, and delegates to the existing restore path — the S3 leg downloading via the listing client to a collision-proof temp path so a same-named local archive can never be truncated or deleted (critique E1/X1). On the plakar backend, `--latest` is an explicit alias for the already-shipped no-argument behavior. All selection logic lives in `src/internal/app`; the binary entry point stays thin Cobra wiring.
 
 ## Technical Context
 
@@ -76,7 +76,10 @@ src/
 
 tests/e2e/
 ├── test_docker_tarball.py   # extend: restore --latest (local pool)
-└── test_docker_s3.py        # extend: restore --latest --s3 (bucket pool)
+└── test_docker_s3.py        # extend: restore --latest --s3 (bucket pool;
+                             #   asserts a same-named local archive survives)
+
+README.md                    # document restore --latest / --s3 (discoverability, critique P1)
 ```
 
 **Structure Decision**: Single-project layout, exactly as the repository stands. One new pair of files in the shared core (`src/internal/app/restore_latest.go` + test); wiring edits confined to `src/cmd/infrahub-backup/main.go` and its test; e2e additions extend the two existing suites that already exercise the tarball and S3 restore paths.

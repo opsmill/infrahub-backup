@@ -33,7 +33,9 @@ bin/infrahub-backup restore --latest --s3
 ```
 
 **Expected**: the *S3* archive is selected even though a newer local one exists;
-log line names the `s3://` location; exit 0.
+log line names the `s3://` location; exit 0. Additionally, any local archive
+sharing the selected object's name (the keep-local flow) still exists, unmodified,
+after the restore — the download uses a temporary path, never the archive's name.
 
 ## Scenario 3 — Conflicts are hard errors (FR-002, FR-003, surface of FR-006)
 

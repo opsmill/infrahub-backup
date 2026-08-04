@@ -76,21 +76,36 @@ RestoreLatestBackup(s3 bool, <existing restore params>)` in a new
 4. Log (FR-009): `Restoring latest backup <name> from <location.Name()>` at info
    level before delegating.
 5. Delegate: local → `RestoreBackup(filepath.Join(cfg.BackupDir, name), …)`;
-   S3 → `RestoreBackup("s3://<bucket>/<buildS3Key(name)>", …)`, reusing the
-   existing download-to-BackupDir-and-clean-up path (`downloadBackupFromS3`)
-   untouched.
+   S3 → download with the **same configured client that performed the listing**
+   to a collision-proof temporary path
+   (`os.CreateTemp(cfg.BackupDir, "restore-latest-*.download")` — a name that
+   deliberately does not match `backupNamePattern`), then
+   `RestoreBackup(<tempPath>, …)`, removing the temp file afterwards.
 
-**Rationale**: `RestoreBackup` already owns download, decryption detection,
-metadata/checksum/version validation, container lifecycle, and cleanup — the
+**Rationale**: `RestoreBackup` already owns decryption detection,
+metadata/checksum/version validation, container lifecycle, and streaming — the
 constitution II guarantees. Selection composes in front of it instead of forking
-it. The `s3://` URI delegation reuses the tested download path (including the
-`defer os.Remove` cleanup) rather than duplicating it.
+it. The S3 leg deliberately does **not** round-trip through the positional
+`s3://` URI path: `downloadBackupFromS3` writes to `BackupDir/<basename>` via
+`os.Create` (truncating any existing file) and `RestoreBackup` deletes that path
+after an S3-URI restore — so on a host where `create --s3-upload` kept the local
+copy (both pools then hold the same newest name), URI delegation would truncate
+and then delete the operator's local backup archive. A collision-proof temp name
+removes that failure mode entirely (critique E1/X1); keeping it inside
+`BackupDir` preserves the same-filesystem/same-volume properties the existing
+download relies on. The temp name must never match `backupNamePattern`, so an
+interrupted run can never pollute the pool seen by retention or a subsequent
+`--latest` (covered by a unit test, critique E3).
 
 **Alternatives considered**:
 - *Extending `RestoreBackup` with a `latest bool` parameter* — grows an
   already-wide signature and mixes "choose" with "restore". Rejected.
-- *Direct `client.Download` + local restore for the S3 case* — duplicates
-  `downloadBackupFromS3` (temp handling, cleanup). Rejected.
+- *Delegating the S3 case as `RestoreBackup("s3://<bucket>/<key>")`* — reuses
+  `downloadBackupFromS3`, whose download-to-`BackupDir/<basename>`-then-delete
+  behavior destroys a same-named pre-existing local archive in keep-local flows.
+  Rejected as a Principle II violation (critique E1/X1). The positional-URI form
+  keeps its existing behavior — pre-existing and out of scope; a follow-up issue
+  is worth filing.
 
 ## D4 — Encrypted fail-fast is a name check, not a content check
 
@@ -111,9 +126,10 @@ in the pattern).
 - **Unit (Go, table-driven — constitution IV)**: `resolveLatestBackup` ordering
   (newest wins, tie → name-descending, non-matching names excluded by List, empty
   pool errors, List error propagation) against fake `storageLocation`s; encrypted
-  fail-fast matrix (enc+key, enc+nokey, plain); CLI `Args`/flag-conflict validation
-  in `src/cmd/infrahub-backup/main_test.go` (flag+arg conflict, `--s3` without
-  `--latest`, bare-restore error text mentions `--latest`).
+  fail-fast matrix (enc+key, enc+nokey, plain); the S3-leg temp download name
+  never matches `backupNamePattern` (critique E3); CLI `Args`/flag-conflict
+  validation in `src/cmd/infrahub-backup/main_test.go` (flag+arg conflict, `--s3`
+  without `--latest`, bare-restore error text mentions `--latest`).
 - **E2E (pytest, existing suites)**: `tests/e2e/test_docker_tarball.py` gains a
   create-twice-restore-latest scenario asserting the newer archive is restored and
   the resolved name is logged; `tests/e2e/test_docker_s3.py` gains the
