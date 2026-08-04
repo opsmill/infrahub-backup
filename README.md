@@ -29,19 +29,3 @@ Each operational area is exposed as its own binary:
 Documentation for using the Infrahub Backup is available in the [infrahub-backup documentation](https://docs.infrahub.app/backup/)
 
 Documentation for using Infrahub Collect is available in the [infrahub-collect documentation](https://docs.infrahub.app/collect/)
-
-### Restore without naming an archive
-
-A scheduled restore cannot know a backup's filename in advance, so `restore` accepts `--latest` in place of an archive:
-
-```bash
-# Restore the newest archive in the local backup directory
-infrahub-backup restore --latest
-
-# Restore the newest archive in the configured S3 bucket and prefix
-infrahub-backup restore --latest --s3
-```
-
-`--latest` ranks archives the same way the retention policy does — by the timestamp embedded in the filename, newest first — and consults exactly one location per run: the backup directory, or the bucket with `--s3`, never both. It logs which archive it selected and where it came from before the restore starts, and it fails instead of falling back when the location is empty or the newest archive is encrypted without a `--decrypt-key`.
-
-See [Restore from a backup](https://docs.infrahub.app/backup/restore) for the full flag reference, the selection rules, and a nightly production-to-staging example.
