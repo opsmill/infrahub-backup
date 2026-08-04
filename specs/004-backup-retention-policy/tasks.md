@@ -17,7 +17,7 @@
 
 **Purpose**: Confirm a green baseline so regressions are attributable.
 
-- [ ] T001 Verify baseline: `make build`, `make test`, `make vet`, `make lint` all pass on the unmodified branch (record any pre-existing failures in the PR description rather than fixing them here)
+- [X] T001 Verify baseline: `make build`, `make test`, `make vet`, `make lint` all pass on the unmodified branch (record any pre-existing failures in the PR description rather than fixing them here)
 
 ---
 
