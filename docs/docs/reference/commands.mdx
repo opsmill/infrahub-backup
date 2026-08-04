@@ -147,7 +147,9 @@ infrahub-backup prune (--retention-days <n> | --retention-count <n>) [flags]
 | `--force` | Skip the confirmation prompt (for non-interactive and scripted use) | `false` | - |
 | `--s3` | Also prune backups under the configured S3 bucket/prefix | `false` | - |
 
-`--dry-run`, `--force`, and `--s3` are per-invocation switches and are deliberately not configurable through the environment or a configuration file.
+Flags and environment variables are the only channels that configure retention; the flag wins where both supply a rule. Any value either channel supplies that is not a whole number of at least 1 — including an explicit `0` — is a validation error that aborts the run. A variable that is present but empty counts as unset.
+
+`--dry-run`, `--force`, and `--s3` are per-invocation switches with no environment variable behind them.
 
 **Examples:**
 
@@ -167,7 +169,10 @@ infrahub-backup prune --retention-days 30 --s3 --force
 - The rules combine as a union: a backup survives if either rule claims it.
 - The most recent backup at each location always survives; there is no override.
 - The local directory and the S3 prefix are evaluated independently. S3 is never touched without `--s3`.
+- A backup's age comes from the timestamp in its filename, read in the local time of the host running the command, with a day measured as a fixed 24 hours.
+- The set previewed and confirmed is exactly the set deleted: candidates are selected once, and nothing is listed again after the confirmation. A candidate that had already vanished counts as satisfied, not as a failure.
 - Without `--force`, a run whose standard input is not a terminal refuses to delete anything.
+- Without `--force`, a run that cannot list one of its locations exits before the confirmation and deletes nothing at any location. With `--force`, every location that could be listed is still pruned.
 - `--dry-run` with `--force` is rejected as contradictory.
 
 **Exit codes:**
@@ -176,7 +181,9 @@ infrahub-backup prune --retention-days 30 --s3 --force
 |---------|-----------|
 | Pruned successfully, dry run, nothing to prune, or prompt declined | `0` |
 | Validation error (no rule, value below 1, contradictory flags, `plakar` backend) | non-zero |
-| A location failed to prune (other locations are still attempted) | non-zero |
+| A location could not be listed, without `--force` — nothing deleted anywhere, no confirmation asked | non-zero |
+| A location failed, with `--force` — every other location is still pruned | non-zero |
+| A deletion failed after a complete preview — the remaining candidates are still attempted | non-zero |
 
 ### Environment commands
 

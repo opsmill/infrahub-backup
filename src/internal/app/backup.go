@@ -276,9 +276,12 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 
 	// Apply retention only now: the archive is written, checksummed, and — when an
 	// upload was requested — safely in S3, so a failed backup can never trigger a
-	// deletion and the fresh backup always anchors the keep-newest floor. The
-	// prune runs before the transfer sleep so an operator who interrupts the sleep
-	// does not skip it.
+	// deletion. Each leg's keep-newest floor protects that location's newest
+	// archive, which is this run's at every location still holding it; with
+	// --s3-upload and without --s3-keep-local the local copy was removed just
+	// above, so the local leg's newest is the previous archive instead. The prune
+	// runs before the transfer sleep so an operator who interrupts the sleep does
+	// not skip it.
 	if err := iops.applyCreateRetention(s3Upload); err != nil {
 		return fmt.Errorf("backup succeeded (%s); retention failed: %w", backupFilename, err)
 	}
