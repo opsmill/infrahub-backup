@@ -24,7 +24,7 @@ Single project: `src/`, `tests/` at repository root, per plan.md.
 
 **Purpose**: Baseline before any change — this feature adds no dependencies and no scaffolding.
 
-- [ ] T001 Record a green baseline on the branch: `make build && make test && make vet && make lint` all pass before any feature change (no `go.mod` change is expected at any point in this feature, so `scripts/update-vendor-hash.sh` must NOT be needed; treat a dirty `flake.nix` as a review error)
+- [X] T001 Record a green baseline on the branch: `make build && make test && make vet && make lint` all pass before any feature change (no `go.mod` change is expected at any point in this feature, so `scripts/update-vendor-hash.sh` must NOT be needed; treat a dirty `flake.nix` as a review error)
 
 ---
 
