@@ -1,0 +1,241 @@
+---
+title: Manage backup retention
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+A backup schedule that never deletes anything eventually fills its disk or its bucket, and the failure usually surfaces as a failed backup rather than as a full volume. A retention policy bounds that growth: you declare how many recovery points to keep, and `infrahub-backup` deletes the rest.
+
+Follow this guide to preview a policy against your existing archives, apply it on demand, and attach it to a scheduled backup so the directory stays bounded without a wrapper script. You can also extend the same policy to S3-compatible storage.
+
+## Prerequisites
+
+Before applying a retention policy:
+
+- Ensure `infrahub-backup` is installed and configured. See [Install Infrahub Backup](./install.mdx).
+- Know which directory holds your archives (`--backup-dir`, `./infrahub_backups` by default).
+- Confirm your recovery point objectives, so the policy you write matches what your organization requires.
+- For object storage, confirm your credentials can list and delete under the prefix. See [Grant list and delete permissions](#grant-list-and-delete-permissions).
+
+## How retention decides what to keep
+
+Two independent rules define a policy, and you can set either one or both:
+
+| Flag | Rule | Environment variable |
+|------|------|---------------------|
+| `--retention-days N` | Keep backups newer than N days | `INFRAHUB_RETENTION_DAYS` |
+| `--retention-count N` | Keep the N most recent backups | `INFRAHUB_RETENTION_COUNT` |
+
+Both flags accept values of 1 or greater. Omit a flag to leave its rule inactive. Passing an explicit `0` is rejected as a validation error rather than treated as "disabled", so a schedule set up incorrectly fails loudly instead of quietly deleting more than you intended.
+
+Four properties govern every deletion decision.
+
+**A backup survives if either rule claims it.** The rules combine as a union, not an intersection, so the more generous rule always wins. This is the property operators most often read backwards:
+
+```bash
+infrahub-backup prune --retention-days 7 --retention-count 14 --force
+```
+
+That policy keeps every archive from the last seven days *and* the 14 most recent archives, whichever set is larger. On a daily schedule it settles at 14 archives. On an hourly schedule the age rule dominates and roughly 168 archives survive. If you want a hard cap on the number of archives, set `--retention-count` alone.
+
+**The most recent backup always survives.** Even a policy that matches every archive on disk keeps the newest one. There is no flag to override this, so a mistyped policy can never leave you with zero recovery points.
+
+**Each location is evaluated on its own.** The local directory and the S3 prefix are separate populations: each keeps its own newest archive, and each applies the rules to the archives it actually holds. Deleting a local copy never deletes the uploaded one.
+
+**Only recognized archives are considered.** Retention acts on files named `infrahub_backup_<YYYYMMDD_HHMMSS>.tar.gz` or `infrahub_backup_<YYYYMMDD_HHMMSS>.tar.gz.enc`, and it reads each backup's age from the timestamp embedded in that name rather than from the file modification time. Anything else in the directory — notes, unrelated archives, renamed backups — is invisible to retention and is never deleted.
+
+:::warning
+Because age comes from the filename, renaming an archive changes when retention considers it expired. Keep the generated names if you want the policy to behave predictably.
+:::
+
+## Step 1: Preview what a policy would delete
+
+Run `prune` with `--dry-run` before trusting any new policy. It reports the exact set a real run would delete, deletes nothing, and never prompts:
+
+```bash
+infrahub-backup prune --backup-dir /data/backups/infrahub --retention-days 7 --dry-run
+```
+
+```text
+INFO[0000] Applying retention policy (days: 7, count: 0) to 1 location(s)
+INFO[0000] Would prune backup infrahub_backup_20260715_073229.tar.gz from local:/data/backups/infrahub (dry run)
+INFO[0000] Would prune backup infrahub_backup_20260710_073229.tar.gz from local:/data/backups/infrahub (dry run)
+INFO[0000] Would prune backup infrahub_backup_20260705_073229.tar.gz from local:/data/backups/infrahub (dry run)
+INFO[0000] Retention at local:/data/backups/infrahub: 3 backup(s) kept, 3 candidate(s) to prune
+```
+
+Compare that list against what you expect to keep. A real run deletes exactly this set.
+
+## Step 2: Apply the policy
+
+Run the same command without `--dry-run`. On an interactive terminal, `prune` reports the candidates and asks once before deleting anything:
+
+```bash
+infrahub-backup prune --backup-dir /data/backups/infrahub --retention-days 7
+```
+
+```text
+Prune 3 backup(s) listed above? [y/N]: y
+```
+
+Anything other than `y` or `yes` declines. A declined run deletes nothing and exits successfully, so an operator who changes their mind has not caused a failure.
+
+For scheduled and scripted runs, pass `--force` to skip the prompt:
+
+```bash
+infrahub-backup prune --backup-dir /data/backups/infrahub --retention-days 7 --force
+```
+
+Every deletion is logged as it happens, so a forced run remains auditable after the fact:
+
+```text
+INFO[0000] Pruned backup infrahub_backup_20260715_073229.tar.gz from local:/data/backups/infrahub
+```
+
+:::info
+Without `--force`, a run whose standard input is not a terminal refuses to delete anything and tells you to pass `--force`. This keeps a `prune` that was written for a terminal from deleting silently when it later runs under cron. `--dry-run` and `--force` together are rejected as contradictory: a dry run never deletes and never prompts, so there is nothing to force.
+:::
+
+## Step 3: Attach retention to scheduled backups
+
+Passing a retention flag to `create` applies the policy automatically after the backup finishes, with no prompt. Retention runs only once the archive is written and its checksum recorded, so a failed backup never triggers a deletion:
+
+```bash
+infrahub-backup create --retention-days 7 --retention-count 14
+```
+
+This replaces the `find`-based cleanup that backup scripts often carry, and it prunes only recognized archives instead of everything matching a glob:
+
+<Tabs>
+<TabItem value="cron" label="Cron" default>
+
+```bash
+# Daily backup at 2 AM, keeping 30 days of archives
+0 2 * * * /usr/local/bin/infrahub-backup create --retention-days 30 >> /var/log/infrahub-backup.log 2>&1
+```
+
+</TabItem>
+<TabItem value="env-vars" label="Environment variables">
+
+```bash
+# Both rules are configurable through the environment, like every other flag
+export INFRAHUB_BACKUP_DIR=/data/backups/infrahub
+export INFRAHUB_RETENTION_DAYS=30
+export INFRAHUB_RETENTION_COUNT=60
+
+infrahub-backup create
+```
+
+</TabItem>
+<TabItem value="config-file" label="Configuration file">
+
+```yaml
+# Configuration-file keys mirror the flag names
+retention-days: 30
+retention-count: 60
+```
+
+</TabItem>
+</Tabs>
+
+Running `create` with no retention flag behaves exactly as it always has: nothing is pruned, and no archive is examined.
+
+:::note
+`--dry-run`, `--force`, and `--s3` belong to `prune` alone and are deliberately not configurable through the environment or a configuration file. A persistent `force` setting would disarm the confirmation that makes pruning safe.
+:::
+
+If the backup succeeds but a deletion fails, the run exits non-zero with a message that states the backup succeeded and names the new archive, so you can tell a retention problem from a lost backup. Within each location, deletion is best-effort: one failure does not strand the remaining candidates.
+
+## Step 4: Extend retention to object storage
+
+Retention treats object storage as a second location, and it never touches that location unless you ask:
+
+- On `create`, the S3 leg runs exactly when that run uploaded an archive, which means `--s3-upload` was passed and the upload succeeded.
+- On `prune`, the S3 leg runs only when you pass `--s3`. Without it, a fully configured bucket is left alone.
+
+```bash
+# Prune both the local directory and the configured bucket/prefix
+infrahub-backup prune --retention-days 30 --s3 --force \
+  --s3-bucket my-backups --s3-prefix infrahub/prod
+
+# Prune the local directory only; the bucket is untouched
+infrahub-backup prune --retention-days 30 --force
+```
+
+Only objects whose name matches the backup pattern are considered, and only under the configured prefix. Objects your team stores alongside the backups are never candidates.
+
+### Grant list and delete permissions
+
+Uploading a backup needs write permission. Pruning one also needs to list the prefix and delete objects under it. Scope those rights to the backup prefix rather than the whole bucket:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ListInfrahubBackupPrefix",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::my-backups",
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": "infrahub/prod/*"
+        }
+      }
+    },
+    {
+      "Sid": "ManageInfrahubBackupObjects",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:GetObject",
+        "s3:DeleteObject"
+      ],
+      "Resource": "arn:aws:s3:::my-backups/infrahub/prod/*"
+    }
+  ]
+}
+```
+
+With upload-only credentials, the local directory still prunes correctly, the S3 leg fails, and the run exits non-zero reporting which location failed.
+
+### Combine with bucket lifecycle rules
+
+A bucket lifecycle rule and a retention policy solve overlapping problems from different sides, and running both is a reasonable belt-and-braces arrangement:
+
+- Retention keeps the two locations consistent with one policy you can preview with `--dry-run`, and it guarantees the newest archive survives.
+- A lifecycle rule enforces expiry inside the storage provider even if the tool never runs again, and it can also transition older archives to colder storage classes.
+
+If you use both, set the lifecycle expiry window wider than the retention window. A lifecycle rule has no notion of "keep the newest", so a window narrower than your backup interval can expire your last remaining archive.
+
+## Validation
+
+Confirm your retention setup works:
+
+- ✓ `--dry-run` lists exactly the archives you expect to lose
+- ✓ A real run deletes that set and nothing else
+- ✓ Unrelated files in the backup directory are still present
+- ✓ At least one archive remains at every location
+- ✓ For object storage, the bucket reflects the same policy after a `--s3` run
+
+## Troubleshooting
+
+### An archive I expected to be deleted is still there
+
+Check whether it is the newest at its location — the floor keeps it unconditionally. Otherwise, confirm the name still matches `infrahub_backup_<YYYYMMDD_HHMMSS>.tar.gz`; a renamed archive is invisible to retention. Remember also that the two rules combine as a union, so an archive older than `--retention-days` still survives while it sits within `--retention-count`.
+
+### A restored archive reappeared as a deletion candidate
+
+Restoring from an S3 URI downloads the archive into the backup directory under its original name, which carries its original timestamp. That copy is a normal archive as far as retention is concerned, so the next scheduled run may well delete it. This is expected. If you need to keep a restored archive, move it outside the backup directory or rename it.
+
+### Retention did nothing on the `plakar` backend
+
+Retention is not yet supported for the `plakar` backend. A `create` run with `--backend plakar` and retention flags completes the backup, warns that retention is not yet supported, prunes nothing, and exits successfully. A `prune` run against that backend fails with a validation error rather than doing nothing quietly. Use the default tarball backend if you need retention today.
+
+## Related resources
+
+- [Back up your Infrahub instance](./create.mdx)
+- [Restore from a backup](./restore.mdx)
+- [CLI command reference](../reference/commands.mdx)
+- [Configuration reference](../reference/configuration.mdx)
