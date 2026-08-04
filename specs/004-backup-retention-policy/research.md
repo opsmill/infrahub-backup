@@ -119,6 +119,20 @@ CronJobs (FR-011; viper `SetEnvPrefix("INFRAHUB")` + `AutomaticEnv` already in
 `cli.go`). Validation (each ≥1 when set; at least one set to activate; `prune`
 errors when none set) happens before any operation.
 
+**Superseded during implementation (2026-08-04)** — this decision shipped differently
+in two respects, recorded here so the research note is not read as a description of the
+code:
+
+- *No config-file keys.* The binary reads no configuration file at all; `cli.go` sets up
+  only `SetEnvPrefix`/`SetEnvKeyReplacer`/`AutomaticEnv`. Flags and environment variables
+  are the only channels, and FR-011 was narrowed to match.
+- *Not viper-bound.* The two `viper.BindPFlag` calls for the retention keys were removed:
+  viper coerces an environment value to an integer, and 0 means "rule inactive", so a
+  mistyped variable was indistinguishable from an unset rule. The cmd layer now reads the
+  variables with `os.LookupEnv` and hands the raw text to `app.ResolveRetentionConfig`,
+  which rejects anything that is not a whole number ≥ 1 and treats a present-but-empty
+  variable as unset. See `contracts/cli.md` § Corrections after implementation.
+
 **Rationale**: Follows the binary's uniform flag/viper pattern; environment-variable
 support is what makes the K8s CronJob path scriptless.
 
