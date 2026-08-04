@@ -24,10 +24,10 @@ func backupNameAt(ts time.Time) string {
 	return "infrahub_backup_" + ts.Format(backupNameTimestampLayout) + ".tar.gz"
 }
 
-// refAgo builds a backupRef for a backup created age before retentionNow.
+// refAgo builds a backupRef for a backup created age before retentionNow. The name
+// carries the timestamp, so the ref's age follows from it.
 func refAgo(age time.Duration) backupRef {
-	created := retentionNow.Add(-age)
-	return backupRef{Name: backupNameAt(created), CreatedAt: created}
+	return backupRef{Name: backupNameAt(retentionNow.Add(-age))}
 }
 
 func refNames(refs []backupRef) []string {
@@ -273,7 +273,7 @@ func TestParseBackupName(t *testing.T) {
 		name    string
 		input   string
 		want    bool
-		wantUTC string // expected CreatedAt rendered with the embedded layout
+		wantUTC string // expected createdAt() rendered with the embedded layout
 	}{
 		// Recognized backups.
 		{name: "plain archive", input: "infrahub_backup_20260804_120000.tar.gz", want: true, wantUTC: "20260804_120000"},
@@ -325,11 +325,11 @@ func TestParseBackupName(t *testing.T) {
 			if ref.Name != tc.input {
 				t.Errorf("ref.Name = %q, want %q", ref.Name, tc.input)
 			}
-			if got := ref.CreatedAt.Format(backupNameTimestampLayout); got != tc.wantUTC {
-				t.Errorf("ref.CreatedAt = %s, want embedded timestamp %s", got, tc.wantUTC)
+			if got := ref.createdAt().Format(backupNameTimestampLayout); got != tc.wantUTC {
+				t.Errorf("ref.createdAt() = %s, want embedded timestamp %s", got, tc.wantUTC)
 			}
-			if loc := ref.CreatedAt.Location(); loc != time.Local {
-				t.Errorf("ref.CreatedAt location = %v, want host-local time", loc)
+			if loc := ref.createdAt().Location(); loc != time.Local {
+				t.Errorf("ref.createdAt() location = %v, want host-local time", loc)
 			}
 		})
 	}
@@ -351,8 +351,8 @@ func TestParseBackupNameRoundTripsGeneratedFilename(t *testing.T) {
 	if ref.Name != generated {
 		t.Errorf("ref.Name = %q, want %q", ref.Name, generated)
 	}
-	if ref.CreatedAt.Before(before) || ref.CreatedAt.After(after) {
-		t.Errorf("ref.CreatedAt = %v, want within [%v, %v]", ref.CreatedAt, before, after)
+	if ref.createdAt().Before(before) || ref.createdAt().After(after) {
+		t.Errorf("ref.createdAt() = %v, want within [%v, %v]", ref.createdAt(), before, after)
 	}
 
 	encrypted := generated + ".enc"
@@ -360,15 +360,15 @@ func TestParseBackupNameRoundTripsGeneratedFilename(t *testing.T) {
 	if !ok {
 		t.Fatalf("parseBackupName(%q) did not recognize the encrypted variant", encrypted)
 	}
-	if !encRef.CreatedAt.Equal(ref.CreatedAt) {
-		t.Errorf("encrypted variant CreatedAt = %v, want %v", encRef.CreatedAt, ref.CreatedAt)
+	if !encRef.createdAt().Equal(ref.createdAt()) {
+		t.Errorf("encrypted variant createdAt() = %v, want %v", encRef.createdAt(), ref.createdAt())
 	}
 }
 
 func TestSortBackupRefsNewestFirst(t *testing.T) {
 	sameTimestamp := retentionNow.Add(-2 * retentionDay)
-	plain := backupRef{Name: backupNameAt(sameTimestamp), CreatedAt: sameTimestamp}
-	encrypted := backupRef{Name: backupNameAt(sameTimestamp) + ".enc", CreatedAt: sameTimestamp}
+	plain := backupRef{Name: backupNameAt(sameTimestamp)}
+	encrypted := backupRef{Name: backupNameAt(sameTimestamp) + ".enc"}
 	newest := refAgo(1 * retentionDay)
 	oldest := refAgo(30 * retentionDay)
 
@@ -536,26 +536,21 @@ func TestSelectPrunableFloorAlwaysKeepsNewest(t *testing.T) {
 }
 
 func TestLocalLocationListAndDelete(t *testing.T) {
-	dir := t.TempDir()
-
 	backups := []string{
 		"infrahub_backup_20260804_120000.tar.gz",
 		"infrahub_backup_20260801_090000.tar.gz.enc",
 	}
-	decoys := []string{
-		"notes.txt",
-		"infrahub_backup_garbage.tar.gz",
-		"somebackup.tar.gz",
-		"infrahub_backup_20261301_120000.tar.gz", // unparseable timestamp
+	// Decoys beyond the ones every prune fixture carries: a name whose timestamp is
+	// not a real instant, and a checksum sidecar.
+	extraDecoys := []string{
+		"infrahub_backup_20261301_120000.tar.gz",
 		"infrahub_backup_20260804_120000.tar.gz.sha256",
 	}
-	for _, name := range append(slices.Clone(backups), decoys...) {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
+	dir := seedPruneDir(t, append(slices.Clone(backups), extraDecoys...)...)
+
 	// A directory whose name matches the backup pattern is not a backup.
-	if err := os.Mkdir(filepath.Join(dir, "infrahub_backup_20260101_000000.tar.gz"), 0o755); err != nil {
+	backupNamedDir := "infrahub_backup_20260101_000000.tar.gz"
+	if err := os.Mkdir(filepath.Join(dir, backupNamedDir), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -593,16 +588,8 @@ func TestLocalLocationListAndDelete(t *testing.T) {
 		t.Fatal("Delete of a path-traversal name = nil, want a refusal error")
 	}
 
-	remaining, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	gotRemaining := make([]string, 0, len(remaining))
-	for _, entry := range remaining {
-		gotRemaining = append(gotRemaining, entry.Name())
-	}
-	slices.Sort(gotRemaining)
-	wantRemaining := append(slices.Clone(decoys), "infrahub_backup_20260101_000000.tar.gz")
+	gotRemaining := pruneDirNames(t, dir)
+	wantRemaining := append(append(slices.Clone(pruneDecoys), extraDecoys...), backupNamedDir)
 	slices.Sort(wantRemaining)
 	if !slices.Equal(gotRemaining, wantRemaining) {
 		t.Errorf("directory after pruning = %v, want the decoys untouched %v", gotRemaining, wantRemaining)
@@ -713,8 +700,7 @@ var _ storageLocation = (*fakeLocation)(nil)
 // evaluates against the wall clock, so orchestrator fixtures are anchored to
 // time.Now() rather than to the fixed instant the selection tests use.
 func refDaysAgo(days int) backupRef {
-	created := time.Now().Add(-time.Duration(days) * retentionDay)
-	return backupRef{Name: backupNameAt(created), CreatedAt: created}
+	return backupRef{Name: backupNameAt(time.Now().Add(-time.Duration(days) * retentionDay))}
 }
 
 // TestApplyRetentionBestEffortWithinLeg covers FR-008: one failing deletion must
@@ -729,7 +715,7 @@ func TestApplyRetentionBestEffortWithinLeg(t *testing.T) {
 		deleteErrs: map[string]error{day20.Name: stubborn},
 	}
 
-	outcomes, err := applyRetention(context.Background(), []storageLocation{location}, RetentionPolicy{Days: 7}, false)
+	outcomes, err := applyRetention(context.Background(), []storageLocation{location}, RetentionPolicy{Days: 7}, retentionExecute)
 	if err == nil {
 		t.Fatal("applyRetention() = nil error, want the failed deletion reported")
 	}
@@ -762,9 +748,13 @@ func TestApplyRetentionBestEffortWithinLeg(t *testing.T) {
 	if got, want := refNames(outcome.Kept), []string{newest.Name}; !slices.Equal(got, want) {
 		t.Errorf("outcome.Kept = %v, want %v", got, want)
 	}
-	// Pruned reports what actually went away, not what was attempted.
-	if got, want := refNames(outcome.Pruned), []string{day10.Name, day30.Name}; !slices.Equal(got, want) {
-		t.Errorf("outcome.Pruned = %v, want %v", got, want)
+	// Deleted reports what actually went away, not what was attempted; Candidates
+	// still reports everything the policy selected, including the one that failed.
+	if got, want := refNames(outcome.Deleted), []string{day10.Name, day30.Name}; !slices.Equal(got, want) {
+		t.Errorf("outcome.Deleted = %v, want %v", got, want)
+	}
+	if got, want := refNames(outcome.Candidates), wantAttempted; !slices.Equal(got, want) {
+		t.Errorf("outcome.Candidates = %v, want every selected backup %v", got, want)
 	}
 }
 
@@ -777,7 +767,7 @@ func TestApplyRetentionAttemptsEveryLeg(t *testing.T) {
 	broken := &fakeLocation{name: "local:/gone", listErr: listFailure}
 	healthy := &fakeLocation{name: "s3://bucket/prod", refs: []backupRef{newest, day20}}
 
-	outcomes, err := applyRetention(context.Background(), []storageLocation{broken, healthy}, RetentionPolicy{Days: 7}, false)
+	outcomes, err := applyRetention(context.Background(), []storageLocation{broken, healthy}, RetentionPolicy{Days: 7}, retentionExecute)
 	if err == nil {
 		t.Fatal("applyRetention() = nil error, want the broken leg reported")
 	}
@@ -798,8 +788,9 @@ func TestApplyRetentionAttemptsEveryLeg(t *testing.T) {
 	if outcomes[0].Err == nil {
 		t.Error("outcomes[0].Err = nil, want the broken leg marked as failed")
 	}
-	if outcomes[0].Pruned != nil {
-		t.Errorf("outcomes[0].Pruned = %v, want nothing pruned at a leg that could not be listed", refNames(outcomes[0].Pruned))
+	if outcomes[0].Candidates != nil || outcomes[0].Deleted != nil {
+		t.Errorf("outcomes[0] selected %v and deleted %v, want nothing at a leg that could not be listed",
+			refNames(outcomes[0].Candidates), refNames(outcomes[0].Deleted))
 	}
 	if outcomes[1].Err != nil {
 		t.Errorf("outcomes[1].Err = %v, want nil for the healthy leg", outcomes[1].Err)
@@ -821,7 +812,7 @@ func TestApplyRetentionErrorAggregation(t *testing.T) {
 		deleteErrs: map[string]error{day20.Name: denied, day30.Name: transient},
 	}
 
-	_, err := applyRetention(context.Background(), []storageLocation{local, s3}, RetentionPolicy{Days: 7}, false)
+	_, err := applyRetention(context.Background(), []storageLocation{local, s3}, RetentionPolicy{Days: 7}, retentionExecute)
 	if err == nil {
 		t.Fatal("applyRetention() = nil error, want both legs reported")
 	}
@@ -857,7 +848,7 @@ func TestApplyRetentionDryRunMatchesRealRun(t *testing.T) {
 	}
 
 	dryLocations := newFixture()
-	dryOutcomes, err := applyRetention(context.Background(), dryLocations, policy, true)
+	dryOutcomes, err := applyRetention(context.Background(), dryLocations, policy, retentionDryRun)
 	if err != nil {
 		t.Fatalf("dry-run applyRetention() = %v, want nil", err)
 	}
@@ -869,7 +860,7 @@ func TestApplyRetentionDryRunMatchesRealRun(t *testing.T) {
 	}
 
 	realLocations := newFixture()
-	realOutcomes, err := applyRetention(context.Background(), realLocations, policy, false)
+	realOutcomes, err := applyRetention(context.Background(), realLocations, policy, retentionExecute)
 	if err != nil {
 		t.Fatalf("applyRetention() = %v, want nil", err)
 	}
@@ -881,19 +872,26 @@ func TestApplyRetentionDryRunMatchesRealRun(t *testing.T) {
 		if dryOutcomes[i].Location != realOutcomes[i].Location {
 			t.Fatalf("outcome %d: dry-run location %q, real-run location %q", i, dryOutcomes[i].Location, realOutcomes[i].Location)
 		}
-		if got, want := refNames(dryOutcomes[i].Pruned), refNames(realOutcomes[i].Pruned); !slices.Equal(got, want) {
+		if got, want := refNames(dryOutcomes[i].Candidates), refNames(realOutcomes[i].Candidates); !slices.Equal(got, want) {
 			t.Errorf("%s: dry-run candidates %v, want the real-run set %v", dryOutcomes[i].Location, got, want)
+		}
+		// The candidates a dry run announces are exactly what a real run removes.
+		if got, want := refNames(dryOutcomes[i].Candidates), refNames(realOutcomes[i].Deleted); !slices.Equal(got, want) {
+			t.Errorf("%s: dry-run candidates %v, want exactly what the real run deleted %v", dryOutcomes[i].Location, got, want)
+		}
+		if dryOutcomes[i].Deleted != nil {
+			t.Errorf("%s: dry run reported %v as deleted, want nothing", dryOutcomes[i].Location, refNames(dryOutcomes[i].Deleted))
 		}
 		if got, want := refNames(dryOutcomes[i].Kept), refNames(realOutcomes[i].Kept); !slices.Equal(got, want) {
 			t.Errorf("%s: dry-run kept %v, want the real-run set %v", dryOutcomes[i].Location, got, want)
 		}
-		if got, want := realLocations[i].(*fakeLocation).deleted, refNames(realOutcomes[i].Pruned); !slices.Equal(got, want) {
+		if got, want := realLocations[i].(*fakeLocation).deleted, refNames(realOutcomes[i].Deleted); !slices.Equal(got, want) {
 			t.Errorf("%s: deleted %v, want exactly the reported set %v", dryOutcomes[i].Location, got, want)
 		}
 	}
 
 	// The preview is not trivially empty: the fixture really has out-of-policy backups.
-	if len(dryOutcomes[0].Pruned) == 0 {
+	if len(dryOutcomes[0].Candidates) == 0 {
 		t.Error("dry run previewed no candidates; the fixture no longer exercises pruning")
 	}
 }
@@ -911,25 +909,34 @@ func TestApplyRetentionNoOpCases(t *testing.T) {
 		{name: "inactive policy prunes nothing", refs: []backupRef{refDaysAgo(1), refDaysAgo(40)}, policy: RetentionPolicy{}, wantKept: 2},
 	}
 
+	modes := []struct {
+		label string
+		mode  retentionMode
+	}{
+		{label: "execute", mode: retentionExecute},
+		{label: "dry run", mode: retentionDryRun},
+	}
+
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			for _, dryRun := range []bool{false, true} {
+			for _, run := range modes {
 				location := &fakeLocation{name: "local:/backups", refs: slices.Clone(tc.refs)}
-				outcomes, err := applyRetention(context.Background(), []storageLocation{location}, tc.policy, dryRun)
+				outcomes, err := applyRetention(context.Background(), []storageLocation{location}, tc.policy, run.mode)
 				if err != nil {
-					t.Fatalf("applyRetention(dryRun=%v) = %v, want nil", dryRun, err)
+					t.Fatalf("applyRetention(%s) = %v, want nil", run.label, err)
 				}
 				if len(location.attempted) != 0 {
-					t.Errorf("dryRun=%v: attempted deletions %v, want none", dryRun, location.attempted)
+					t.Errorf("%s: attempted deletions %v, want none", run.label, location.attempted)
 				}
 				if len(outcomes) != 1 {
 					t.Fatalf("outcomes = %d, want 1", len(outcomes))
 				}
-				if outcomes[0].Pruned != nil {
-					t.Errorf("dryRun=%v: Pruned = %v, want nothing", dryRun, refNames(outcomes[0].Pruned))
+				if outcomes[0].Candidates != nil || outcomes[0].Deleted != nil {
+					t.Errorf("%s: selected %v and deleted %v, want nothing", run.label,
+						refNames(outcomes[0].Candidates), refNames(outcomes[0].Deleted))
 				}
 				if len(outcomes[0].Kept) != tc.wantKept {
-					t.Errorf("dryRun=%v: Kept = %v, want %d ref(s)", dryRun, refNames(outcomes[0].Kept), tc.wantKept)
+					t.Errorf("%s: Kept = %v, want %d ref(s)", run.label, refNames(outcomes[0].Kept), tc.wantKept)
 				}
 			}
 		})
@@ -970,12 +977,10 @@ func TestRetentionLegsForCreate(t *testing.T) {
 	dir := t.TempDir()
 
 	tests := []struct {
-		name        string
-		retention   RetentionConfig
-		s3Uploaded  bool
-		wantLegs    []string
-		wantErr     bool
-		errContains string
+		name       string
+		retention  RetentionConfig
+		s3Uploaded bool
+		wantLegs   []string
 	}{
 		{
 			name:      "no policy means no legs",
@@ -1041,44 +1046,22 @@ func TestRetentionLegsForCreateS3ClientFailure(t *testing.T) {
 // policy prunes out-of-policy archives in the backup directory and leaves
 // everything that is not a backup alone (FR-006).
 func TestApplyCreateRetentionPrunesLocalLeg(t *testing.T) {
-	dir := t.TempDir()
-
 	newest := backupNameAt(time.Now())
 	inPolicy := backupNameAt(time.Now().Add(-2 * retentionDay))
 	outOfPolicy := []string{
 		backupNameAt(time.Now().Add(-20 * retentionDay)),
 		backupNameAt(time.Now().Add(-30*retentionDay)) + ".enc",
 	}
-	decoys := []string{"notes.txt", "infrahub_backup_garbage.tar.gz", "somebackup.tar.gz"}
 
-	seed := func() {
-		for _, name := range append([]string{newest, inPolicy}, append(slices.Clone(outOfPolicy), decoys...)...) {
-			if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	remaining := func() []string {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		names := make([]string, 0, len(entries))
-		for _, entry := range entries {
-			names = append(names, entry.Name())
-		}
-		slices.Sort(names)
-		return names
-	}
+	dir := seedPruneDir(t, append([]string{newest, inPolicy}, outOfPolicy...)...)
 
 	// Without retention configured the directory is untouched (US1 scenario 3).
-	seed()
-	before := remaining()
+	before := pruneDirNames(t, dir)
 	iops := &InfrahubOps{config: createRetentionConfig(dir, RetentionConfig{})}
 	if err := iops.applyCreateRetention(false); err != nil {
 		t.Fatalf("applyCreateRetention() without a policy = %v, want nil", err)
 	}
-	if got := remaining(); !slices.Equal(got, before) {
+	if got := pruneDirNames(t, dir); !slices.Equal(got, before) {
 		t.Fatalf("directory after a run without retention = %v, want it untouched %v", got, before)
 	}
 
@@ -1087,9 +1070,9 @@ func TestApplyCreateRetentionPrunesLocalLeg(t *testing.T) {
 	if err := iops.applyCreateRetention(false); err != nil {
 		t.Fatalf("applyCreateRetention() = %v, want nil", err)
 	}
-	want := append([]string{newest, inPolicy}, decoys...)
+	want := append([]string{newest, inPolicy}, pruneDecoys...)
 	slices.Sort(want)
-	if got := remaining(); !slices.Equal(got, want) {
+	if got := pruneDirNames(t, dir); !slices.Equal(got, want) {
 		t.Errorf("directory after retention = %v, want %v", got, want)
 	}
 }
@@ -1222,14 +1205,29 @@ func seedPruneDir(t *testing.T, names ...string) string {
 
 var pruneDecoys = []string{"notes.txt", "infrahub_backup_garbage.tar.gz", "somebackup.tar.gz"}
 
-// withConfirmPrune installs a confirmation for the duration of one test.
-func withConfirmPrune(t *testing.T, confirm confirmFunc) {
-	t.Helper()
+// confirming returns opts with confirm as its confirmation, leaving every other seam
+// at its production default. The confirmation travels in the options, so nothing a
+// test installs is visible to any other test.
+func confirming(opts PruneOptions, confirm confirmFunc) PruneOptions {
+	opts.confirm = confirm
 
-	previous := confirmPrune
-	confirmPrune = confirm
-	t.Cleanup(func() { confirmPrune = previous })
+	return opts
 }
+
+// neverConfirm is a confirmation that fails the test when it is asked. It is how a
+// test states that a path must not prompt; declining keeps the run from deleting
+// anything on top of the failure.
+func neverConfirm(t *testing.T, reason string) confirmFunc {
+	return func([]pruneOutcome) (bool, error) {
+		t.Helper()
+		t.Error(reason)
+
+		return false, nil
+	}
+}
+
+// alwaysConfirm accepts whatever it is shown.
+func alwaysConfirm([]pruneOutcome) (bool, error) { return true, nil }
 
 // TestValidatePruneRequest covers everything `prune` refuses before it lists a
 // single location: a policy that claims nothing (US2 scenario 4), the Plakar
@@ -1306,11 +1304,6 @@ func TestPruneValidationTouchesNothing(t *testing.T) {
 	dir := seedPruneDir(t, backupNameAt(time.Now()), backupNameAt(time.Now().Add(-40*retentionDay)))
 	before := pruneDirNames(t, dir)
 
-	withConfirmPrune(t, func([]pruneOutcome) (bool, error) {
-		t.Fatal("confirmation asked for a run that should have failed validation")
-		return false, nil
-	})
-
 	cases := []struct {
 		name    string
 		policy  RetentionPolicy
@@ -1330,7 +1323,8 @@ func TestPruneValidationTouchesNothing(t *testing.T) {
 			}
 			iops := &InfrahubOps{config: cfg}
 
-			if err := iops.Prune(tc.policy, tc.opts); err == nil {
+			opts := confirming(tc.opts, neverConfirm(t, "confirmation asked for a run that should have failed validation"))
+			if err := iops.Prune(tc.policy, opts); err == nil {
 				t.Fatal("Prune() = nil, want a validation error")
 			}
 			if got := pruneDirNames(t, dir); !slices.Equal(got, before) {
@@ -1353,14 +1347,11 @@ func TestPruneDryRunDeletesNothing(t *testing.T) {
 	dir := seedPruneDir(t, append([]string{newest, inPolicy}, outOfPolicy...)...)
 	before := pruneDirNames(t, dir)
 
-	withConfirmPrune(t, func([]pruneOutcome) (bool, error) {
-		t.Fatal("dry run asked for confirmation; it must never prompt")
-		return false, nil
-	})
+	opts := confirming(PruneOptions{DryRun: true}, neverConfirm(t, "dry run asked for confirmation; it must never prompt"))
 
 	iops := &InfrahubOps{config: createRetentionConfig(dir, RetentionConfig{})}
 	output := captureLogrus(t, func() {
-		if err := iops.Prune(RetentionPolicy{Days: 7}, PruneOptions{DryRun: true}); err != nil {
+		if err := iops.Prune(RetentionPolicy{Days: 7}, opts); err != nil {
 			t.Fatalf("Prune() = %v, want nil", err)
 		}
 	})
@@ -1420,7 +1411,7 @@ func TestPruneConfirmationPaths(t *testing.T) {
 	}{
 		{
 			name:       "accepting prunes the previewed set",
-			confirm:    func([]pruneOutcome) (bool, error) { return true, nil },
+			confirm:    alwaysConfirm,
 			wantAsked:  true,
 			wantPruned: true,
 		},
@@ -1439,7 +1430,7 @@ func TestPruneConfirmationPaths(t *testing.T) {
 		{
 			name:       "force never asks",
 			opts:       PruneOptions{Force: true},
-			confirm:    nil, // installed below as a fatal
+			confirm:    nil, // replaced below by a confirmation that must not be asked
 			wantPruned: true,
 		},
 	}
@@ -1452,12 +1443,9 @@ func TestPruneConfirmationPaths(t *testing.T) {
 			asked := false
 			confirm := tc.confirm
 			if confirm == nil {
-				confirm = func([]pruneOutcome) (bool, error) {
-					t.Error("confirmation asked despite --force")
-					return false, nil
-				}
+				confirm = neverConfirm(t, "confirmation asked despite --force")
 			}
-			withConfirmPrune(t, func(candidates []pruneOutcome) (bool, error) {
+			opts := confirming(tc.opts, func(candidates []pruneOutcome) (bool, error) {
 				asked = true
 				if got := countPruneCandidates(candidates); got != len(outOfPolicy) {
 					t.Errorf("confirmation saw %d candidate(s), want %d", got, len(outOfPolicy))
@@ -1467,7 +1455,7 @@ func TestPruneConfirmationPaths(t *testing.T) {
 
 			iops := &InfrahubOps{config: createRetentionConfig(dir, RetentionConfig{})}
 			output := captureLogrus(t, func() {
-				err := iops.Prune(RetentionPolicy{Days: 7}, tc.opts)
+				err := iops.Prune(RetentionPolicy{Days: 7}, opts)
 				if !errors.Is(err, tc.wantErr) {
 					t.Fatalf("Prune() = %v, want %v", err, tc.wantErr)
 				}
@@ -1498,14 +1486,11 @@ func TestPruneNothingToPrune(t *testing.T) {
 	dir := seedPruneDir(t, backupNameAt(time.Now()), backupNameAt(time.Now().Add(-2*retentionDay)))
 	before := pruneDirNames(t, dir)
 
-	withConfirmPrune(t, func([]pruneOutcome) (bool, error) {
-		t.Fatal("confirmation asked with nothing to prune")
-		return false, nil
-	})
+	opts := confirming(PruneOptions{}, neverConfirm(t, "confirmation asked with nothing to prune"))
 
 	iops := &InfrahubOps{config: createRetentionConfig(dir, RetentionConfig{})}
 	output := captureLogrus(t, func() {
-		if err := iops.Prune(RetentionPolicy{Days: 7}, PruneOptions{}); err != nil {
+		if err := iops.Prune(RetentionPolicy{Days: 7}, opts); err != nil {
 			t.Fatalf("Prune() = %v, want nil", err)
 		}
 	})
@@ -1541,17 +1526,16 @@ func TestPruneFloorKeepsNewest(t *testing.T) {
 }
 
 // TestPruneNonInteractiveStdin is the refusal a CronJob must see instead of an
-// unanswered prompt (research.md R5, critique E4).
+// unanswered prompt (research.md R5).
 func TestPruneNonInteractiveStdin(t *testing.T) {
 	dir := seedPruneDir(t, backupNameAt(time.Now()), backupNameAt(time.Now().Add(-40*retentionDay)))
 	before := pruneDirNames(t, dir)
 
-	previousTTY := pruneStdinTTY
-	pruneStdinTTY = func() bool { return false }
-	t.Cleanup(func() { pruneStdinTTY = previousTTY })
+	// The default confirmation, asked on a stdin that is not a terminal.
+	opts := PruneOptions{io: pruneIO{isTTY: func() bool { return false }}}
 
 	iops := &InfrahubOps{config: createRetentionConfig(dir, RetentionConfig{})}
-	err := iops.Prune(RetentionPolicy{Days: 7}, PruneOptions{})
+	err := iops.Prune(RetentionPolicy{Days: 7}, opts)
 	if !errors.Is(err, ErrPruneNonInteractive) {
 		t.Fatalf("Prune() = %v, want ErrPruneNonInteractive", err)
 	}
@@ -1566,7 +1550,7 @@ func TestPruneNonInteractiveStdin(t *testing.T) {
 // TestConfirmPruneOnStdin covers the default prompt: only an explicit yes proceeds,
 // and a stdin that is not a terminal refuses instead of guessing.
 func TestConfirmPruneOnStdin(t *testing.T) {
-	candidates := []pruneOutcome{{Location: "local:/backups", Pruned: []backupRef{refDaysAgo(20), refDaysAgo(30)}}}
+	candidates := []pruneOutcome{{Location: "local:/backups", Candidates: []backupRef{refDaysAgo(20), refDaysAgo(30)}}}
 
 	tests := []struct {
 		name        string
@@ -1588,19 +1572,19 @@ func TestConfirmPruneOnStdin(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			previousStdin, previousTTY, previousOut := pruneStdin, pruneStdinTTY, pruneOut
 			var prompt bytes.Buffer
-			pruneStdin = strings.NewReader(tc.input)
-			pruneStdinTTY = func() bool { return tc.tty }
-			pruneOut = &prompt
-			t.Cleanup(func() { pruneStdin, pruneStdinTTY, pruneOut = previousStdin, previousTTY, previousOut })
+			terminal := pruneIO{
+				in:    strings.NewReader(tc.input),
+				isTTY: func() bool { return tc.tty },
+				out:   &prompt,
+			}
 
-			confirmed, err := confirmPruneOnStdin(candidates)
+			confirmed, err := terminal.confirmPrune(candidates)
 			if !errors.Is(err, tc.wantErr) {
-				t.Fatalf("confirmPruneOnStdin() error = %v, want %v", err, tc.wantErr)
+				t.Fatalf("confirmPrune() error = %v, want %v", err, tc.wantErr)
 			}
 			if confirmed != tc.wantConfirm {
-				t.Errorf("confirmPruneOnStdin() = %v, want %v", confirmed, tc.wantConfirm)
+				t.Errorf("confirmPrune() = %v, want %v", confirmed, tc.wantConfirm)
 			}
 
 			if tc.wantErr != nil {
@@ -1622,10 +1606,9 @@ func TestRetentionLegsForPrune(t *testing.T) {
 	dir := t.TempDir()
 
 	tests := []struct {
-		name        string
-		includeS3   bool
-		wantLegs    []string
-		errContains string
+		name      string
+		includeS3 bool
+		wantLegs  []string
 	}{
 		{
 			name:     "configured S3 alone never becomes a leg",
@@ -1730,7 +1713,7 @@ func TestPruneSkipsS3WithoutTheFlag(t *testing.T) {
 }
 
 func TestApplyRetentionNoLocations(t *testing.T) {
-	outcomes, err := applyRetention(context.Background(), nil, RetentionPolicy{Days: 7}, false)
+	outcomes, err := applyRetention(context.Background(), nil, RetentionPolicy{Days: 7}, retentionExecute)
 	if err != nil {
 		t.Fatalf("applyRetention() = %v, want nil", err)
 	}
@@ -1744,7 +1727,7 @@ func TestApplyRetentionNoLocations(t *testing.T) {
 func TestApplyRetentionListsEachLocationOnce(t *testing.T) {
 	location := &fakeLocation{name: "local:/backups", refs: []backupRef{refDaysAgo(1), refDaysAgo(20), refDaysAgo(30)}}
 
-	if _, err := applyRetention(context.Background(), []storageLocation{location}, RetentionPolicy{Days: 7}, false); err != nil {
+	if _, err := applyRetention(context.Background(), []storageLocation{location}, RetentionPolicy{Days: 7}, retentionExecute); err != nil {
 		t.Fatalf("applyRetention() = %v, want nil", err)
 	}
 	if location.listCalls != 1 {
@@ -1761,8 +1744,8 @@ func TestPruneDeletesExactlyTheConfirmedSet(t *testing.T) {
 		location := &fakeLocation{name: "local:/backups", refs: []backupRef{newest, day5, day10, day20}}
 
 		var confirmedSet []string
-		withConfirmPrune(t, func(candidates []pruneOutcome) (bool, error) {
-			confirmedSet = refNames(candidates[0].Pruned)
+		opts := confirming(PruneOptions{}, func(candidates []pruneOutcome) (bool, error) {
+			confirmedSet = refNames(candidates[0].Candidates)
 			// A scheduled `create` finishes while the question is on screen. Re-listing
 			// under --retention-count 2 would now claim day5 as well.
 			location.refs = append(location.refs, refDaysAgo(0))
@@ -1770,7 +1753,7 @@ func TestPruneDeletesExactlyTheConfirmedSet(t *testing.T) {
 		})
 
 		captureLogrus(t, func() {
-			if err := pruneLocations(context.Background(), []storageLocation{location}, RetentionPolicy{Count: 2}, PruneOptions{}); err != nil {
+			if err := pruneLocations(context.Background(), []storageLocation{location}, RetentionPolicy{Count: 2}, opts); err != nil {
 				t.Fatalf("pruneLocations() = %v, want nil", err)
 			}
 		})
@@ -1788,28 +1771,39 @@ func TestPruneDeletesExactlyTheConfirmedSet(t *testing.T) {
 
 	t.Run("a backup that ages past the rule during the prompt is not deleted", func(t *testing.T) {
 		// The borderline archive is just inside the seven-day rule when the plan is
-		// made and just outside it by the time the operator answers.
-		borderline := time.Now().Add(-7*retentionDay + 150*time.Millisecond)
+		// made and past it by the time the operator answers. An archive name carries
+		// whole seconds, so the margin is above that granularity and the answer takes
+		// longer than the margin.
+		const margin = 2 * time.Second
+		const answerDelay = 2500 * time.Millisecond
+
+		borderline := backupNameAt(time.Now().Add(-7 * retentionDay).Truncate(time.Second).Add(margin))
 		day30 := refDaysAgo(30)
 		location := &fakeLocation{name: "local:/backups", refs: []backupRef{
 			refDaysAgo(1),
-			{Name: backupNameAt(borderline), CreatedAt: borderline},
+			{Name: borderline},
 			day30,
 		}}
 
-		withConfirmPrune(t, func(candidates []pruneOutcome) (bool, error) {
-			time.Sleep(250 * time.Millisecond)
+		opts := confirming(PruneOptions{}, func([]pruneOutcome) (bool, error) {
+			time.Sleep(answerDelay)
 			return true, nil
 		})
 
 		captureLogrus(t, func() {
-			if err := pruneLocations(context.Background(), []storageLocation{location}, RetentionPolicy{Days: 7}, PruneOptions{}); err != nil {
+			if err := pruneLocations(context.Background(), []storageLocation{location}, RetentionPolicy{Days: 7}, opts); err != nil {
 				t.Fatalf("pruneLocations() = %v, want nil", err)
 			}
 		})
 
 		if want := []string{day30.Name}; !slices.Equal(location.deleted, want) {
 			t.Errorf("deleted %v, want only the archive the plan selected %v", location.deleted, want)
+		}
+		// The archive really did age past the rule while the answer was pending, so
+		// sparing it is a property of the plan rather than of the fixture.
+		_, prunableNow := selectPrunable(location.refs, RetentionPolicy{Days: 7}, time.Now())
+		if !slices.Contains(refNames(prunableNow), borderline) {
+			t.Fatalf("the borderline archive is still in policy; the case no longer exercises re-evaluation")
 		}
 	})
 
@@ -1821,7 +1815,7 @@ func TestPruneDeletesExactlyTheConfirmedSet(t *testing.T) {
 		}
 		dir := seedPruneDir(t, append([]string{newest}, outOfPolicy...)...)
 
-		withConfirmPrune(t, func([]pruneOutcome) (bool, error) {
+		opts := confirming(PruneOptions{}, func([]pruneOutcome) (bool, error) {
 			// Another prune (or an operator) removes one of the confirmed archives
 			// before this run gets to it.
 			if err := os.Remove(filepath.Join(dir, outOfPolicy[0])); err != nil {
@@ -1832,7 +1826,7 @@ func TestPruneDeletesExactlyTheConfirmedSet(t *testing.T) {
 
 		iops := &InfrahubOps{config: createRetentionConfig(dir, RetentionConfig{})}
 		captureLogrus(t, func() {
-			if err := iops.Prune(RetentionPolicy{Days: 7}, PruneOptions{}); err != nil {
+			if err := iops.Prune(RetentionPolicy{Days: 7}, opts); err != nil {
 				t.Fatalf("Prune() = %v, want nil: a backup that is already gone is not a failure", err)
 			}
 		})
@@ -1867,15 +1861,12 @@ func TestPruneRefusesToDeleteAfterAnIncompletePreview(t *testing.T) {
 	t.Run("the only leg cannot be listed", func(t *testing.T) {
 		missing := filepath.Join(t.TempDir(), "does-not-exist")
 
-		withConfirmPrune(t, func([]pruneOutcome) (bool, error) {
-			t.Fatal("confirmation asked for a preview that could not be completed")
-			return false, nil
-		})
+		opts := confirming(PruneOptions{}, neverConfirm(t, "confirmation asked for a preview that could not be completed"))
 
 		iops := &InfrahubOps{config: createRetentionConfig(missing, RetentionConfig{})}
 		var err error
 		output := captureLogrus(t, func() {
-			err = iops.Prune(RetentionPolicy{Days: 7}, PruneOptions{})
+			err = iops.Prune(RetentionPolicy{Days: 7}, opts)
 		})
 
 		if err == nil {
@@ -1896,14 +1887,11 @@ func TestPruneRefusesToDeleteAfterAnIncompletePreview(t *testing.T) {
 		healthy := &fakeLocation{name: "local:/backups", refs: []backupRef{newest, day20, day30}}
 		broken := &fakeLocation{name: "s3://bucket/prod", listErr: listFailure}
 
-		withConfirmPrune(t, func([]pruneOutcome) (bool, error) {
-			t.Fatal("confirmation asked with a partial candidate set")
-			return false, nil
-		})
+		opts := confirming(PruneOptions{}, neverConfirm(t, "confirmation asked with a partial candidate set"))
 
 		var err error
 		output := captureLogrus(t, func() {
-			err = pruneLocations(context.Background(), []storageLocation{healthy, broken}, RetentionPolicy{Days: 7}, PruneOptions{})
+			err = pruneLocations(context.Background(), []storageLocation{healthy, broken}, RetentionPolicy{Days: 7}, opts)
 		})
 
 		if err == nil {
@@ -2037,22 +2025,22 @@ func (r erroringReader) Read([]byte) (int, error) { return 0, r.err }
 func TestConfirmPruneOnStdinReadFailure(t *testing.T) {
 	readFailure := errors.New("input/output error")
 
-	previousStdin, previousTTY, previousOut := pruneStdin, pruneStdinTTY, pruneOut
 	var prompt bytes.Buffer
-	pruneStdin = erroringReader{err: readFailure}
-	pruneStdinTTY = func() bool { return true }
-	pruneOut = &prompt
-	t.Cleanup(func() { pruneStdin, pruneStdinTTY, pruneOut = previousStdin, previousTTY, previousOut })
+	terminal := pruneIO{
+		in:    erroringReader{err: readFailure},
+		isTTY: func() bool { return true },
+		out:   &prompt,
+	}
 
-	confirmed, err := confirmPruneOnStdin([]pruneOutcome{{Location: "local:/backups", Pruned: []backupRef{refDaysAgo(20)}}})
+	confirmed, err := terminal.confirmPrune([]pruneOutcome{{Location: "local:/backups", Candidates: []backupRef{refDaysAgo(20)}}})
 	if err == nil {
-		t.Fatal("confirmPruneOnStdin() = nil error, want the unreadable stdin reported")
+		t.Fatal("confirmPrune() = nil error, want the unreadable stdin reported")
 	}
 	if !errors.Is(err, readFailure) {
 		t.Errorf("error = %q, want it to wrap the read failure", err)
 	}
 	if confirmed {
-		t.Error("confirmPruneOnStdin() = true, want no confirmation from an unreadable stdin")
+		t.Error("confirmPrune() = true, want no confirmation from an unreadable stdin")
 	}
 }
 
@@ -2107,8 +2095,7 @@ func TestRetentionSummaryIsReportedOncePerLocation(t *testing.T) {
 		{
 			name: "prune with a confirmed prompt",
 			run: func(t *testing.T, iops *InfrahubOps) error {
-				withConfirmPrune(t, func([]pruneOutcome) (bool, error) { return true, nil })
-				return iops.Prune(RetentionPolicy{Days: 7}, PruneOptions{})
+				return iops.Prune(RetentionPolicy{Days: 7}, confirming(PruneOptions{}, alwaysConfirm))
 			},
 		},
 	}

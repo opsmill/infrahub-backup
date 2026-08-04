@@ -194,34 +194,56 @@ func resolveRetentionRule(names retentionRuleNames, input RetentionRuleInput) (i
 	return value, nil
 }
 
-// backupRef is one backup discovered at a storage location. Refs are only ever
-// created by parseBackupName, so anything that is not a backup archive cannot
-// become a deletion candidate.
+// backupRef is one backup discovered at a storage location, identified by the base
+// name of its archive.
+//
+// The name is the ref's only state. The creation time retention ranks and ages by is
+// derived from that name whenever it is needed (createdAt) rather than stored beside
+// it, so no ref — however it was built — can carry a timestamp that disagrees with
+// the archive a deletion would remove.
 type backupRef struct {
 	// Name is the archive's base name; it doubles as the deletion key.
 	Name string
-	// CreatedAt is the timestamp embedded in Name, in host-local time.
-	CreatedAt time.Time
 }
 
-// parseBackupName recognizes a backup archive by its base name and derives its
-// creation time from the embedded timestamp. It reports false for any name that
-// does not match the backup pattern and for names whose timestamp is not a real
-// point in time (for example month 13), keeping both invisible to retention.
-func parseBackupName(name string) (backupRef, bool) {
+// backupTimestamp reads the creation time a backup archive name embeds. It reports
+// false for any name that does not match the backup pattern and for names whose
+// timestamp is not a real point in time (for example month 13), keeping both
+// invisible to retention.
+func backupTimestamp(name string) (time.Time, bool) {
 	match := backupNamePattern.FindStringSubmatch(name)
 	if match == nil {
-		return backupRef{}, false
+		return time.Time{}, false
 	}
 
 	// generateBackupFilename formats the timestamp in host-local time, so age
 	// must be measured against the same location.
 	createdAt, err := time.ParseInLocation(backupNameTimestampLayout, match[1], time.Local)
 	if err != nil {
+		return time.Time{}, false
+	}
+
+	return createdAt, true
+}
+
+// parseBackupName recognizes a backup archive by its base name, which is what turns a
+// listed file or object into a retention candidate (FR-006).
+func parseBackupName(name string) (backupRef, bool) {
+	if _, ok := backupTimestamp(name); !ok {
 		return backupRef{}, false
 	}
 
-	return backupRef{Name: name, CreatedAt: createdAt}, true
+	return backupRef{Name: name}, true
+}
+
+// createdAt is the ref's creation time in host-local time, read from its name. A name
+// that is not a backup archive has no creation time and reports the zero instant,
+// which ranks it as the oldest backup at its location; it still cannot be deleted,
+// because both Delete implementations re-check the name.
+func (r backupRef) createdAt() time.Time {
+	createdAt, _ := backupTimestamp(r.Name)
+
+	return createdAt
 }
 
 // sortBackupRefsNewestFirst orders refs by creation time descending, breaking
@@ -229,7 +251,7 @@ func parseBackupName(name string) (backupRef, bool) {
 // count rule — deterministic when several archives share a timestamp.
 func sortBackupRefsNewestFirst(refs []backupRef) {
 	slices.SortFunc(refs, func(a, b backupRef) int {
-		if byTime := b.CreatedAt.Compare(a.CreatedAt); byTime != 0 {
+		if byTime := b.createdAt().Compare(a.createdAt()); byTime != 0 {
 			return byTime
 		}
 		return strings.Compare(b.Name, a.Name)
@@ -244,7 +266,7 @@ func retentionKeeps(ref backupRef, rank int, policy RetentionPolicy, now time.Ti
 	if rank == 0 {
 		return true
 	}
-	if policy.Days >= 1 && now.Sub(ref.CreatedAt) < time.Duration(policy.Days)*retentionDay {
+	if policy.Days >= 1 && now.Sub(ref.createdAt()) < time.Duration(policy.Days)*retentionDay {
 		return true
 	}
 	// rank is 0-based, so rank < Count means the ref is among the Count newest.
@@ -414,17 +436,41 @@ var (
 	_ storageLocation = (*s3Location)(nil)
 )
 
-// pruneOutcome is the result of applying the policy at one storage location. It is
-// what callers report to the operator, and it carries the leg's error rather than
-// letting a failure hide behind a successful sibling leg.
+// retentionMode says whether a retention run deletes anything. The two answers are
+// named constants rather than a bool because at a call site that can delete backups a
+// flipped literal is silent data loss no compiler catches. The zero value is the
+// harmless one.
+type retentionMode int
+
+const (
+	// retentionDryRun reports exactly what retentionExecute would delete, and deletes
+	// nothing.
+	retentionDryRun retentionMode = iota
+	// retentionExecute deletes every candidate the policy did not keep.
+	retentionExecute
+)
+
+// pruneOutcome is what retention did at one storage location — and, before a plan is
+// executed, what it would do. It is what callers report to the operator, and it
+// carries the leg's error rather than letting a failure hide behind a successful
+// sibling leg.
+//
+// Candidates and Deleted are separate fields on purpose. On a destructive path, a
+// single count that means "would delete" in one mode and "did delete" in another
+// cannot be read correctly at a call site that does not know which mode produced it.
 type pruneOutcome struct {
 	// Location is the storageLocation's Name().
 	Location string
 	// Kept are the refs retention retained, whether by a rule or by the floor.
 	Kept []backupRef
-	// Pruned are the refs deleted — or, before a plan is executed (a dry run, or a
-	// preview awaiting confirmation), exactly the refs a real run would delete.
-	Pruned []backupRef
+	// Candidates are the refs the policy did not keep: exactly what a real run
+	// deletes. Planning fills it and executing leaves it alone, so a preview and the
+	// run that follows it report the same set (SC-004).
+	Candidates []backupRef
+	// Deleted are the refs that actually went away. It is empty until a plan is
+	// executed — a dry run never fills it — and is a strict subset of Candidates when
+	// a deletion failed.
+	Deleted []backupRef
 	// Err is the joined error for this leg; nil when the leg fully succeeded.
 	Err error
 }
@@ -435,9 +481,9 @@ type pruneOutcome struct {
 // parallel slice to keep in step.
 type retentionPlanEntry struct {
 	location storageLocation
-	// outcome carries the location's name, the refs the policy keeps, and — as
-	// Pruned — the refs the plan intends to delete. Executing the entry replaces
-	// Pruned with the refs that actually went away.
+	// outcome carries the location's name, the refs the policy keeps, and the
+	// Candidates the plan intends to delete. Executing the entry adds the refs that
+	// actually went away as Deleted.
 	outcome pruneOutcome
 }
 
@@ -470,7 +516,7 @@ func planRetention(ctx context.Context, locations []storageLocation, policy Rete
 			continue
 		}
 
-		entry.outcome.Kept, entry.outcome.Pruned = selectPrunable(refs, policy, now)
+		entry.outcome.Kept, entry.outcome.Candidates = selectPrunable(refs, policy, now)
 		plan = append(plan, entry)
 	}
 
@@ -513,10 +559,12 @@ func (e retentionPlanEntry) execute(ctx context.Context) pruneOutcome {
 		return e.outcome
 	}
 
-	outcome := pruneOutcome{Location: e.outcome.Location, Kept: e.outcome.Kept}
+	// The planned outcome travels forward unchanged, so the candidate set the operator
+	// was shown survives execution and only Deleted grows.
+	outcome := e.outcome
 
 	var deleteErrs []error
-	for _, ref := range e.outcome.Pruned {
+	for _, ref := range e.outcome.Candidates {
 		if err := e.location.Delete(ctx, ref); err != nil {
 			// Best-effort: surface the failure now and keep working through the
 			// remaining candidates.
@@ -526,7 +574,7 @@ func (e retentionPlanEntry) execute(ctx context.Context) pruneOutcome {
 		}
 
 		logrus.Infof("Pruned backup %s from %s", ref.Name, outcome.Location)
-		outcome.Pruned = append(outcome.Pruned, ref)
+		outcome.Deleted = append(outcome.Deleted, ref)
 	}
 
 	if len(deleteErrs) > 0 {
@@ -553,7 +601,7 @@ func planOutcomes(plan []retentionPlanEntry) []pruneOutcome {
 func reportRetentionPlan(plan []retentionPlanEntry) {
 	for _, entry := range plan {
 		logrus.Infof("Retention at %s: %d backup(s) kept, %d candidate(s) to prune",
-			entry.outcome.Location, len(entry.outcome.Kept), len(entry.outcome.Pruned))
+			entry.outcome.Location, len(entry.outcome.Kept), len(entry.outcome.Candidates))
 	}
 }
 
@@ -561,10 +609,10 @@ func reportRetentionPlan(plan []retentionPlanEntry) {
 // deleted. Only the paths that show the operator what is about to happen call it: the
 // dry-run listing and the list the confirmation prompt refers to (FR-009). A dry run
 // marks its lines, because for a dry run this listing is the whole result.
-func reportRetentionCandidates(plan []retentionPlanEntry, dryRun bool) {
+func reportRetentionCandidates(plan []retentionPlanEntry, mode retentionMode) {
 	for _, entry := range plan {
-		for _, ref := range entry.outcome.Pruned {
-			if dryRun {
+		for _, ref := range entry.outcome.Candidates {
+			if mode == retentionDryRun {
 				logrus.Infof("Would prune backup %s from %s (dry run)", ref.Name, entry.outcome.Location)
 				continue
 			}
@@ -574,19 +622,19 @@ func reportRetentionCandidates(plan []retentionPlanEntry, dryRun bool) {
 	}
 }
 
-// applyRetention evaluates the policy at every location and removes what it does
-// not keep, returning one outcome per location plus the joined errors of the legs
-// that failed. It is the whole operation for the paths that do not ask anything:
-// `create`, `prune --force`, and `prune --dry-run`.
+// applyRetention evaluates the policy at every location and, in retentionExecute mode,
+// removes what it does not keep. It returns one outcome per location plus the joined
+// errors of the legs that failed, and is the whole operation for the paths that do not
+// ask anything: `create`, `prune --force`, and `prune --dry-run`.
 //
-// With dryRun set nothing is deleted and Pruned reports exactly the set a real run
-// would delete (SC-004) — the two answers come from the same planning code, not from
-// two independent evaluations.
-func applyRetention(ctx context.Context, locations []storageLocation, policy RetentionPolicy, dryRun bool) ([]pruneOutcome, error) {
+// In retentionDryRun mode nothing is deleted: every outcome reports the set a real run
+// would delete as its Candidates and nothing as Deleted (SC-004). Both answers come
+// from the same planning code, not from two independent evaluations.
+func applyRetention(ctx context.Context, locations []storageLocation, policy RetentionPolicy, mode retentionMode) ([]pruneOutcome, error) {
 	plan, planErr := planRetention(ctx, locations, policy)
 
-	if dryRun {
-		reportRetentionCandidates(plan, true)
+	if mode == retentionDryRun {
+		reportRetentionCandidates(plan, mode)
 		reportRetentionPlan(plan)
 
 		return planOutcomes(plan), planErr
@@ -610,39 +658,57 @@ var ErrPruneNonInteractive = errors.New("cannot prompt for confirmation: stdin i
 // and where, and it reports an error only when no answer can be obtained at all.
 type confirmFunc func(candidates []pruneOutcome) (bool, error)
 
-// Testable seams for the prune confirmation, mirroring updater.Proceed's: tests
-// replace them to drive the accept, decline, and non-interactive paths without a
-// terminal (critique E4).
-var (
-	confirmPrune  confirmFunc = confirmPruneOnStdin
-	pruneStdin    io.Reader   = os.Stdin
-	pruneStdinTTY             = defaultPruneStdinIsTTY
-	pruneOut      io.Writer   = os.Stdout
-)
+// pruneIO is the terminal the default confirmation talks to. It travels in the
+// invocation's PruneOptions rather than in package state, so one run's terminal is
+// never visible to another.
+type pruneIO struct {
+	// in is where the answer is read from.
+	in io.Reader
+	// isTTY reports whether in is an interactive terminal.
+	isTTY func() bool
+	// out is where the question is written.
+	out io.Writer
+}
+
+// withDefaults fills every seam the caller left unset with the process's own terminal,
+// which is what every caller outside this package's tests wants.
+func (p pruneIO) withDefaults() pruneIO {
+	if p.in == nil {
+		p.in = os.Stdin
+	}
+	if p.isTTY == nil {
+		p.isTTY = defaultPruneStdinIsTTY
+	}
+	if p.out == nil {
+		p.out = os.Stdout
+	}
+
+	return p
+}
 
 func defaultPruneStdinIsTTY() bool {
 	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
-// confirmPruneOnStdin asks the single y/N question that guards a real prune. The
-// candidate list has already been reported, so the question only has to name the
-// scale of what is about to happen. Anything other than y/yes — including an empty
-// line or a stdin that ends without an answer — declines.
+// confirmPrune asks the single y/N question that guards a real prune. The candidate
+// list has already been reported, so the question only has to name the scale of what
+// is about to happen. Anything other than y/yes — including an empty line or a stdin
+// that ends without an answer — declines.
 //
 // A stdin that cannot be read at all is not a decline: reporting an I/O failure as
 // "the operator said no" would hide a broken pipeline behind a success. Only the
 // end of input is read as an answer.
 //
-// The prompt is written to stdout rather than logged: it must appear whatever the
-// log level is, and it must not carry a newline before the answer is typed.
-func confirmPruneOnStdin(candidates []pruneOutcome) (bool, error) {
-	if !pruneStdinTTY() {
+// The question is written to the terminal rather than logged: it must appear whatever
+// the log level is, and it must not carry a newline before the answer is typed.
+func (p pruneIO) confirmPrune(candidates []pruneOutcome) (bool, error) {
+	if !p.isTTY() {
 		return false, ErrPruneNonInteractive
 	}
 
-	fmt.Fprintf(pruneOut, "Prune %d backup(s) listed above? [y/N]: ", countPruneCandidates(candidates))
+	fmt.Fprintf(p.out, "Prune %d backup(s) listed above? [y/N]: ", countPruneCandidates(candidates))
 
-	line, err := bufio.NewReader(pruneStdin).ReadString('\n')
+	line, err := bufio.NewReader(p.in).ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
 		return false, fmt.Errorf("failed to read the confirmation answer: %w", err)
 	}
@@ -655,11 +721,23 @@ func confirmPruneOnStdin(candidates []pruneOutcome) (bool, error) {
 	}
 }
 
-// countPruneCandidates totals the candidates across every previewed location.
+// countPruneCandidates totals the candidates across every previewed location: what a
+// real run would delete.
 func countPruneCandidates(outcomes []pruneOutcome) int {
 	total := 0
 	for _, outcome := range outcomes {
-		total += len(outcome.Pruned)
+		total += len(outcome.Candidates)
+	}
+
+	return total
+}
+
+// countPrunedBackups totals the backups that actually went away across every executed
+// location.
+func countPrunedBackups(outcomes []pruneOutcome) int {
+	total := 0
+	for _, outcome := range outcomes {
+		total += len(outcome.Deleted)
 	}
 
 	return total
@@ -677,6 +755,28 @@ type PruneOptions struct {
 	// S3 adds the configured bucket/prefix as a pruned location. Without it S3 is
 	// never touched, however complete the S3 configuration is (FR-007).
 	S3 bool
+
+	// confirm is asked once, with the preview, before anything is deleted; unset means
+	// the y/N question on the process's terminal.
+	//
+	// It and io are unexported so the cmd layer constructs these options from the
+	// three switches above and nothing else, while a test drives the accept, decline,
+	// and non-interactive paths on its own options value — an isolation that holds by
+	// construction rather than by no test running in parallel.
+	confirm confirmFunc
+	// io is the terminal the default confirmation talks to.
+	io pruneIO
+}
+
+// withDefaults fills in the confirmation seams the caller left unset, which is all of
+// them for every caller outside this package's tests.
+func (o PruneOptions) withDefaults() PruneOptions {
+	o.io = o.io.withDefaults()
+	if o.confirm == nil {
+		o.confirm = o.io.confirmPrune
+	}
+
+	return o
 }
 
 // validatePruneRequest rejects a prune that cannot mean what it says, before any
@@ -761,22 +861,24 @@ func (iops *InfrahubOps) Prune(policy RetentionPolicy, opts PruneOptions) error 
 // attempted and the per-leg errors, already qualified with their location, are returned
 // as they are.
 func pruneLocations(ctx context.Context, legs []storageLocation, policy RetentionPolicy, opts PruneOptions) error {
+	opts = opts.withDefaults()
+
 	logrus.Infof("Applying retention policy (days: %d, count: %d) to %d location(s)", policy.Days, policy.Count, len(legs))
 
 	if opts.DryRun {
-		_, err := applyRetention(ctx, legs, policy, true)
+		_, err := applyRetention(ctx, legs, policy, retentionDryRun)
 		return err
 	}
 
 	if opts.Force {
 		// The operator waived the preview; every deletion is still reported as it
 		// happens, so the run is auditable after the fact.
-		_, err := applyRetention(ctx, legs, policy, false)
+		_, err := applyRetention(ctx, legs, policy, retentionExecute)
 		return err
 	}
 
 	plan, planErr := planRetention(ctx, legs, policy)
-	reportRetentionCandidates(plan, false)
+	reportRetentionCandidates(plan, retentionExecute)
 	reportRetentionPlan(plan)
 
 	// A plan that could not be completed cannot be confirmed: the operator would be
@@ -794,7 +896,7 @@ func pruneLocations(ctx context.Context, legs []storageLocation, policy Retentio
 		return nil
 	}
 
-	confirmed, err := confirmPrune(candidates)
+	confirmed, err := opts.confirm(candidates)
 	if err != nil {
 		return err
 	}
@@ -804,7 +906,7 @@ func pruneLocations(ctx context.Context, legs []storageLocation, policy Retentio
 	}
 
 	outcomes, err := executeRetentionPlan(ctx, plan)
-	logrus.Infof("Pruned %d of %d confirmed backup(s)", countPruneCandidates(outcomes), countPruneCandidates(candidates))
+	logrus.Infof("Pruned %d of %d confirmed backup(s)", countPrunedBackups(outcomes), countPruneCandidates(candidates))
 
 	return err
 }
