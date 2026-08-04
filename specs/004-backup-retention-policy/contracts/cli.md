@@ -28,6 +28,9 @@ no existing flag or command changes behavior when retention is not configured
   (`Pruned backup <name> from <location>`-level messages).
 - Validation errors (either flag set to 0 or negative) abort the run before any
   backup work starts.
+- Plakar backend (`--backend plakar`) with retention flags set: the backup runs
+  normally, a warning states that retention is not yet supported for this backend,
+  no pruning occurs, exit 0 (FR-012).
 
 **Exit semantics**:
 
@@ -36,6 +39,10 @@ no existing flag or command changes behavior when retention is not configured
 | Backup ok, retention ok (or inactive) | 0 | — |
 | Backup failed | ≠ 0 | Existing behavior; **no pruning was attempted** |
 | Backup ok, any prune leg failed | ≠ 0 | Message MUST begin by stating the backup succeeded (includes the new archive's name) and that only retention failed; all legs were attempted before exiting |
+
+Within a leg, deletion is best-effort: after an individual deletion fails, the
+remaining candidates are still attempted; all per-deletion errors are collected and
+reported together (FR-008).
 
 ## `infrahub-backup prune` — new command
 
@@ -57,6 +64,8 @@ Inherits root persistent flags (`--backup-dir`, S3 configuration, `--log-level`,
 
 **Behavior**:
 - No retention flag set → validation error: at least one rule is required.
+- Plakar backend (`--backend plakar`) → validation error: retention for the Plakar
+  backend is not yet supported (FR-012); nothing is touched.
 - `--dry-run` → print the candidate set (per location), delete nothing, exit 0.
 - Without `--force` (interactive TTY) → print the candidate set, ask a single
   `y/N` confirmation; decline aborts with no changes (exit 0, "aborted" notice).
