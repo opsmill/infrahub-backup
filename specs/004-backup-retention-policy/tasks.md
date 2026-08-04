@@ -87,9 +87,9 @@
 
 ## Phase 6: Polish & Cross-Cutting Concerns
 
-- [ ] T023 [P] Documentation in docs/docs/backup/: retention how-to (flags, env vars, union semantics, keep-newest floor, per-location evaluation), S3 requirements with a least-privilege prefix-scoped policy example (list+delete), note that archives restored from S3 into BackupDir become retention candidates, Plakar not-yet-supported note, S3 lifecycle rules as a complement (critique P1); Vale + rumdl pass on changed docs
-- [ ] T024 [P] Execute quickstart.md Scenarios 1–4 against the built binary and fix any contract deviations (Scenarios 5–6 covered by tests/e2e/)
-- [ ] T025 Final gates: `make fmt`, `make vet`, `make lint`, `make test` all green; confirm no changes to go.mod/go.sum (otherwise run scripts/update-vendor-hash.sh per constitution)
+- [X] T023 [P] Documentation in docs/docs/backup/: retention how-to (flags, env vars, union semantics, keep-newest floor, per-location evaluation), S3 requirements with a least-privilege prefix-scoped policy example (list+delete), note that archives restored from S3 into BackupDir become retention candidates, Plakar not-yet-supported note, S3 lifecycle rules as a complement (critique P1); Vale + rumdl pass on changed docs
+- [X] T024 [P] Execute quickstart.md Scenarios 1–4 against the built binary and fix any contract deviations (Scenarios 5–6 covered by tests/e2e/)
+- [X] T025 Final gates: `make fmt`, `make vet`, `make lint`, `make test` all green; confirm no changes to go.mod/go.sum (otherwise run scripts/update-vendor-hash.sh per constitution)
 
 ---
 
