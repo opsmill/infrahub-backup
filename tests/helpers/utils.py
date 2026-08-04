@@ -124,6 +124,52 @@ def run_restore(
     return result
 
 
+def run_cli(
+    binary: str,
+    args: list[str],
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
+    """Run one of the CLI binaries and return the result without raising on failure.
+
+    The counterpart to run_backup/run_restore, for invocations whose non-zero exit is
+    itself what the test asserts.
+    """
+    run_env = {**os.environ, **(env or {})}
+    return subprocess.run([binary, *args], capture_output=True, text=True, stdin=subprocess.DEVNULL, env=run_env)
+
+
+def compose_container_runtimes(project: str) -> dict[str, str]:
+    """Status and start time of every container in a compose project, keyed by name.
+
+    Stopping or restarting a container moves its StartedAt, so a snapshot that is
+    unchanged across an invocation is what shows the invocation never touched the
+    deployment — the "nothing was restored" half of the fail-fast contract.
+    """
+    ids = subprocess.run(
+        ["docker", "ps", "-aq", "--filter", f"label=com.docker.compose.project={project}"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    if not ids:
+        raise AssertionError(f"no containers found for compose project {project}")
+
+    inspected = subprocess.run(
+        ["docker", "inspect", "--format", "{{.Name}}\t{{.State.Status}}\t{{.State.StartedAt}}", *ids],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+    runtimes = {}
+    for line in inspected.splitlines():
+        if not line.strip():
+            continue
+        name, status, started_at = line.split("\t")
+        runtimes[name] = f"{status} {started_at}"
+    return runtimes
+
+
 def find_latest_backup(backup_dir: str | Path) -> Path:
     """Find the most recent infrahub_backup_*.tar.gz in a directory."""
     backup_dir = Path(backup_dir)

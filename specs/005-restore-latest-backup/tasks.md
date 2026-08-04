@@ -70,7 +70,7 @@ Single project: `src/`, `tests/` at repository root, per plan.md.
 
 ### Implementation for User Story 2
 
-- [ ] T012 [US2] Extend `tests/e2e/test_docker_tarball.py`: create two backups, run `restore --latest`, assert the newer archive is restored, the FR-009 log line names it and `local:<dir>`, and exit 0 (FR-001, FR-005, FR-009); add the empty-pool case with a fresh `BACKUP_DIR` asserting a clear error and non-zero exit (FR-008)
+- [X] T012 [US2] Extend `tests/e2e/test_docker_tarball.py`: create two backups, run `restore --latest`, assert the newer archive is restored, the FR-009 log line names it and `local:<dir>`, and exit 0 (FR-001, FR-005, FR-009); add the empty-pool case with a fresh `BACKUP_DIR` asserting a clear error and non-zero exit (FR-008)
 - [ ] T013 [P] [US2] Extend the encrypted-backup coverage: e2e or integration-level check per quickstart Scenario 5 — with the newest archive encrypted and no `--decrypt-key`, `restore --latest --sleep 5m` exits non-zero immediately (no sleep occurred, proving the fail-fast ordering) and no container was touched; with `--decrypt-key` the same archive restores (FR-007) — place alongside the existing encryption e2e coverage in `tests/e2e/`
 
 **Checkpoint**: Both user stories independently functional and covered end-to-end.
