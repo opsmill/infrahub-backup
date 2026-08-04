@@ -32,12 +32,12 @@
 - [X] T004 Add `backupRef{Name, CreatedAt}`, `parseBackupName()` (anchored regex `^infrahub_backup_(\d{8}_\d{6})\.tar\.gz(\.enc)?$`, timestamp layout `20060102_150405`, non-matching/unparseable → not a backup), and deterministic ordering (CreatedAt desc, Name desc tiebreak) in src/internal/app/retention.go (FR-006, data-model.md)
 - [X] T005 Implement `selectPrunable(refs, policy, now) (keep, prune)` in src/internal/app/retention.go — union keep-semantics, unconditional keep-newest floor **inside** the function (FR-002, FR-003, research.md R2)
 - [X] T006 Implement `storageLocation` interface + `localLocation` adapter (`os.ReadDir` on BackupDir, filter via `parseBackupName`, delete via `os.Remove`) in src/internal/app/retention.go
-- [ ] T007 [P] Add `List(ctx)` (prefix-scoped, paginated, base-name filtered) and `Delete(ctx, key)` to `S3Client` in src/internal/app/s3.go, each bounded by a context timeout (research.md R4, critique E3)
-- [ ] T008 Implement `s3Location` adapter over the new `S3Client` methods in src/internal/app/retention.go (depends on T007)
-- [ ] T009 Implement `applyRetention(ctx, locations, policy, dryRun)` orchestrator in src/internal/app/retention.go — per-location evaluation, floor per location, best-effort within each leg (attempt every candidate, collect per-deletion errors), all legs attempted, `errors.Join` aggregation, per-deletion logrus logging, dry-run reports without deleting (FR-007, FR-008, FR-009, critique E1)
+- [X] T007 [P] Add `List(ctx)` (prefix-scoped, paginated, base-name filtered) and `Delete(ctx, key)` to `S3Client` in src/internal/app/s3.go, each bounded by a context timeout (research.md R4, critique E3)
+- [X] T008 Implement `s3Location` adapter over the new `S3Client` methods in src/internal/app/retention.go (depends on T007)
+- [X] T009 Implement `applyRetention(ctx, locations, policy, dryRun)` orchestrator in src/internal/app/retention.go — per-location evaluation, floor per location, best-effort within each leg (attempt every candidate, collect per-deletion errors), all legs attempted, `errors.Join` aggregation, per-deletion logrus logging, dry-run reports without deleting (FR-007, FR-008, FR-009, critique E1)
 - [X] T010 Table-driven unit tests for T003–T005 in src/internal/app/retention_test.go: validation table; parse table incl. round-trip with `generateBackupFilename` (critique E2), `.enc` variant, decoys, unparseable timestamps, path-separator names never match (critique E5); ordering ties; selection union/floor/all-expired/empty/single-backup (SC-003 invariant)
-- [ ] T011 Unit tests for `applyRetention` with fake `storageLocation` implementations in src/internal/app/retention_test.go: best-effort within leg, all legs attempted after a leg error, dry-run set equals real-run set (SC-004), empty location no-op, error aggregation text
-- [ ] T012 [P] Unit tests for S3 key filtering and delete-key construction in src/internal/app/s3_test.go (prefixed keys, non-matching objects invisible, FR-006 at the S3 location)
+- [X] T011 Unit tests for `applyRetention` with fake `storageLocation` implementations in src/internal/app/retention_test.go: best-effort within leg, all legs attempted after a leg error, dry-run set equals real-run set (SC-004), empty location no-op, error aggregation text
+- [X] T012 [P] Unit tests for S3 key filtering and delete-key construction in src/internal/app/s3_test.go (prefixed keys, non-matching objects invisible, FR-006 at the S3 location)
 
 **Checkpoint**: Retention core complete and fully unit-tested — user stories can now be wired.
 
