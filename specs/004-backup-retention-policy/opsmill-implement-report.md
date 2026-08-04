@@ -241,7 +241,34 @@ Severity shown as *assigned by the agent* → *as triaged by the orchestrator* w
 
 ### Residual gaps (not defects; disclosed rather than closed)
 
-1. **No minio-backed e2e for the `--s3` prune leg.** The `s3Backend` seam now pins key construction and error propagation in unit tests, and `S3Client.List`/`Delete`'s pure key/prefix logic is covered — but pagination, `RemoveObject`, and real timeout expiry are still only exercised manually (quickstart Scenario 6). A `minio_docker` fixture already exists in `conftest.py`, so this is cheap to add.
+1. **~~No minio-backed e2e for the `--s3` prune leg.~~ Closed** by `TestS3Retention` and
+   `TestDockerS3RetentionOnCreate` in `tests/e2e/test_docker_retention.py`, which drive the
+   real `S3Client` against the `minio_docker` container and assert the bucket's **exact
+   surviving key set** with `boto3` — the assertion a count could not make, because S3
+   answers a delete for a nonexistent key with success. Now covered end-to-end at a real
+   endpoint: `RemoveObject` really removing the right object (verified by mutation — passing
+   `ref.Name` instead of the full key leaves every object in place while still logging
+   `Pruned backup …` and exiting 0), prefix scoping against sibling prefixes / the bucket
+   root / keys nested below the prefix, FR-006 non-backup objects inside the prefix
+   (including a right-shaped name whose timestamp is not a real instant), the keep-newest
+   floor per location, `--s3` opt-in, both legs in one run each with its own floor,
+   `--dry-run --s3`, the `.enc` name variant on the deletion side, all three prefix spellings
+   (`backups`, `backups/`, empty), and — with a live stack — quickstart Scenario 6's
+   "S3 leg is pruned exactly when this run uploaded".
+
+   **Still genuinely uncovered at a real endpoint** (each needs infrastructure a test cannot
+   reasonably fabricate):
+   - **`ListObjects` pagination past the 1000-key page boundary.** minio-go paginates
+     internally and `List` only consumes the channel, so covering this means seeding 1001+
+     objects per run — impractical for an e2e. Unchanged from before.
+   - **`s3ListTimeout` / `s3DeleteTimeout` expiry.** Provoking real expiry needs an endpoint
+     that accepts the connection and then stalls for minutes; the deadlines are pinned only
+     by reading the constants.
+   - **Per-object delete failure against a real bucket** (e.g. a policy that permits `List`
+     but denies `DeleteObject`), and therefore the best-effort "attempt every remaining
+     candidate" aggregation on the S3 leg. Covered through the `s3Backend` fake only.
+   - **The non-forced interactive path with a real S3 leg**, including the abort-before-any-
+     deletion behavior when the bucket cannot be listed. Needs a TTY; still quickstart-manual.
 2. **Partially pinned in the `create` integration tests**: the community-edition branch, checksum content, and the retention-before-`--sleep` ordering are not covered.
 3. **`create`-driven retention log output** could not be captured verbatim for the docs (needs a live deployment); it routes through the same `applyRetention(…, retentionExecute)` call as `prune --force`, which was verified, so the docs describe it in prose rather than showing an invented excerpt.
 
@@ -269,6 +296,8 @@ Severity shown as *assigned by the agent* → *as triaged by the orchestrator* w
 1. **Review the spec-artifact corrections first** (`fcf9961`) — `spec.md` FR-011, `contracts/cli.md`, `data-model.md`, `quickstart.md`, `research.md` R6. These encode the decision that retention is configurable by flags and environment variables only. If config-file support is genuinely wanted, that decision needs reversing before this merges.
 2. **Decide on the two out-of-diff comment hunks** in `environment_docker.go` / `environment_kubernetes.go` (§6.8) — keep or drop.
 3. **Open the PR.** All 25 tasks are complete, gates are green, and nothing is blocked. Note in the description that the baseline at `ff41f04` was verified green beforehand, so any CI failure is attributable to this branch.
-4. **Add a minio-backed e2e for the `--s3` prune leg** (residual gap 1) — the `minio_docker` fixture already exists, and this is the last untested real-endpoint path on a destructive code path.
+4. ~~**Add a minio-backed e2e for the `--s3` prune leg**~~ — done; see residual gap 1 for what the
+   new `TestS3Retention` / `TestDockerS3RetentionOnCreate` classes cover and the four real-endpoint
+   behaviors that remain out of reach.
 5. **Consider `speckit.opsmill.extract`** to lift the durable lessons out of this slice — particularly the viper last-binder hazard, the "integer coercion makes a mistyped env var indistinguishable from an unset rule" rule, and the plan-then-execute pattern for any confirm-before-destroy flow.
 6. **The Plakar slice (US3, P3) remains deferred** with its guard rails in place: `create` warns and skips, `prune` hard-errors. `RetentionPolicy` and the `storageLocation` seam are ready for a `plakarLocation`. Recorded constraints: incomplete snapshot groups never count toward the count rule; the newest group overall and the newest complete group are never removed; prior-version snapshots stay restorable.
