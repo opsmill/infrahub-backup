@@ -279,6 +279,24 @@ func TestRestoreLatestBackupLocalPool(t *testing.T) {
 		}
 	})
 
+	// RestoreBackup ignores the archive path on the plakar backend and restores the
+	// repository's latest snapshot instead, so a pool selection that reached it would
+	// restore something other than the archive it named while reporting success. The
+	// refusal has to come from this package, not only from the CLI's routing.
+	t.Run("the plakar backend is refused before any pool is listed", func(t *testing.T) {
+		dir := t.TempDir()
+		writeArchives(t, dir, backupNameAt(retentionNow))
+		iops := &InfrahubOps{config: &Configuration{BackupDir: dir, Backend: BackendPlakar}}
+
+		err := iops.RestoreLatestBackup(false, false, false, 0, "", false, false)
+		if err == nil {
+			t.Fatal("RestoreLatestBackup() = nil, want the plakar backend refused")
+		}
+		if !strings.Contains(err.Error(), string(BackendPlakar)) {
+			t.Errorf("error = %q, want it to name the %s backend", err, BackendPlakar)
+		}
+	})
+
 	t.Run("a missing directory is refused rather than read as an empty pool", func(t *testing.T) {
 		dir := filepath.Join(t.TempDir(), "does-not-exist")
 		iops := &InfrahubOps{config: &Configuration{BackupDir: dir, Backend: BackendTarball}}

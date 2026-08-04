@@ -490,10 +490,14 @@ func TestResolveRestoreInvocation(t *testing.T) {
 	}
 }
 
-// TestRestoreCommandValidatesBeforeRunning drives the assembled `restore` command rather
-// than the resolution alone, so the wiring is covered too: the flags exist under the
-// names the contract publishes, and a rejected invocation is rejected before RunE — the
-// only ordering in which "nothing was restored" is guaranteed (FR-002, FR-003).
+// TestRestoreCommandValidatesBeforeRunning covers the Args/RunE ordering: a rejected
+// invocation is rejected before RunE runs — the only ordering in which "nothing was
+// restored" is guaranteed (FR-002, FR-003).
+//
+// It builds its own command with its own flag registration rather than reaching into the
+// one main() assembles, so it does NOT pin the published flag names: renaming --latest or
+// --s3 in main.go would not fail this test. Covering that would mean exporting the command
+// construction, which is a larger change than the risk warrants.
 func TestRestoreCommandValidatesBeforeRunning(t *testing.T) {
 	tests := []struct {
 		name        string
