@@ -40,6 +40,64 @@ func validateBackendFlags(iops *app.InfrahubOps) error {
 	return nil
 }
 
+// restoreRequest is the restore one command line asks for, once the invocation has been
+// validated. It is what turns the flag combinations below into a single delegation
+// decision, so the routing cannot disagree with the validation that allowed it.
+type restoreRequest struct {
+	// Archive is the archive named on the command line, empty when none was. The plakar
+	// backend's own latest-group resolution is reached with an empty Archive too, which
+	// is why --latest needs no separate route there.
+	Archive string
+	// Latest routes the run through app.RestoreLatestBackup, which chooses the archive.
+	// It is never set for the plakar backend: that backend's no-argument restore already
+	// resolves the latest complete backup group, so --latest is an alias for it (FR-004).
+	Latest bool
+	// S3 selects the configured S3 bucket/prefix as the pool --latest chooses from,
+	// instead of the local backup directory. It is only ever set alongside Latest.
+	S3 bool
+}
+
+// resolveRestoreInvocation validates one `restore` command line and reports the restore
+// it asks for. It is the whole of this command's argument contract, in one place and
+// with no side effects, so an invocation that cannot mean what it says is rejected
+// before anything is listed, downloaded, or stopped.
+//
+// The refusals are deliberate rather than best-guess resolutions: this command
+// overwrites a deployment's data, so an ambiguous command line must fail rather than
+// pick one of the two things it could have meant. Bare `restore` keeps failing on the
+// tarball backend for the same reason — a typo must not become a data-overwriting
+// default — with the error now naming --latest as the way to restore without a filename
+// (FR-003).
+func resolveRestoreInvocation(backend app.BackendType, args []string, latest, s3 bool) (restoreRequest, error) {
+	if latest && len(args) > 0 {
+		return restoreRequest{}, fmt.Errorf("--latest and a named archive are mutually exclusive: pass either --latest or %s, not both", args[0])
+	}
+
+	if s3 && !latest {
+		return restoreRequest{}, fmt.Errorf("--s3 selects the pool --latest chooses from and requires it; to restore one exact remote archive, pass its s3://bucket/key URI as the argument instead")
+	}
+
+	if backend == app.BackendPlakar {
+		if s3 {
+			return restoreRequest{}, fmt.Errorf("--s3 does not apply to the %s backend: the repository location comes from --repo, and a plakar restore already resolves the latest complete backup group", app.BackendPlakar)
+		}
+
+		// --latest is what this backend has always done without an argument, so it takes
+		// the same route rather than a parallel one that could drift from it (FR-004).
+		return restoreRequest{}, nil
+	}
+
+	if len(args) != 1 && !latest {
+		return restoreRequest{}, fmt.Errorf("requires exactly 1 arg(s), only received %d: pass the backup archive to restore, or --latest to restore the most recent backup without naming one", len(args))
+	}
+
+	if latest {
+		return restoreRequest{Latest: true, S3: s3}, nil
+	}
+
+	return restoreRequest{Archive: args[0]}, nil
+}
+
 // retentionRuleInput reads one retention rule's raw configuration for the command
 // being run: the invoked command's own flag, and the environment variable.
 //
@@ -117,6 +175,8 @@ func main() {
 	var restoreMigrateFormat bool
 	var restoreResetDeploymentID bool
 	var restoreDecryptKey string
+	var restoreLatest bool
+	var restoreLatestFromS3 bool
 	var s3Upload bool
 	var s3KeepLocal bool
 	var sleepDuration time.Duration
@@ -205,24 +265,26 @@ func main() {
 		Use:          "restore [backup-file]",
 		Short:        "Restore Infrahub from a backup archive",
 		SilenceUsage: true,
+		// Cobra parses flags before validating arguments, so the invocation contract —
+		// which spans both — is enforced here, before RunE can act on it.
 		Args: func(cmd *cobra.Command, args []string) error {
-			if iops.Config().Backend == app.BackendPlakar {
-				return nil // positional arg not required for plakar
-			}
-			if len(args) != 1 {
-				return fmt.Errorf("requires exactly 1 arg(s), only received %d", len(args))
-			}
-			return nil
+			_, err := resolveRestoreInvocation(iops.Config().Backend, args, restoreLatest, restoreLatestFromS3)
+			return err
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := validateBackendFlags(iops); err != nil {
 				return err
 			}
-			forceRestore, _ := cmd.Flags().GetBool("force")
-			if iops.Config().Backend == app.BackendPlakar {
-				return iops.RestoreBackup("", restoreExcludeTaskManagerDB, restoreMigrateFormat, restoreSleepDuration, restoreDecryptKey, forceRestore, restoreResetDeploymentID)
+			request, err := resolveRestoreInvocation(iops.Config().Backend, args, restoreLatest, restoreLatestFromS3)
+			if err != nil {
+				return err
 			}
-			return iops.RestoreBackup(args[0], restoreExcludeTaskManagerDB, restoreMigrateFormat, restoreSleepDuration, restoreDecryptKey, forceRestore, restoreResetDeploymentID)
+			forceRestore, _ := cmd.Flags().GetBool("force")
+
+			if request.Latest {
+				return iops.RestoreLatestBackup(request.S3, restoreExcludeTaskManagerDB, restoreMigrateFormat, restoreSleepDuration, restoreDecryptKey, forceRestore, restoreResetDeploymentID)
+			}
+			return iops.RestoreBackup(request.Archive, restoreExcludeTaskManagerDB, restoreMigrateFormat, restoreSleepDuration, restoreDecryptKey, forceRestore, restoreResetDeploymentID)
 		},
 	}
 	restoreCmd.Flags().BoolVar(&restoreExcludeTaskManagerDB, "exclude-taskmanager", false, "Skip restoring the task manager database even if present in the archive")
@@ -231,6 +293,11 @@ func main() {
 	restoreCmd.Flags().StringVar(&restoreDecryptKey, "decrypt-key", "", "Path to private key PEM file for decrypting an encrypted backup")
 	restoreCmd.Flags().Bool("force", false, "Force restore of incomplete backup group")
 	restoreCmd.Flags().BoolVar(&restoreResetDeploymentID, "reset-deployment-id", false, "Generate a new Root node UUID after restore to detach this instance from the source deployment ID")
+	restoreCmd.Flags().BoolVar(&restoreLatest, "latest", false, "Restore the most recent backup instead of naming an archive (mutually exclusive with [backup-file])")
+	restoreCmd.Flags().BoolVar(&restoreLatestFromS3, "s3", false, "With --latest: choose from the configured S3 bucket/prefix instead of the local backup directory")
+	// --latest and --s3 are per-invocation switches and are deliberately not bound to
+	// viper: a persistent --latest would turn a mistyped `restore` into a data-overwriting
+	// default, and a persistent --s3 would silently move the pool for every restore.
 	viper.BindPFlag("decrypt-key", restoreCmd.Flags().Lookup("decrypt-key"))
 	viper.BindPFlag("reset-deployment-id", restoreCmd.Flags().Lookup("reset-deployment-id"))
 
