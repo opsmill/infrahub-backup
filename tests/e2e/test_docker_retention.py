@@ -57,81 +57,6 @@ def _real_backups(backup_dir: Path, fixtures: set[str]) -> set[str]:
     return {name for name in _names(backup_dir) if name.startswith("infrahub_backup_")} - fixtures
 
 
-@pytest.mark.e2e
-@pytest.mark.docker
-class TestDockerRetention(TestInfrahubDockerClient):
-    async def test_create_applies_retention(self, infrahub_compose, infrahub_port, backup_binary, tmp_path):
-        """`create` prunes out-of-policy archives only when retention is configured."""
-        url = f"http://localhost:{infrahub_port}"
-        project = infrahub_compose.project_name
-        backup_dir = tmp_path / "backups"
-
-        out_of_policy, survivors = _seed_fixtures(backup_dir)
-        fixtures = set(out_of_policy) | set(survivors)
-
-        # 1. Back up with a retention policy. The count rule is 3 rather than the
-        #    14 of a realistic schedule so that this small fixture set actually
-        #    crosses the boundary: union semantics mean a count larger than the
-        #    number of archives present would claim every one of them.
-        result = run_backup(
-            backup_binary,
-            [
-                "--project",
-                project,
-                "--backup-dir",
-                str(backup_dir),
-                "create",
-                "--force",
-                "--retention-days",
-                "7",
-                "--retention-count",
-                "3",
-            ],
-        )
-
-        # 2. The new archive plus every in-policy archive and every decoy remain,
-        #    and exactly the out-of-policy archives are gone (US1 scenario 1).
-        pruned_run_backups = _real_backups(backup_dir, fixtures)
-        assert len(pruned_run_backups) == 1, f"expected exactly one new archive, found {pruned_run_backups}"
-        assert _names(backup_dir) == set(survivors) | pruned_run_backups, (
-            f"unexpected backup directory contents: {sorted(_names(backup_dir))}"
-        )
-
-        # 3. Every deletion is reported (FR-009).
-        output = result.stdout + result.stderr
-        for name in out_of_policy:
-            assert f"Pruned backup {name}" in output, f"deletion of {name} was not reported:\n{output}"
-
-        # 4. Wait for Infrahub to recover before the second backup.
-        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
-
-        # 5. Without retention options nothing is pruned (US1 scenario 3).
-        for name in out_of_policy:
-            (backup_dir / name).write_text("retention fixture")
-        before = _names(backup_dir)
-
-        result = run_backup(
-            backup_binary,
-            [
-                "--project",
-                project,
-                "--backup-dir",
-                str(backup_dir),
-                "create",
-                "--force",
-            ],
-        )
-
-        plain_run_backups = _real_backups(backup_dir, fixtures) - pruned_run_backups
-        assert len(plain_run_backups) == 1, f"expected exactly one new archive, found {plain_run_backups}"
-        assert _names(backup_dir) == before | plain_run_backups, (
-            f"a run without retention options changed the directory: {sorted(_names(backup_dir))}"
-        )
-        assert "Pruned backup" not in (result.stdout + result.stderr), "retention ran without being configured"
-
-        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
-
-
 ALL_EXPIRED_AGES = [40, 50, 60]
 
 
@@ -717,17 +642,93 @@ class TestS3Retention:
 
 @pytest.mark.e2e
 @pytest.mark.docker
-class TestDockerS3RetentionOnCreate(TestInfrahubDockerClient):
-    """Quickstart scenario 6: `create --s3-upload` prunes the bucket it just uploaded to.
+class TestDockerRetention(TestInfrahubDockerClient):
+    """Retention as `create` applies it, against one class-scoped compose stack.
 
-    This is the one S3 retention case that needs a live deployment, because the S3 leg of
-    `create` follows the upload this run performed rather than a flag.
+    These are the retention cases that need a live deployment, and they share one stack
+    rather than paying its setup and teardown each. The local leg is covered first; the S3
+    leg follows, and needs a deployment for the same reason — `create` prunes the bucket
+    because this run uploaded to it, not because the bucket was configured.
     """
+
+    async def test_create_applies_retention(self, infrahub_compose, infrahub_port, backup_binary, tmp_path):
+        """`create` prunes out-of-policy archives only when retention is configured."""
+        url = f"http://localhost:{infrahub_port}"
+        project = infrahub_compose.project_name
+        backup_dir = tmp_path / "backups"
+
+        out_of_policy, survivors = _seed_fixtures(backup_dir)
+        fixtures = set(out_of_policy) | set(survivors)
+
+        # 1. Back up with a retention policy. The count rule is 3 rather than the
+        #    14 of a realistic schedule so that this small fixture set actually
+        #    crosses the boundary: union semantics mean a count larger than the
+        #    number of archives present would claim every one of them.
+        result = run_backup(
+            backup_binary,
+            [
+                "--project",
+                project,
+                "--backup-dir",
+                str(backup_dir),
+                "create",
+                "--force",
+                "--retention-days",
+                "7",
+                "--retention-count",
+                "3",
+            ],
+        )
+
+        # 2. The new archive plus every in-policy archive and every decoy remain,
+        #    and exactly the out-of-policy archives are gone (US1 scenario 1).
+        pruned_run_backups = _real_backups(backup_dir, fixtures)
+        assert len(pruned_run_backups) == 1, f"expected exactly one new archive, found {pruned_run_backups}"
+        assert _names(backup_dir) == set(survivors) | pruned_run_backups, (
+            f"unexpected backup directory contents: {sorted(_names(backup_dir))}"
+        )
+
+        # 3. Every deletion is reported (FR-009).
+        output = result.stdout + result.stderr
+        for name in out_of_policy:
+            assert f"Pruned backup {name}" in output, f"deletion of {name} was not reported:\n{output}"
+
+        # 4. Wait for Infrahub to recover before the second backup.
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
+
+        # 5. Without retention options nothing is pruned (US1 scenario 3).
+        for name in out_of_policy:
+            (backup_dir / name).write_text("retention fixture")
+        before = _names(backup_dir)
+
+        result = run_backup(
+            backup_binary,
+            [
+                "--project",
+                project,
+                "--backup-dir",
+                str(backup_dir),
+                "create",
+                "--force",
+            ],
+        )
+
+        plain_run_backups = _real_backups(backup_dir, fixtures) - pruned_run_backups
+        assert len(plain_run_backups) == 1, f"expected exactly one new archive, found {plain_run_backups}"
+        assert _names(backup_dir) == before | plain_run_backups, (
+            f"a run without retention options changed the directory: {sorted(_names(backup_dir))}"
+        )
+        assert "Pruned backup" not in (result.stdout + result.stderr), "retention ran without being configured"
+
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
 
     async def test_create_prunes_s3_only_when_the_run_uploaded(
         self, infrahub_compose, infrahub_port, backup_binary, minio_docker, s3_bucket, tmp_path
     ):
-        """US1 scenario 2 / FR-007: the S3 leg is pruned exactly when the run uploaded there."""
+        """US1 scenario 2 / FR-007: the S3 leg is pruned exactly when the run uploaded there.
+
+        Quickstart scenario 6: `create --s3-upload` prunes the bucket it just uploaded to.
+        """
         url = f"http://localhost:{infrahub_port}"
         project = infrahub_compose.project_name
         client = _s3_client(minio_docker)
