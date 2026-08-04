@@ -69,11 +69,11 @@
 
 ### Implementation for User Story 2
 
-- [ ] T018 [US2] Injectable confirmation seam in src/internal/app/retention.go — `confirmFunc func(candidates) (bool, error)` defaulting to a y/N stdin prompt; non-TTY stdin without `--force` → actionable refusal error (mirrors `updater.Proceed`; research.md R5, critique E4)
-- [ ] T019 [US2] Implement `InfrahubOps.Prune(policy, opts{DryRun, Force, S3})` in src/internal/app/retention.go — validation order: policy active (else "at least one retention rule required"), `Backend != plakar` (else FR-012 error), `!(DryRun && Force)` (contradictory); legs: local always, S3 only when `opts.S3`; preview → confirm (unless Force/DryRun) → `applyRetention`
-- [ ] T020 [US2] Register the `prune` command (`--retention-days`, `--retention-count`, `--dry-run`, `--force`, `--s3`; `--dry-run`/`--force`/`--s3` deliberately not viper-bound) in src/cmd/infrahub-backup/main.go (contracts/cli.md)
-- [ ] T021 [US2] Unit tests for `Prune` in src/internal/app/retention_test.go: validation table (no rule, plakar backend, dry-run×force), confirm accept/decline/non-TTY paths via injected seam, dry-run never calls Delete, S3 leg only with opts.S3
-- [ ] T022 [US2] End-to-end test in tests/e2e/: prune `--dry-run` (nothing deleted, exact list), prune `--force` (exact set deleted, decoys + newest survive — floor scenario with all-expired fixtures), validation-error exit codes (US2 acceptance scenarios 1, 3, 4; SC-003, SC-004, SC-005)
+- [X] T018 [US2] Injectable confirmation seam in src/internal/app/retention.go — `confirmFunc func(candidates) (bool, error)` defaulting to a y/N stdin prompt; non-TTY stdin without `--force` → actionable refusal error (mirrors `updater.Proceed`; research.md R5, critique E4)
+- [X] T019 [US2] Implement `InfrahubOps.Prune(policy, opts{DryRun, Force, S3})` in src/internal/app/retention.go — validation order: policy active (else "at least one retention rule required"), `Backend != plakar` (else FR-012 error), `!(DryRun && Force)` (contradictory); legs: local always, S3 only when `opts.S3`; preview → confirm (unless Force/DryRun) → `applyRetention`
+- [X] T020 [US2] Register the `prune` command (`--retention-days`, `--retention-count`, `--dry-run`, `--force`, `--s3`; `--dry-run`/`--force`/`--s3` deliberately not viper-bound) in src/cmd/infrahub-backup/main.go (contracts/cli.md)
+- [X] T021 [US2] Unit tests for `Prune` in src/internal/app/retention_test.go: validation table (no rule, plakar backend, dry-run×force), confirm accept/decline/non-TTY paths via injected seam, dry-run never calls Delete, S3 leg only with opts.S3
+- [X] T022 [US2] End-to-end test in tests/e2e/: prune `--dry-run` (nothing deleted, exact list), prune `--force` (exact set deleted, decoys + newest survive — floor scenario with all-expired fixtures), validation-error exit codes (US2 acceptance scenarios 1, 3, 4; SC-003, SC-004, SC-005)
 
 **Checkpoint**: US1 and US2 both independently functional — the v1 release surface is complete.
 

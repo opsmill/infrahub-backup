@@ -7,6 +7,7 @@ import (
 	app "infrahub-ops/src/internal/app"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 // retentionFlagCommand builds a command carrying the retention flags exactly as
@@ -14,7 +15,15 @@ import (
 func retentionFlagCommand(t *testing.T, args ...string) *cobra.Command {
 	t.Helper()
 
-	cmd := &cobra.Command{Use: "create", RunE: func(*cobra.Command, []string) error { return nil }}
+	return namedRetentionFlagCommand(t, "create", args...)
+}
+
+// namedRetentionFlagCommand builds one command of the given name carrying the two
+// retention flags, with the given command line already parsed.
+func namedRetentionFlagCommand(t *testing.T, use string, args ...string) *cobra.Command {
+	t.Helper()
+
+	cmd := &cobra.Command{Use: use, RunE: func(*cobra.Command, []string) error { return nil }}
 	cmd.Flags().Int("retention-days", 0, "")
 	cmd.Flags().Int("retention-count", 0, "")
 	if err := cmd.Flags().Parse(args); err != nil {
@@ -107,4 +116,88 @@ func TestResolveRetentionFlags(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRetentionFlagsResolvePerCommand guards the reason resolveRetentionFlags reads
+// the invoked command's own flag: `create` binds the retention keys to viper, and
+// viper resolves a bound flag through whichever command bound the key last. Reading
+// viper directly would make each command answer with the other's flag, so this test
+// registers both commands the way main does — create bound, prune unbound — and
+// checks that each still resolves its own command line while the environment
+// variable keeps working for both (FR-011).
+func TestRetentionFlagsResolvePerCommand(t *testing.T) {
+	bindCreate := func(t *testing.T, createCmd *cobra.Command) {
+		t.Helper()
+
+		viper.Reset()
+		t.Cleanup(viper.Reset)
+		viper.SetEnvPrefix("INFRAHUB")
+		viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
+		viper.AutomaticEnv()
+		for _, name := range []string{"retention-days", "retention-count"} {
+			if err := viper.BindPFlag(name, createCmd.Flags().Lookup(name)); err != nil {
+				t.Fatalf("BindPFlag(%q) = %v, want nil", name, err)
+			}
+		}
+	}
+
+	resolve := func(t *testing.T, cmd *cobra.Command) app.RetentionConfig {
+		t.Helper()
+
+		iops := app.NewInfrahubOps()
+		if err := resolveRetentionFlags(cmd, iops); err != nil {
+			t.Fatalf("resolveRetentionFlags(%s) = %v, want nil", cmd.Use, err)
+		}
+
+		return iops.Config().Retention
+	}
+
+	// Only ever one command's flags are parsed per process, so each case sets a flag
+	// on the invoked command and leaves the other command's flags untouched, exactly
+	// as cobra does.
+	t.Run("create's flag reaches create", func(t *testing.T) {
+		createCmd := namedRetentionFlagCommand(t, "create", "--retention-days", "7")
+		bindCreate(t, createCmd)
+
+		if got, want := resolve(t, createCmd), (app.RetentionConfig{Days: 7}); got != want {
+			t.Errorf("create retention = %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("prune's flag reaches prune despite create owning the viper binding", func(t *testing.T) {
+		createCmd := namedRetentionFlagCommand(t, "create")
+		pruneCmd := namedRetentionFlagCommand(t, "prune", "--retention-count", "5")
+		bindCreate(t, createCmd)
+
+		if got, want := resolve(t, pruneCmd), (app.RetentionConfig{Count: 5}); got != want {
+			t.Errorf("prune retention = %+v, want %+v", got, want)
+		}
+		if got := resolve(t, createCmd); got != (app.RetentionConfig{}) {
+			t.Errorf("create retention = %+v, want prune's flag not to leak into create", got)
+		}
+	})
+
+	t.Run("environment variable reaches both commands", func(t *testing.T) {
+		createCmd := namedRetentionFlagCommand(t, "create")
+		pruneCmd := namedRetentionFlagCommand(t, "prune")
+		bindCreate(t, createCmd)
+		t.Setenv("INFRAHUB_RETENTION_DAYS", "9")
+
+		for _, cmd := range []*cobra.Command{createCmd, pruneCmd} {
+			if got, want := resolve(t, cmd), (app.RetentionConfig{Days: 9}); got != want {
+				t.Errorf("%s retention = %+v, want %+v", cmd.Use, got, want)
+			}
+		}
+	})
+
+	t.Run("a command's own flag outranks the environment", func(t *testing.T) {
+		createCmd := namedRetentionFlagCommand(t, "create")
+		pruneCmd := namedRetentionFlagCommand(t, "prune", "--retention-days", "3")
+		bindCreate(t, createCmd)
+		t.Setenv("INFRAHUB_RETENTION_DAYS", "9")
+
+		if got, want := resolve(t, pruneCmd), (app.RetentionConfig{Days: 3}); got != want {
+			t.Errorf("prune retention = %+v, want %+v", got, want)
+		}
+	})
 }

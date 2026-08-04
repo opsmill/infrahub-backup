@@ -1,5 +1,7 @@
-"""E2E tests: Docker Compose + retention policy applied by `create`."""
+"""E2E tests: retention policy applied by `create` and by the standalone `prune`."""
 
+import re
+import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -126,3 +128,127 @@ class TestDockerRetention(TestInfrahubDockerClient):
         assert "Pruned backup" not in (result.stdout + result.stderr), "retention ran without being configured"
 
         await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
+
+
+ALL_EXPIRED_AGES = [40, 50, 60]
+
+
+def _run_prune(binary: str, args: list[str], stdin=subprocess.DEVNULL) -> subprocess.CompletedProcess:
+    """Run `infrahub-backup prune` and return the result without raising on failure."""
+    return subprocess.run([binary, *args], capture_output=True, text=True, stdin=stdin)
+
+
+def _candidates(output: str) -> set[str]:
+    """Return the archive names a dry run listed as candidates."""
+    return set(re.findall(r"Would prune backup (\S+) from", output))
+
+
+def _pruned(output: str) -> set[str]:
+    """Return the archive names a real run reported as deleted."""
+    return set(re.findall(r"Pruned backup (\S+) from", output))
+
+
+@pytest.mark.e2e
+@pytest.mark.docker
+class TestPruneRetention:
+    """`prune` against a seeded backup directory.
+
+    Retention on the local leg never talks to a deployment, so these cases need no
+    Infrahub stack. They carry the `docker` marker because that is one of the two
+    marks CI collects.
+    """
+
+    def test_dry_run_lists_candidates_and_deletes_nothing(self, backup_binary, tmp_path):
+        """US2 scenario 1 / SC-004: the preview is exact and removes nothing."""
+        backup_dir = tmp_path / "backups"
+        out_of_policy, survivors = _seed_fixtures(backup_dir)
+        before = _names(backup_dir)
+
+        result = _run_prune(
+            backup_binary,
+            ["--backup-dir", str(backup_dir), "prune", "--retention-days", "7", "--dry-run"],
+        )
+
+        assert result.returncode == 0, f"dry run failed:\n{result.stdout}\n{result.stderr}"
+        output = result.stdout + result.stderr
+        assert _candidates(output) == set(out_of_policy), f"unexpected candidate set in:\n{output}"
+        assert _pruned(output) == set(), f"a dry run reported deletions:\n{output}"
+        assert _names(backup_dir) == before, f"a dry run changed the directory: {sorted(_names(backup_dir))}"
+        assert set(survivors) <= _names(backup_dir)
+
+    def test_force_deletes_exactly_the_previewed_set(self, backup_binary, tmp_path):
+        """US2 scenario 3 / SC-004: `--force` deletes the previewed set and nothing else."""
+        backup_dir = tmp_path / "backups"
+        out_of_policy, survivors = _seed_fixtures(backup_dir)
+
+        preview = _run_prune(
+            backup_binary,
+            ["--backup-dir", str(backup_dir), "prune", "--retention-days", "7", "--dry-run"],
+        )
+        assert preview.returncode == 0, f"dry run failed:\n{preview.stdout}\n{preview.stderr}"
+        previewed = _candidates(preview.stdout + preview.stderr)
+
+        result = _run_prune(
+            backup_binary,
+            ["--backup-dir", str(backup_dir), "prune", "--retention-days", "7", "--force"],
+        )
+
+        assert result.returncode == 0, f"forced prune failed:\n{result.stdout}\n{result.stderr}"
+        output = result.stdout + result.stderr
+        assert _pruned(output) == previewed == set(out_of_policy), f"deleted set does not match the preview:\n{output}"
+        assert _names(backup_dir) == set(survivors), f"unexpected survivors: {sorted(_names(backup_dir))}"
+
+    def test_force_keeps_the_newest_when_everything_is_out_of_policy(self, backup_binary, tmp_path):
+        """FR-003 / SC-003: the floor has no override, even when every rule prunes."""
+        backup_dir = tmp_path / "backups"
+        backup_dir.mkdir(parents=True)
+        expired = [_archive_name(age) for age in ALL_EXPIRED_AGES]
+        for name in expired + DECOYS:
+            (backup_dir / name).write_text("retention fixture")
+
+        newest = _archive_name(min(ALL_EXPIRED_AGES))
+        result = _run_prune(
+            backup_binary,
+            [
+                "--backup-dir",
+                str(backup_dir),
+                "prune",
+                "--retention-days",
+                "7",
+                "--retention-count",
+                "1",
+                "--force",
+            ],
+        )
+
+        assert result.returncode == 0, f"forced prune failed:\n{result.stdout}\n{result.stderr}"
+        output = result.stdout + result.stderr
+        assert _pruned(output) == set(expired) - {newest}, f"unexpected deletions:\n{output}"
+        assert _names(backup_dir) == {newest} | set(DECOYS), (
+            f"the newest archive or a decoy was removed: {sorted(_names(backup_dir))}"
+        )
+
+    @pytest.mark.parametrize(
+        ("args", "expected"),
+        [
+            ([], "at least one retention rule is required"),
+            (["--retention-days", "0"], "--retention-days must be at least 1 when set"),
+            (["--retention-count", "0"], "--retention-count must be at least 1 when set"),
+            (["--retention-days", "7", "--dry-run", "--force"], "contradictory"),
+            (["--retention-days", "7", "--backend", "plakar", "--repo", "/tmp/nope"], "not yet supported"),
+            (["--retention-days", "7"], "re-run with --force"),
+        ],
+        ids=["no-rule", "zero-days", "zero-count", "dry-run-with-force", "plakar-backend", "non-interactive-stdin"],
+    )
+    def test_validation_errors_exit_non_zero(self, backup_binary, tmp_path, args, expected):
+        """US2 scenario 4: refusals exit non-zero, explain themselves, and delete nothing."""
+        backup_dir = tmp_path / "backups"
+        _seed_fixtures(backup_dir)
+        before = _names(backup_dir)
+
+        result = _run_prune(backup_binary, ["--backup-dir", str(backup_dir), "prune", *args])
+
+        assert result.returncode != 0, f"expected a non-zero exit:\n{result.stdout}\n{result.stderr}"
+        output = result.stdout + result.stderr
+        assert expected in output, f"expected {expected!r} in:\n{output}"
+        assert _names(backup_dir) == before, f"a refused prune changed the directory: {sorted(_names(backup_dir))}"
