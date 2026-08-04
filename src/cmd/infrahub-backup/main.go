@@ -236,6 +236,51 @@ func main() {
 	rootCmd.AddCommand(createCmd)
 	rootCmd.AddCommand(restoreCmd)
 
+	var pruneDryRun bool
+	var pruneForce bool
+	var pruneS3 bool
+
+	pruneCmd := &cobra.Command{
+		Use:          "prune",
+		Short:        "Delete backups that fall outside the retention policy",
+		Long:         "Apply a retention policy to existing backups without creating a new one.\n\nThe most recent backup at each location always survives. Without --force the candidates are listed and a single confirmation is asked; with --dry-run nothing is deleted. S3 objects are only ever considered when --s3 is passed.",
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// The Plakar backend is rejected by Prune itself with the reason that
+			// matters here — retention is not implemented for it yet (FR-012) —
+			// rather than by the repository/S3 checks a real Plakar run needs.
+			if iops.Config().Backend != app.BackendPlakar {
+				if err := validateBackendFlags(iops); err != nil {
+					return err
+				}
+			}
+			if err := resolveRetentionFlags(cmd, iops); err != nil {
+				return err
+			}
+
+			return iops.Prune(iops.Config().Retention.Policy(), app.PruneOptions{
+				DryRun: pruneDryRun,
+				Force:  pruneForce,
+				S3:     pruneS3,
+			})
+		},
+	}
+	pruneCmd.Flags().Int("retention-days", 0, "Delete backups older than N days (N >= 1)")
+	pruneCmd.Flags().Int("retention-count", 0, "Keep only the N most recent backups (N >= 1)")
+	pruneCmd.Flags().BoolVar(&pruneDryRun, "dry-run", false, "List exactly what a real run would delete, delete nothing, and never prompt")
+	pruneCmd.Flags().BoolVar(&pruneForce, "force", false, "Skip the confirmation prompt (for non-interactive and scripted use)")
+	pruneCmd.Flags().BoolVar(&pruneS3, "s3", false, "Also prune backups under the configured S3 bucket/prefix (S3 is never touched without this flag)")
+
+	// The retention flags are deliberately NOT bound to viper here: `create` already
+	// bound these keys, and viper resolves a bound flag through whichever command
+	// bound it last, so re-binding would break `create --retention-days`.
+	// resolveRetentionFlags reads the invoked command's own flag and falls back to
+	// viper only for environment/configuration values, which keeps FR-011 working on
+	// both commands. --dry-run, --force, and --s3 are per-invocation switches and are
+	// intentionally not configurable at all (contracts/cli.md).
+
+	rootCmd.AddCommand(pruneCmd)
+
 	// Key generation command
 	var keygenOutput string
 

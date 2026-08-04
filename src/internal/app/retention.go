@@ -1,9 +1,11 @@
 package app
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+	"golang.org/x/term"
 )
 
 // retentionDay is the duration of one day for the age rule. Day-granularity
@@ -355,4 +358,207 @@ func pruneAtLocation(ctx context.Context, location storageLocation, policy Reten
 	}
 
 	return outcome
+}
+
+// ErrPruneNonInteractive is returned when `prune` needs a confirmation but stdin
+// is not a terminal and the operator did not waive the prompt. Refusing is the
+// only safe answer: a pipeline that cannot answer must not have its backups
+// deleted on the strength of a prompt nobody read.
+var ErrPruneNonInteractive = errors.New("cannot prompt for confirmation: stdin is not a terminal; re-run with --force to prune non-interactively")
+
+// confirmFunc decides whether the previewed deletions may proceed. It receives the
+// preview outcomes — one per location — so an implementation can report both what
+// and where, and it reports an error only when no answer can be obtained at all.
+type confirmFunc func(candidates []pruneOutcome) (bool, error)
+
+// Testable seams for the prune confirmation, mirroring updater.Proceed's: tests
+// replace them to drive the accept, decline, and non-interactive paths without a
+// terminal (critique E4).
+var (
+	confirmPrune  confirmFunc = confirmPruneOnStdin
+	pruneStdin    io.Reader   = os.Stdin
+	pruneStdinTTY             = defaultPruneStdinIsTTY
+	pruneOut      io.Writer   = os.Stdout
+)
+
+func defaultPruneStdinIsTTY() bool {
+	return term.IsTerminal(int(os.Stdin.Fd()))
+}
+
+// confirmPruneOnStdin asks the single y/N question that guards a real prune. The
+// candidate list has already been reported, so the question only has to name the
+// scale of what is about to happen. Anything other than y/yes — including an empty
+// line or a stdin that ends without an answer — declines.
+//
+// The prompt is written to stdout rather than logged: it must appear whatever the
+// log level is, and it must not carry a newline before the answer is typed.
+func confirmPruneOnStdin(candidates []pruneOutcome) (bool, error) {
+	if !pruneStdinTTY() {
+		return false, ErrPruneNonInteractive
+	}
+
+	fmt.Fprintf(pruneOut, "Prune %d backup(s) listed above? [y/N]: ", countPruneCandidates(candidates))
+
+	line, err := bufio.NewReader(pruneStdin).ReadString('\n')
+	if err != nil && line == "" {
+		return false, nil
+	}
+
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "y", "yes":
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+// countPruneCandidates totals the candidates across every previewed location.
+func countPruneCandidates(outcomes []pruneOutcome) int {
+	total := 0
+	for _, outcome := range outcomes {
+		total += len(outcome.Pruned)
+	}
+
+	return total
+}
+
+// PruneOptions carries the per-invocation switches of the standalone `prune`
+// command. They are deliberately not configurable through environment variables or
+// a configuration file: a persistent Force would silently disarm the confirmation
+// that makes pruning safe, and a persistent S3 would delete objects the operator
+// only configured for upload.
+type PruneOptions struct {
+	// DryRun reports exactly what a real run would delete and deletes nothing.
+	DryRun bool
+	// Force waives the confirmation prompt for scripted use.
+	Force bool
+	// S3 adds the configured bucket/prefix as a pruned location. Without it S3 is
+	// never touched, however complete the S3 configuration is (FR-007).
+	S3 bool
+}
+
+// validatePruneRequest rejects a prune that cannot mean what it says, before any
+// location is listed and therefore before anything can be deleted.
+//
+// Validate runs first so a negative rule is reported as the bad value it is rather
+// than as a missing rule; an inactive policy then fails because retention is the
+// command's only job (FR-004 lets `create` skip silently, `prune` cannot).
+func validatePruneRequest(cfg *Configuration, policy RetentionPolicy, opts PruneOptions) error {
+	if err := policy.Validate(); err != nil {
+		return err
+	}
+
+	if !policy.Active() {
+		return errors.New("at least one retention rule is required: pass --retention-days and/or --retention-count")
+	}
+
+	// The Plakar backend has no retention implementation yet. `prune` exists only to
+	// apply retention, so it fails outright instead of doing nothing quietly (FR-012).
+	if cfg.Backend == BackendPlakar {
+		return fmt.Errorf("retention is not yet supported for the %s backend; nothing was pruned", cfg.Backend)
+	}
+
+	if opts.DryRun && opts.Force {
+		return errors.New("--dry-run and --force are contradictory: --dry-run never deletes and never prompts, so there is nothing to force")
+	}
+
+	return nil
+}
+
+// retentionLegsForPrune returns the storage locations a `prune` run evaluates.
+//
+// The local backup directory is always a leg — pruning it is the point of the
+// command. S3 is a leg only when the operator asked for it explicitly, which is the
+// difference from `create`, where the leg follows this run's upload (FR-007).
+func retentionLegsForPrune(cfg *Configuration, includeS3 bool) ([]storageLocation, error) {
+	legs := []storageLocation{newLocalLocation(cfg.BackupDir)}
+	if !includeS3 {
+		return legs, nil
+	}
+
+	if err := cfg.S3.ValidateConfig(); err != nil {
+		return nil, err
+	}
+
+	client, err := NewS3Client(cfg.S3)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create S3 client for retention: %w", err)
+	}
+
+	return append(legs, newS3Location(client)), nil
+}
+
+// reportPrunePreview logs what the policy selected at each location, so the
+// operator sees the shape of the run before answering the prompt and after a
+// dry-run (FR-009). The candidates themselves are already reported one by one by
+// applyRetention's dry-run pass.
+func reportPrunePreview(outcomes []pruneOutcome) {
+	for _, outcome := range outcomes {
+		logrus.Infof("Retention at %s: %d backup(s) kept, %d candidate(s) to prune", outcome.Location, len(outcome.Kept), len(outcome.Pruned))
+	}
+}
+
+// Prune applies the retention policy on demand, without taking a backup first.
+//
+// It is the same evaluation `create` performs, wrapped in the confirmation
+// contract of a standalone destructive command: `--dry-run` previews and stops,
+// `--force` deletes without asking, and an interactive run previews, asks once, and
+// treats anything but yes as a decline. A declined run is a success — the operator
+// got what they asked for — so it returns nil.
+//
+// Failures are reported exactly as applyRetention aggregates them: every leg is
+// attempted and the per-leg errors, already qualified with their location, are
+// returned as they are.
+func (iops *InfrahubOps) Prune(policy RetentionPolicy, opts PruneOptions) error {
+	if err := validatePruneRequest(iops.config, policy, opts); err != nil {
+		return err
+	}
+
+	legs, err := retentionLegsForPrune(iops.config, opts.S3)
+	if err != nil {
+		return err
+	}
+
+	ctx := context.Background()
+	logrus.Infof("Applying retention policy (days: %d, count: %d) to %d location(s)", policy.Days, policy.Count, len(legs))
+
+	if opts.Force {
+		// The operator waived the preview; every deletion is still reported as it
+		// happens, so the run is auditable after the fact.
+		_, err := applyRetention(ctx, legs, policy, false)
+		return err
+	}
+
+	preview, previewErr := applyRetention(ctx, legs, policy, true)
+	reportPrunePreview(preview)
+
+	if opts.DryRun {
+		return previewErr
+	}
+
+	// A preview that could not be completed cannot be confirmed: the operator would
+	// be answering for a set the tool does not fully know. Refuse rather than delete
+	// the part that happened to list successfully. `--force` (above) keeps the
+	// attempt-every-leg behavior for scripted runs.
+	if previewErr != nil {
+		return previewErr
+	}
+
+	if countPruneCandidates(preview) == 0 {
+		logrus.Info("Nothing to prune: the retention policy claims every backup found")
+		return nil
+	}
+
+	confirmed, err := confirmPrune(preview)
+	if err != nil {
+		return err
+	}
+	if !confirmed {
+		logrus.Info("Prune aborted; no backups were deleted")
+		return nil
+	}
+
+	_, err = applyRetention(ctx, legs, policy, false)
+
+	return err
 }

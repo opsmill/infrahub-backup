@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1031,6 +1032,548 @@ func TestPlakarBackendPrunesNothing(t *testing.T) {
 	// path warns instead of pruning.
 	if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 		t.Errorf("stat(%q) = %v, want the archive untouched on the plakar backend", name, err)
+	}
+}
+
+// pruneDirNames returns the sorted contents of dir, so a test can state exactly
+// what survived a prune.
+func pruneDirNames(t *testing.T, dir string) []string {
+	t.Helper()
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	slices.Sort(names)
+
+	return names
+}
+
+// seedPruneDir creates a directory holding the named archives plus the decoys every
+// prune scenario carries: files that share the directory but are not backups.
+func seedPruneDir(t *testing.T, names ...string) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	for _, name := range append(slices.Clone(names), pruneDecoys...) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	return dir
+}
+
+var pruneDecoys = []string{"notes.txt", "infrahub_backup_garbage.tar.gz", "somebackup.tar.gz"}
+
+// withConfirmPrune installs a confirmation for the duration of one test.
+func withConfirmPrune(t *testing.T, confirm confirmFunc) {
+	t.Helper()
+
+	previous := confirmPrune
+	confirmPrune = confirm
+	t.Cleanup(func() { confirmPrune = previous })
+}
+
+// TestValidatePruneRequest covers everything `prune` refuses before it lists a
+// single location: a policy that claims nothing (US2 scenario 4), the Plakar
+// backend (FR-012), and flags that contradict each other.
+func TestValidatePruneRequest(t *testing.T) {
+	tests := []struct {
+		name        string
+		policy      RetentionPolicy
+		backend     BackendType
+		opts        PruneOptions
+		errContains string
+	}{
+		{
+			name:        "no rule at all",
+			policy:      RetentionPolicy{},
+			errContains: "at least one retention rule is required",
+		},
+		{
+			name:        "negative rule is reported as a bad value",
+			policy:      RetentionPolicy{Days: -1},
+			errContains: "retention-days must be at least 1 when set",
+		},
+		{
+			name:        "plakar backend is refused outright",
+			policy:      RetentionPolicy{Days: 7},
+			backend:     BackendPlakar,
+			errContains: "retention is not yet supported for the plakar backend",
+		},
+		{
+			name:        "a missing rule outranks the plakar backend",
+			policy:      RetentionPolicy{},
+			backend:     BackendPlakar,
+			errContains: "at least one retention rule is required",
+		},
+		{
+			name:        "dry-run and force contradict",
+			policy:      RetentionPolicy{Count: 3},
+			opts:        PruneOptions{DryRun: true, Force: true},
+			errContains: "contradictory",
+		},
+		{name: "days rule alone", policy: RetentionPolicy{Days: 7}},
+		{name: "count rule alone", policy: RetentionPolicy{Count: 3}},
+		{name: "both rules with force", policy: RetentionPolicy{Days: 7, Count: 3}, opts: PruneOptions{Force: true}},
+		{name: "dry run alone", policy: RetentionPolicy{Days: 7}, opts: PruneOptions{DryRun: true}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := createRetentionConfig(t.TempDir(), RetentionConfig{})
+			if tc.backend != "" {
+				cfg.Backend = tc.backend
+			}
+
+			err := validatePruneRequest(cfg, tc.policy, tc.opts)
+			if tc.errContains == "" {
+				if err != nil {
+					t.Fatalf("validatePruneRequest() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("validatePruneRequest() = nil, want an error containing %q", tc.errContains)
+			}
+			if !strings.Contains(err.Error(), tc.errContains) {
+				t.Errorf("error = %q, want it to contain %q", err, tc.errContains)
+			}
+		})
+	}
+}
+
+// TestPruneValidationTouchesNothing pairs each validation error with its promise:
+// a refused prune leaves the directory exactly as it was.
+func TestPruneValidationTouchesNothing(t *testing.T) {
+	dir := seedPruneDir(t, backupNameAt(time.Now()), backupNameAt(time.Now().Add(-40*retentionDay)))
+	before := pruneDirNames(t, dir)
+
+	withConfirmPrune(t, func([]pruneOutcome) (bool, error) {
+		t.Fatal("confirmation asked for a run that should have failed validation")
+		return false, nil
+	})
+
+	cases := []struct {
+		name    string
+		policy  RetentionPolicy
+		backend BackendType
+		opts    PruneOptions
+	}{
+		{name: "no rule", policy: RetentionPolicy{}},
+		{name: "plakar backend", policy: RetentionPolicy{Days: 7}, backend: BackendPlakar},
+		{name: "dry-run with force", policy: RetentionPolicy{Days: 7}, opts: PruneOptions{DryRun: true, Force: true}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := createRetentionConfig(dir, RetentionConfig{})
+			if tc.backend != "" {
+				cfg.Backend = tc.backend
+			}
+			iops := &InfrahubOps{config: cfg}
+
+			if err := iops.Prune(tc.policy, tc.opts); err == nil {
+				t.Fatal("Prune() = nil, want a validation error")
+			}
+			if got := pruneDirNames(t, dir); !slices.Equal(got, before) {
+				t.Errorf("directory = %v, want it untouched %v", got, before)
+			}
+		})
+	}
+}
+
+// TestPruneDryRunDeletesNothing is US2 scenario 1 / SC-004: the preview names
+// exactly the archives a real run would remove and removes none of them.
+func TestPruneDryRunDeletesNothing(t *testing.T) {
+	newest := backupNameAt(time.Now())
+	inPolicy := backupNameAt(time.Now().Add(-2 * retentionDay))
+	outOfPolicy := []string{
+		backupNameAt(time.Now().Add(-20 * retentionDay)),
+		backupNameAt(time.Now().Add(-30*retentionDay)) + ".enc",
+	}
+
+	dir := seedPruneDir(t, append([]string{newest, inPolicy}, outOfPolicy...)...)
+	before := pruneDirNames(t, dir)
+
+	withConfirmPrune(t, func([]pruneOutcome) (bool, error) {
+		t.Fatal("dry run asked for confirmation; it must never prompt")
+		return false, nil
+	})
+
+	iops := &InfrahubOps{config: createRetentionConfig(dir, RetentionConfig{})}
+	output := captureLogrus(t, func() {
+		if err := iops.Prune(RetentionPolicy{Days: 7}, PruneOptions{DryRun: true}); err != nil {
+			t.Fatalf("Prune() = %v, want nil", err)
+		}
+	})
+
+	if got := pruneDirNames(t, dir); !slices.Equal(got, before) {
+		t.Errorf("directory after a dry run = %v, want it untouched %v", got, before)
+	}
+	for _, name := range outOfPolicy {
+		if !strings.Contains(output, "Would prune backup "+name) {
+			t.Errorf("log output = %q, want %s listed as a candidate", output, name)
+		}
+	}
+	for _, name := range append([]string{newest, inPolicy}, pruneDecoys...) {
+		if strings.Contains(output, "Would prune backup "+name) {
+			t.Errorf("log output = %q, want %s left out of the candidate list", output, name)
+		}
+	}
+	if !strings.Contains(output, "2 candidate(s) to prune") {
+		t.Errorf("log output = %q, want the per-location summary", output)
+	}
+}
+
+// TestPruneDryRunReportsUnusableLocation keeps a mistyped backup directory from
+// reading as "nothing to prune": the preview reports the failure and exits non-zero.
+func TestPruneDryRunReportsUnusableLocation(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	iops := &InfrahubOps{config: createRetentionConfig(missing, RetentionConfig{})}
+
+	err := iops.Prune(RetentionPolicy{Days: 7}, PruneOptions{DryRun: true})
+	if err == nil {
+		t.Fatal("Prune() = nil, want the unusable backup directory reported")
+	}
+	if !strings.Contains(err.Error(), "retention failed at local:"+missing) {
+		t.Errorf("error = %q, want it to name the failing leg", err)
+	}
+}
+
+// TestPruneConfirmationPaths covers the interactive contract (US2 scenarios 2 and
+// 3) through the injected seam: accepting deletes exactly the previewed set,
+// declining is a clean no-op that still exits 0, and `--force` never asks.
+func TestPruneConfirmationPaths(t *testing.T) {
+	newest := backupNameAt(time.Now())
+	outOfPolicy := []string{
+		backupNameAt(time.Now().Add(-20 * retentionDay)),
+		backupNameAt(time.Now().Add(-30 * retentionDay)),
+	}
+	confirmFailure := errors.New("terminal went away")
+
+	tests := []struct {
+		name         string
+		opts         PruneOptions
+		confirm      confirmFunc
+		wantAsked    bool
+		wantPruned   bool
+		wantErr      error
+		wantLogPhras string
+	}{
+		{
+			name:       "accepting prunes the previewed set",
+			confirm:    func([]pruneOutcome) (bool, error) { return true, nil },
+			wantAsked:  true,
+			wantPruned: true,
+		},
+		{
+			name:         "declining changes nothing and succeeds",
+			confirm:      func([]pruneOutcome) (bool, error) { return false, nil },
+			wantAsked:    true,
+			wantLogPhras: "Prune aborted; no backups were deleted",
+		},
+		{
+			name:      "a confirmation that cannot be obtained aborts",
+			confirm:   func([]pruneOutcome) (bool, error) { return false, confirmFailure },
+			wantAsked: true,
+			wantErr:   confirmFailure,
+		},
+		{
+			name:       "force never asks",
+			opts:       PruneOptions{Force: true},
+			confirm:    nil, // installed below as a fatal
+			wantPruned: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := seedPruneDir(t, append([]string{newest}, outOfPolicy...)...)
+			before := pruneDirNames(t, dir)
+
+			asked := false
+			confirm := tc.confirm
+			if confirm == nil {
+				confirm = func([]pruneOutcome) (bool, error) {
+					t.Error("confirmation asked despite --force")
+					return false, nil
+				}
+			}
+			withConfirmPrune(t, func(candidates []pruneOutcome) (bool, error) {
+				asked = true
+				if got := countPruneCandidates(candidates); got != len(outOfPolicy) {
+					t.Errorf("confirmation saw %d candidate(s), want %d", got, len(outOfPolicy))
+				}
+				return confirm(candidates)
+			})
+
+			iops := &InfrahubOps{config: createRetentionConfig(dir, RetentionConfig{})}
+			output := captureLogrus(t, func() {
+				err := iops.Prune(RetentionPolicy{Days: 7}, tc.opts)
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("Prune() = %v, want %v", err, tc.wantErr)
+				}
+			})
+
+			if asked != tc.wantAsked {
+				t.Errorf("confirmation asked = %v, want %v", asked, tc.wantAsked)
+			}
+
+			want := before
+			if tc.wantPruned {
+				want = append([]string{newest}, pruneDecoys...)
+				slices.Sort(want)
+			}
+			if got := pruneDirNames(t, dir); !slices.Equal(got, want) {
+				t.Errorf("directory after Prune = %v, want %v", got, want)
+			}
+			if tc.wantLogPhras != "" && !strings.Contains(output, tc.wantLogPhras) {
+				t.Errorf("log output = %q, want it to contain %q", output, tc.wantLogPhras)
+			}
+		})
+	}
+}
+
+// TestPruneNothingToPrune covers the quiet case: a policy that claims every backup
+// present asks nothing and reports success.
+func TestPruneNothingToPrune(t *testing.T) {
+	dir := seedPruneDir(t, backupNameAt(time.Now()), backupNameAt(time.Now().Add(-2*retentionDay)))
+	before := pruneDirNames(t, dir)
+
+	withConfirmPrune(t, func([]pruneOutcome) (bool, error) {
+		t.Fatal("confirmation asked with nothing to prune")
+		return false, nil
+	})
+
+	iops := &InfrahubOps{config: createRetentionConfig(dir, RetentionConfig{})}
+	output := captureLogrus(t, func() {
+		if err := iops.Prune(RetentionPolicy{Days: 7}, PruneOptions{}); err != nil {
+			t.Fatalf("Prune() = %v, want nil", err)
+		}
+	})
+
+	if !strings.Contains(output, "Nothing to prune") {
+		t.Errorf("log output = %q, want it to state there was nothing to prune", output)
+	}
+	if got := pruneDirNames(t, dir); !slices.Equal(got, before) {
+		t.Errorf("directory = %v, want it untouched %v", got, before)
+	}
+}
+
+// TestPruneFloorKeepsNewest is FR-003/SC-003 through the command: when every backup
+// is out of policy the newest one still survives.
+func TestPruneFloorKeepsNewest(t *testing.T) {
+	newest := backupNameAt(time.Now().Add(-40 * retentionDay))
+	older := []string{
+		backupNameAt(time.Now().Add(-50 * retentionDay)),
+		backupNameAt(time.Now().Add(-60 * retentionDay)),
+	}
+	dir := seedPruneDir(t, append([]string{newest}, older...)...)
+
+	iops := &InfrahubOps{config: createRetentionConfig(dir, RetentionConfig{})}
+	if err := iops.Prune(RetentionPolicy{Days: 7}, PruneOptions{Force: true}); err != nil {
+		t.Fatalf("Prune() = %v, want nil", err)
+	}
+
+	want := append([]string{newest}, pruneDecoys...)
+	slices.Sort(want)
+	if got := pruneDirNames(t, dir); !slices.Equal(got, want) {
+		t.Errorf("directory after Prune = %v, want the newest archive and the decoys %v", got, want)
+	}
+}
+
+// TestPruneNonInteractiveStdin is the refusal a CronJob must see instead of an
+// unanswered prompt (research.md R5, critique E4).
+func TestPruneNonInteractiveStdin(t *testing.T) {
+	dir := seedPruneDir(t, backupNameAt(time.Now()), backupNameAt(time.Now().Add(-40*retentionDay)))
+	before := pruneDirNames(t, dir)
+
+	previousTTY := pruneStdinTTY
+	pruneStdinTTY = func() bool { return false }
+	t.Cleanup(func() { pruneStdinTTY = previousTTY })
+
+	iops := &InfrahubOps{config: createRetentionConfig(dir, RetentionConfig{})}
+	err := iops.Prune(RetentionPolicy{Days: 7}, PruneOptions{})
+	if !errors.Is(err, ErrPruneNonInteractive) {
+		t.Fatalf("Prune() = %v, want ErrPruneNonInteractive", err)
+	}
+	if !strings.Contains(err.Error(), "--force") {
+		t.Errorf("error = %q, want it to point at --force", err)
+	}
+	if got := pruneDirNames(t, dir); !slices.Equal(got, before) {
+		t.Errorf("directory = %v, want it untouched %v", got, before)
+	}
+}
+
+// TestConfirmPruneOnStdin covers the default prompt: only an explicit yes proceeds,
+// and a stdin that is not a terminal refuses instead of guessing.
+func TestConfirmPruneOnStdin(t *testing.T) {
+	candidates := []pruneOutcome{{Location: "local:/backups", Pruned: []backupRef{refDaysAgo(20), refDaysAgo(30)}}}
+
+	tests := []struct {
+		name        string
+		input       string
+		tty         bool
+		wantConfirm bool
+		wantErr     error
+	}{
+		{name: "y proceeds", input: "y\n", tty: true, wantConfirm: true},
+		{name: "yes proceeds", input: "yes\n", tty: true, wantConfirm: true},
+		{name: "uppercase Y proceeds", input: "Y\n", tty: true, wantConfirm: true},
+		{name: "padded yes proceeds", input: "  y  \n", tty: true, wantConfirm: true},
+		{name: "n declines", input: "n\n", tty: true},
+		{name: "empty line declines", input: "\n", tty: true},
+		{name: "anything else declines", input: "delete everything\n", tty: true},
+		{name: "closed stdin declines", input: "", tty: true},
+		{name: "not a terminal refuses", input: "y\n", wantErr: ErrPruneNonInteractive},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			previousStdin, previousTTY, previousOut := pruneStdin, pruneStdinTTY, pruneOut
+			var prompt bytes.Buffer
+			pruneStdin = strings.NewReader(tc.input)
+			pruneStdinTTY = func() bool { return tc.tty }
+			pruneOut = &prompt
+			t.Cleanup(func() { pruneStdin, pruneStdinTTY, pruneOut = previousStdin, previousTTY, previousOut })
+
+			confirmed, err := confirmPruneOnStdin(candidates)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("confirmPruneOnStdin() error = %v, want %v", err, tc.wantErr)
+			}
+			if confirmed != tc.wantConfirm {
+				t.Errorf("confirmPruneOnStdin() = %v, want %v", confirmed, tc.wantConfirm)
+			}
+
+			if tc.wantErr != nil {
+				if prompt.Len() != 0 {
+					t.Errorf("prompt = %q, want nothing asked without a terminal", prompt.String())
+				}
+				return
+			}
+			if want := "Prune 2 backup(s) listed above? [y/N]: "; prompt.String() != want {
+				t.Errorf("prompt = %q, want %q", prompt.String(), want)
+			}
+		})
+	}
+}
+
+// TestRetentionLegsForPrune covers FR-007's prune half: the local directory is
+// always pruned, and S3 becomes a leg only when the operator asks for it.
+func TestRetentionLegsForPrune(t *testing.T) {
+	dir := t.TempDir()
+
+	tests := []struct {
+		name        string
+		includeS3   bool
+		wantLegs    []string
+		errContains string
+	}{
+		{
+			name:     "configured S3 alone never becomes a leg",
+			wantLegs: []string{"local:" + dir},
+		},
+		{
+			name:      "explicit request adds the S3 leg",
+			includeS3: true,
+			wantLegs:  []string{"local:" + dir, "s3://infrahub-backups/prod"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			legs, err := retentionLegsForPrune(createRetentionConfig(dir, RetentionConfig{}), tc.includeS3)
+			if err != nil {
+				t.Fatalf("retentionLegsForPrune() = %v, want nil", err)
+			}
+			if got := locationNames(legs); !slices.Equal(got, tc.wantLegs) {
+				t.Errorf("legs = %v, want %v", got, tc.wantLegs)
+			}
+		})
+	}
+}
+
+// TestRetentionLegsForPruneRejectsUnusableS3 keeps `--s3` from silently pruning
+// nothing when the S3 configuration cannot describe a location.
+func TestRetentionLegsForPruneRejectsUnusableS3(t *testing.T) {
+	tests := []struct {
+		name        string
+		mutate      func(*Configuration)
+		errContains string
+	}{
+		{
+			name:        "no bucket",
+			mutate:      func(cfg *Configuration) { cfg.S3.Bucket = "" },
+			errContains: "S3 bucket is required",
+		},
+		{
+			name:        "unusable endpoint",
+			mutate:      func(cfg *Configuration) { cfg.S3.Endpoint = "://not-a-url" },
+			errContains: "S3",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := createRetentionConfig(t.TempDir(), RetentionConfig{})
+			tc.mutate(cfg)
+
+			legs, err := retentionLegsForPrune(cfg, true)
+			if err == nil {
+				t.Fatalf("retentionLegsForPrune() = %v, nil error; want the unusable S3 configuration reported", locationNames(legs))
+			}
+			if !strings.Contains(err.Error(), tc.errContains) {
+				t.Errorf("error = %q, want it to contain %q", err, tc.errContains)
+			}
+		})
+	}
+}
+
+// TestPruneSkipsS3WithoutTheFlag is US2 scenario 5: an S3 configuration too broken
+// to build a location proves the leg was never requested — without `--s3` the prune
+// succeeds, with it the run fails instead of quietly skipping S3.
+func TestPruneSkipsS3WithoutTheFlag(t *testing.T) {
+	newest := backupNameAt(time.Now())
+	outOfPolicy := backupNameAt(time.Now().Add(-40 * retentionDay))
+
+	for _, includeS3 := range []bool{false, true} {
+		t.Run(fmt.Sprintf("s3=%v", includeS3), func(t *testing.T) {
+			dir := seedPruneDir(t, newest, outOfPolicy)
+			cfg := createRetentionConfig(dir, RetentionConfig{})
+			cfg.S3 = &S3Config{} // no bucket: unusable as a location
+
+			iops := &InfrahubOps{config: cfg}
+			err := iops.Prune(RetentionPolicy{Days: 7}, PruneOptions{Force: true, S3: includeS3})
+
+			if !includeS3 {
+				if err != nil {
+					t.Fatalf("Prune() = %v, want nil: S3 must not be consulted without --s3", err)
+				}
+				want := append([]string{newest}, pruneDecoys...)
+				slices.Sort(want)
+				if got := pruneDirNames(t, dir); !slices.Equal(got, want) {
+					t.Errorf("directory = %v, want the local leg pruned %v", got, want)
+				}
+				return
+			}
+
+			if err == nil {
+				t.Fatal("Prune(--s3) = nil, want the unusable S3 configuration reported")
+			}
+			if !strings.Contains(err.Error(), "S3 bucket is required") {
+				t.Errorf("error = %q, want it to name the missing bucket", err)
+			}
+			// The S3 leg is refused before anything is deleted anywhere.
+			if got := pruneDirNames(t, dir); !slices.Contains(got, outOfPolicy) {
+				t.Errorf("directory = %v, want %s still present after a refused run", got, outOfPolicy)
+			}
+		})
 	}
 }
 
