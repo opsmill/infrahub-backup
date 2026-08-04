@@ -1,9 +1,11 @@
 """Dump recent Prefect events as JSON for the troubleshooting bundle.
 
 The Prefect CLI has no non-streaming events command, so this script queries
-the server's events API directly. It runs inside the task-manager container,
-which ships httpx as a Prefect dependency. The events endpoint caps the page
-size at 50, so recent events are gathered by following next_page links.
+the server's events API directly. It runs inside a task-worker (or the
+task-manager itself where no worker is deployed); both ship httpx as a Prefect
+dependency, and a worker's PREFECT_API_URL already points at the server. The
+events endpoint caps the page size at 50, so recent events are gathered by
+following next_page links.
 """
 
 import json

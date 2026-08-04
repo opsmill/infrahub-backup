@@ -113,11 +113,13 @@ func (d *DockerBackend) ExecStream(service string, command []string, opts *ExecO
 // research R3/R4) and the optional timeout-bounded and per-replica exec
 // capabilities the bundle diagnostics collectors prefer (research R2).
 var (
-	_ collectBackend  = (*DockerBackend)(nil)
-	_ contextExecer   = (*DockerBackend)(nil)
-	_ replicaExecer   = (*DockerBackend)(nil)
-	_ contextCopier   = (*DockerBackend)(nil)
-	_ editionDetector = (*DockerBackend)(nil)
+	_ collectBackend        = (*DockerBackend)(nil)
+	_ contextExecer         = (*DockerBackend)(nil)
+	_ replicaExecer         = (*DockerBackend)(nil)
+	_ separateExecer        = (*DockerBackend)(nil)
+	_ separateReplicaExecer = (*DockerBackend)(nil)
+	_ contextCopier         = (*DockerBackend)(nil)
+	_ editionDetector       = (*DockerBackend)(nil)
 )
 
 // ExecContext is the timeout-bounded variant of Exec used by the bundle
@@ -133,6 +135,20 @@ func (d *DockerBackend) ExecContext(ctx context.Context, timeout time.Duration, 
 func (d *DockerBackend) ExecReplica(ctx context.Context, timeout time.Duration, replica Replica, command []string) (string, error) {
 	args := append([]string{"exec", replica.Container}, command...)
 	return d.executor.runCommandContext(ctx, timeout, "docker", args...)
+}
+
+// ExecSeparateContext is ExecContext with the command's stdout and stderr kept
+// apart, so a collector can write the payload (stdout) to the bundle without
+// the command's diagnostics being mixed into it.
+func (d *DockerBackend) ExecSeparateContext(ctx context.Context, timeout time.Duration, service string, command []string, opts *ExecOptions) (string, string, error) {
+	return d.executor.runCommandSeparateContext(ctx, timeout, "docker", d.buildExecArgs(service, command, opts)...)
+}
+
+// ExecReplicaSeparate is ExecReplica with stdout and stderr kept apart (see
+// ExecSeparateContext).
+func (d *DockerBackend) ExecReplicaSeparate(ctx context.Context, timeout time.Duration, replica Replica, command []string) (string, string, error) {
+	args := append([]string{"exec", replica.Container}, command...)
+	return d.executor.runCommandSeparateContext(ctx, timeout, "docker", args...)
 }
 
 // composePSContainer is the subset of one `docker compose ps --format json`

@@ -229,3 +229,43 @@ func TestRunCommandPipeContext_CommandFailureKeepsStderr(t *testing.T) {
 		t.Errorf("error = %q, want stderr content included", err)
 	}
 }
+
+func TestRunCommandSeparateContext_KeepsStreamsApart(t *testing.T) {
+	ce := NewCommandExecutor()
+	stdout, stderr, err := ce.runCommandSeparateContext(context.Background(), 10*time.Second,
+		"sh", "-c", `printf '{"ok": true}'; printf 'notice\n' >&2`)
+	if err != nil {
+		t.Fatalf("runCommandSeparateContext failed: %v", err)
+	}
+	if stdout != `{"ok": true}` {
+		t.Errorf("stdout = %q, want the payload alone", stdout)
+	}
+	if stderr != "notice" {
+		t.Errorf("stderr = %q, want %q", stderr, "notice")
+	}
+}
+
+func TestRunCommandSeparateContext_FailureKeepsBothStreams(t *testing.T) {
+	ce := NewCommandExecutor()
+	stdout, stderr, err := ce.runCommandSeparateContext(context.Background(), 10*time.Second,
+		"sh", "-c", `printf 'partial'; printf 'boom\n' >&2; exit 3`)
+	if err == nil {
+		t.Fatal("runCommandSeparateContext succeeded, want exit error")
+	}
+	var timeout *timeoutError
+	if errors.As(err, &timeout) {
+		t.Errorf("plain command failure was reported as a timeout: %v", err)
+	}
+	if stdout != "partial" || stderr != "boom" {
+		t.Errorf("stdout = %q, stderr = %q, want %q and %q", stdout, stderr, "partial", "boom")
+	}
+}
+
+func TestRunCommandSeparateContext_Timeout(t *testing.T) {
+	ce := NewCommandExecutor()
+	_, _, err := ce.runCommandSeparateContext(context.Background(), 100*time.Millisecond, "sleep", "5")
+	var timeout *timeoutError
+	if !errors.As(err, &timeout) {
+		t.Fatalf("error = %v (%T), want *timeoutError", err, err)
+	}
+}
