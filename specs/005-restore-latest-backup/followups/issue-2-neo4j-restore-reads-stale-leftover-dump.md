@@ -73,6 +73,40 @@ Which symptom appears depends on the leftover's state (a complete dump from the 
 `create` versus a partially-written or otherwise unloadable one), so neither should be read
 as "the" behavior — the shared defect is that the loaded file is not the requested one.
 
+### Reproduction of symptom (a)
+
+Against a live Docker Compose deployment (Infrahub 1.8.2, Neo4j Community), using a
+**named** archive so that nothing about `--latest` is involved:
+
+```bash
+# a marker tag exists
+infrahub-backup --backup-dir "$DIR" create --force     # archive A — contains the marker
+# delete the marker
+infrahub-backup --backup-dir "$DIR" create --force     # archive B — does not contain it
+
+docker exec <database> ls -la /tmp/infrahubops
+# -rw-r--r-- 1 root root 5618010 Aug  4 14:54 neo4j.dump      <- left behind by create B
+
+infrahub-backup --backup-dir "$DIR" restore "$DIR/$A"  # restore the archive WITH the marker
+```
+
+Output:
+
+```text
+level=info msg="Starting backup restore" backup_file=/tmp/qs-issue2/infrahub_backup_20260804_145310.tar.gz …
+level=info msg="Neo4j dump restored successfully"
+level=info msg="Restore completed successfully"
+exit=0
+```
+
+The marker tag is **absent** afterwards. Archive A was named, A contains the marker, the run
+reported success — and the data that was loaded is B's, from the leftover dump.
+
+Note also that a preceding restore logged
+`Failed to cleanup temporary Neo4j backup data (this is expected for community restore
+method): exit status 128`, so the `rm -rf` that is supposed to clear `/tmp/infrahubops` can
+itself fail, widening the window in which a leftover survives.
+
 ### Why existing e2e coverage does not catch it
 
 `tests/e2e/test_docker_tarball.py` and `tests/e2e/test_docker_encryption.py` perform exactly
