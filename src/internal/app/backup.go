@@ -68,7 +68,7 @@ func (iops *InfrahubOps) applyCreateRetention(s3UploadedThisRun bool) error {
 	policy := iops.config.Retention.Policy()
 	logrus.Infof("Applying retention policy (days: %d, count: %d) to %d location(s)", policy.Days, policy.Count, len(legs))
 
-	_, err = applyRetention(context.Background(), legs, policy, false)
+	_, err = applyRetention(context.Background(), legs, policy, retentionExecute)
 
 	return err
 }
