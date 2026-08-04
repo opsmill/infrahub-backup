@@ -408,10 +408,10 @@ func dirNames(t *testing.T, dir string) []string {
 
 // TestDownloadLatestS3BackupUsesACollisionProofTempPath is critiques E1/X1 and E3 as a
 // test: the download lands on a name that is not a backup archive name, so the operator's
-// own local copy of the same archive — what `create --s3-upload` leaves behind on every
-// host that keeps it, and therefore the expected state of this flow — is neither
-// overwritten nor deleted, and a temp file no cleanup reached could never be selected by a
-// later --latest run.
+// own local copy of the same archive — what `create --s3-upload --s3-keep-local` leaves
+// behind, and therefore the expected state of this flow — is neither overwritten nor
+// deleted, and a temp file no cleanup reached could never be selected by a later --latest
+// run.
 func TestDownloadLatestS3BackupUsesACollisionProofTempPath(t *testing.T) {
 	const localCopy = "the operator's own local copy"
 

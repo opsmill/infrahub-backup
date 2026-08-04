@@ -23,9 +23,9 @@ const encryptedArchiveSuffix = ".enc"
 // download is invisible to the pool, so a temp file left behind by a crash can neither be
 // selected by a later --latest run nor deleted by retention nor mistaken for an archive.
 // It also keeps the download away from BackupDir/<archive-name>, which is what makes a
-// local archive sharing the selected object's name — the state `create --s3-upload`
-// leaves on every host that keeps its local copy — neither overwritten nor deleted by a
-// restore (contracts/cli.md "Local-copy safety").
+// local archive sharing the selected object's name — the state
+// `create --s3-upload --s3-keep-local` leaves behind — neither overwritten nor deleted by
+// a restore (contracts/cli.md "Local-copy safety").
 const s3RestoreTempPattern = "restore-latest-*.download"
 
 // s3RestoreDownloadTimeout bounds the download of the selected archive. It matches the
@@ -117,10 +117,10 @@ func restoreLatestFrom(ctx context.Context, loc storageLocation, decryptKey stri
 //
 // The temporary path is the whole safety of this leg. Downloading to dir/<archive-name>
 // would truncate a local archive of the same name and then let the restore path delete it
-// — and `create --s3-upload` keeping its local copy makes that collision the expected
-// state of this flow, not a rare accident, so a nightly sync nobody watches would quietly
-// consume the host's own backups. The download therefore goes to a reserved temporary name
-// and the local pool is left exactly as it was found.
+// — and `create --s3-upload --s3-keep-local` makes that collision the expected state of
+// this flow, not a rare accident, so a nightly sync nobody watches would quietly consume
+// the host's own backups. The download therefore goes to a reserved temporary name and the
+// local pool is left exactly as it was found.
 //
 // Cleanup is deferred so it also covers a failed download and a failed restore: an
 // abandoned download would otherwise hold a full archive's worth of disk in the backup
