@@ -120,6 +120,143 @@ func TestRetentionConfigPolicy(t *testing.T) {
 	}
 }
 
+// TestResolveRetentionConfig covers the resolution of both rules from both channels
+// (FR-001, FR-011). The environment cases are the important ones: a value that cannot
+// be read as a rule must abort the run, because resolving it to 0 would mean "rule
+// inactive" and switch retention off on precisely the unattended runs that rely on it.
+func TestResolveRetentionConfig(t *testing.T) {
+	flag := func(value int) RetentionRuleInput {
+		return RetentionRuleInput{FlagValue: value, FlagSet: true}
+	}
+	env := func(value string) RetentionRuleInput {
+		return RetentionRuleInput{EnvValue: value, EnvSet: true}
+	}
+
+	tests := []struct {
+		name        string
+		inputs      RetentionInputs
+		want        RetentionConfig
+		errContains string
+	}{
+		{name: "nothing configured leaves retention inactive"},
+		{name: "days flag", inputs: RetentionInputs{Days: flag(7)}, want: RetentionConfig{Days: 7}},
+		{name: "count flag", inputs: RetentionInputs{Count: flag(14)}, want: RetentionConfig{Count: 14}},
+		{
+			name:   "both flags",
+			inputs: RetentionInputs{Days: flag(7), Count: flag(14)},
+			want:   RetentionConfig{Days: 7, Count: 14},
+		},
+		{
+			name:        "explicit zero flag is rejected",
+			inputs:      RetentionInputs{Days: flag(0)},
+			errContains: "--retention-days must be at least 1 when set; omit it to disable the age rule",
+		},
+		{
+			name:        "negative flag is rejected",
+			inputs:      RetentionInputs{Count: flag(-5)},
+			errContains: "--retention-count must be at least 1 when set; omit it to disable the count rule",
+		},
+
+		// The environment channel.
+		{name: "days environment variable", inputs: RetentionInputs{Days: env("7")}, want: RetentionConfig{Days: 7}},
+		{name: "count environment variable", inputs: RetentionInputs{Count: env("14")}, want: RetentionConfig{Count: 14}},
+		{name: "surrounding whitespace is tolerated", inputs: RetentionInputs{Days: env("  7 ")}, want: RetentionConfig{Days: 7}},
+		{
+			name:        "non-numeric environment value is rejected",
+			inputs:      RetentionInputs{Days: env("abc")},
+			errContains: `INFRAHUB_RETENTION_DAYS must be a whole number of at least 1 (got "abc"); omit it to disable the age rule`,
+		},
+		{
+			name:        "unit suffix is rejected",
+			inputs:      RetentionInputs{Days: env("7d")},
+			errContains: `INFRAHUB_RETENTION_DAYS must be a whole number of at least 1 (got "7d")`,
+		},
+		{
+			name:        "spelled-out number is rejected",
+			inputs:      RetentionInputs{Days: env("seven")},
+			errContains: `INFRAHUB_RETENTION_DAYS must be a whole number of at least 1 (got "seven")`,
+		},
+		{
+			name:        "fractional environment value is rejected rather than truncated",
+			inputs:      RetentionInputs{Days: env("7.5")},
+			errContains: `INFRAHUB_RETENTION_DAYS must be a whole number of at least 1 (got "7.5")`,
+		},
+		{
+			name:        "explicit zero environment value is rejected",
+			inputs:      RetentionInputs{Days: env("0")},
+			errContains: `INFRAHUB_RETENTION_DAYS must be a whole number of at least 1 (got "0")`,
+		},
+		{
+			name:        "negative environment value is rejected",
+			inputs:      RetentionInputs{Days: env("-5")},
+			errContains: `INFRAHUB_RETENTION_DAYS must be a whole number of at least 1 (got "-5")`,
+		},
+		{
+			name:        "empty environment value is rejected",
+			inputs:      RetentionInputs{Count: env("")},
+			errContains: `INFRAHUB_RETENTION_COUNT must be a whole number of at least 1 (got ""); omit it to disable the count rule`,
+		},
+		{
+			name:        "a bad count value is reported for its own variable",
+			inputs:      RetentionInputs{Days: env("7"), Count: env("many")},
+			errContains: `INFRAHUB_RETENTION_COUNT must be a whole number of at least 1 (got "many")`,
+		},
+		{
+			name:        "the days rule is reported first when both are bad",
+			inputs:      RetentionInputs{Days: env("x"), Count: env("y")},
+			errContains: "INFRAHUB_RETENTION_DAYS must be a whole number",
+		},
+
+		// Precedence between the channels.
+		{
+			name:   "a set flag outranks the environment",
+			inputs: RetentionInputs{Days: RetentionRuleInput{FlagValue: 3, FlagSet: true, EnvValue: "9", EnvSet: true}},
+			want:   RetentionConfig{Days: 3},
+		},
+		{
+			name:   "a set flag outranks an unusable environment value",
+			inputs: RetentionInputs{Days: RetentionRuleInput{FlagValue: 3, FlagSet: true, EnvValue: "abc", EnvSet: true}},
+			want:   RetentionConfig{Days: 3},
+		},
+		{
+			name:        "an invalid flag is reported even when the environment is valid",
+			inputs:      RetentionInputs{Days: RetentionRuleInput{FlagValue: 0, FlagSet: true, EnvValue: "9", EnvSet: true}},
+			errContains: "--retention-days must be at least 1 when set",
+		},
+		{
+			name:   "each rule uses its own channel",
+			inputs: RetentionInputs{Days: flag(7), Count: env("14")},
+			want:   RetentionConfig{Days: 7, Count: 14},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ResolveRetentionConfig(tc.inputs)
+
+			if tc.errContains != "" {
+				if err == nil {
+					t.Fatalf("ResolveRetentionConfig() = %+v, nil error; want an error containing %q", got, tc.errContains)
+				}
+				if !strings.Contains(err.Error(), tc.errContains) {
+					t.Errorf("error = %q, want it to contain %q", err, tc.errContains)
+				}
+				if got != (RetentionConfig{}) {
+					t.Errorf("configuration = %+v, want the zero value alongside an error", got)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("ResolveRetentionConfig() = %v, want nil", err)
+			}
+			if got != tc.want {
+				t.Errorf("configuration = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestParseBackupName(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -794,9 +931,13 @@ func createRetentionConfig(dir string, retention RetentionConfig) *Configuration
 	return &Configuration{
 		BackupDir: dir,
 		S3: &S3Config{
-			Bucket:   "infrahub-backups",
-			Prefix:   "prod",
-			Endpoint: "http://127.0.0.1:9000",
+			Bucket: "infrahub-backups",
+			Prefix: "prod",
+			// No test may reach S3 through this configuration. Port 1 needs privileges
+			// to bind, so a regression that wrongly adds the S3 leg fails on a refused
+			// connection within seconds instead of waiting out the five-minute list
+			// timeout against whatever happens to listen on a popular port.
+			Endpoint: "http://127.0.0.1:1",
 			Region:   "us-east-1",
 		},
 		Retention: retention,
@@ -1584,5 +1725,401 @@ func TestApplyRetentionNoLocations(t *testing.T) {
 	}
 	if len(outcomes) != 0 {
 		t.Errorf("outcomes = %v, want none", outcomes)
+	}
+}
+
+// TestApplyRetentionListsEachLocationOnce pins that deleting is driven by the plan: a
+// real run lists a location once and deletes what that single listing selected.
+func TestApplyRetentionListsEachLocationOnce(t *testing.T) {
+	location := &fakeLocation{name: "local:/backups", refs: []backupRef{refDaysAgo(1), refDaysAgo(20), refDaysAgo(30)}}
+
+	if _, err := applyRetention(context.Background(), []storageLocation{location}, RetentionPolicy{Days: 7}, false); err != nil {
+		t.Fatalf("applyRetention() = %v, want nil", err)
+	}
+	if location.listCalls != 1 {
+		t.Errorf("List calls = %d, want 1: a real run must delete the set it planned", location.listCalls)
+	}
+}
+
+// TestPruneDeletesExactlyTheConfirmedSet is SC-004 across the confirmation: whatever
+// happens at the location while the operator is answering, the run deletes the set that
+// was previewed and confirmed — no re-listing, no fresh evaluation instant.
+func TestPruneDeletesExactlyTheConfirmedSet(t *testing.T) {
+	t.Run("a backup that lands during the prompt is not deleted", func(t *testing.T) {
+		newest, day5, day10, day20 := refDaysAgo(1), refDaysAgo(5), refDaysAgo(10), refDaysAgo(20)
+		location := &fakeLocation{name: "local:/backups", refs: []backupRef{newest, day5, day10, day20}}
+
+		var confirmedSet []string
+		withConfirmPrune(t, func(candidates []pruneOutcome) (bool, error) {
+			confirmedSet = refNames(candidates[0].Pruned)
+			// A scheduled `create` finishes while the question is on screen. Re-listing
+			// under --retention-count 2 would now claim day5 as well.
+			location.refs = append(location.refs, refDaysAgo(0))
+			return true, nil
+		})
+
+		captureLogrus(t, func() {
+			if err := pruneLocations(context.Background(), []storageLocation{location}, RetentionPolicy{Count: 2}, PruneOptions{}); err != nil {
+				t.Fatalf("pruneLocations() = %v, want nil", err)
+			}
+		})
+
+		if want := []string{day10.Name, day20.Name}; !slices.Equal(confirmedSet, want) {
+			t.Fatalf("confirmation saw %v, want %v", confirmedSet, want)
+		}
+		if !slices.Equal(location.deleted, confirmedSet) {
+			t.Errorf("deleted %v, want exactly the confirmed set %v", location.deleted, confirmedSet)
+		}
+		if location.listCalls != 1 {
+			t.Errorf("List calls = %d, want 1: the confirmed plan must be executed as it was previewed", location.listCalls)
+		}
+	})
+
+	t.Run("a backup that ages past the rule during the prompt is not deleted", func(t *testing.T) {
+		// The borderline archive is just inside the seven-day rule when the plan is
+		// made and just outside it by the time the operator answers.
+		borderline := time.Now().Add(-7*retentionDay + 150*time.Millisecond)
+		day30 := refDaysAgo(30)
+		location := &fakeLocation{name: "local:/backups", refs: []backupRef{
+			refDaysAgo(1),
+			{Name: backupNameAt(borderline), CreatedAt: borderline},
+			day30,
+		}}
+
+		withConfirmPrune(t, func(candidates []pruneOutcome) (bool, error) {
+			time.Sleep(250 * time.Millisecond)
+			return true, nil
+		})
+
+		captureLogrus(t, func() {
+			if err := pruneLocations(context.Background(), []storageLocation{location}, RetentionPolicy{Days: 7}, PruneOptions{}); err != nil {
+				t.Fatalf("pruneLocations() = %v, want nil", err)
+			}
+		})
+
+		if want := []string{day30.Name}; !slices.Equal(location.deleted, want) {
+			t.Errorf("deleted %v, want only the archive the plan selected %v", location.deleted, want)
+		}
+	})
+
+	t.Run("a candidate that vanishes during the prompt is not a failure", func(t *testing.T) {
+		newest := backupNameAt(time.Now())
+		outOfPolicy := []string{
+			backupNameAt(time.Now().Add(-20 * retentionDay)),
+			backupNameAt(time.Now().Add(-30 * retentionDay)),
+		}
+		dir := seedPruneDir(t, append([]string{newest}, outOfPolicy...)...)
+
+		withConfirmPrune(t, func([]pruneOutcome) (bool, error) {
+			// Another prune (or an operator) removes one of the confirmed archives
+			// before this run gets to it.
+			if err := os.Remove(filepath.Join(dir, outOfPolicy[0])); err != nil {
+				t.Fatal(err)
+			}
+			return true, nil
+		})
+
+		iops := &InfrahubOps{config: createRetentionConfig(dir, RetentionConfig{})}
+		captureLogrus(t, func() {
+			if err := iops.Prune(RetentionPolicy{Days: 7}, PruneOptions{}); err != nil {
+				t.Fatalf("Prune() = %v, want nil: a backup that is already gone is not a failure", err)
+			}
+		})
+
+		want := append([]string{newest}, pruneDecoys...)
+		slices.Sort(want)
+		if got := pruneDirNames(t, dir); !slices.Equal(got, want) {
+			t.Errorf("directory after Prune = %v, want %v", got, want)
+		}
+	})
+}
+
+// TestLocalLocationDeleteAlreadyGone pins the storageLocation contract for a backup
+// that disappeared between planning and deletion: the state the deletion asked for
+// holds, so the leg must not fail.
+func TestLocalLocationDeleteAlreadyGone(t *testing.T) {
+	location := newLocalLocation(t.TempDir())
+	ref, ok := parseBackupName(backupNameAt(time.Now()))
+	if !ok {
+		t.Fatal("fixture name is not a backup archive name")
+	}
+
+	if err := location.Delete(context.Background(), ref); err != nil {
+		t.Errorf("Delete(%q) = %v, want nil for an archive that is already gone", ref.Name, err)
+	}
+}
+
+// TestPruneRefusesToDeleteAfterAnIncompletePreview is the guard that keeps an
+// unlistable location from reading as "nothing to prune": an interactive run whose
+// preview is incomplete asks nothing and deletes nothing, and the failure is reported.
+func TestPruneRefusesToDeleteAfterAnIncompletePreview(t *testing.T) {
+	t.Run("the only leg cannot be listed", func(t *testing.T) {
+		missing := filepath.Join(t.TempDir(), "does-not-exist")
+
+		withConfirmPrune(t, func([]pruneOutcome) (bool, error) {
+			t.Fatal("confirmation asked for a preview that could not be completed")
+			return false, nil
+		})
+
+		iops := &InfrahubOps{config: createRetentionConfig(missing, RetentionConfig{})}
+		var err error
+		output := captureLogrus(t, func() {
+			err = iops.Prune(RetentionPolicy{Days: 7}, PruneOptions{})
+		})
+
+		if err == nil {
+			t.Fatal("Prune() = nil, want the unusable backup directory reported")
+		}
+		if !strings.Contains(err.Error(), "retention failed at local:"+missing) {
+			t.Errorf("error = %q, want it to name the failing leg", err)
+		}
+		if strings.Contains(output, "Nothing to prune") {
+			t.Errorf("log output = %q, want a mistyped directory not to read as nothing to prune", output)
+		}
+	})
+
+	t.Run("one leg lists and another fails", func(t *testing.T) {
+		newest, day20, day30 := refDaysAgo(1), refDaysAgo(20), refDaysAgo(30)
+		listFailure := errors.New("AccessDenied: list forbidden")
+
+		healthy := &fakeLocation{name: "local:/backups", refs: []backupRef{newest, day20, day30}}
+		broken := &fakeLocation{name: "s3://bucket/prod", listErr: listFailure}
+
+		withConfirmPrune(t, func([]pruneOutcome) (bool, error) {
+			t.Fatal("confirmation asked with a partial candidate set")
+			return false, nil
+		})
+
+		var err error
+		output := captureLogrus(t, func() {
+			err = pruneLocations(context.Background(), []storageLocation{healthy, broken}, RetentionPolicy{Days: 7}, PruneOptions{})
+		})
+
+		if err == nil {
+			t.Fatal("pruneLocations() = nil, want the failing leg reported")
+		}
+		if !errors.Is(err, listFailure) {
+			t.Errorf("error = %q, want it to wrap the listing failure", err)
+		}
+		if len(healthy.attempted) != 0 {
+			t.Errorf("attempted deletions at the healthy leg = %v, want none: half a prune is not a prune", healthy.attempted)
+		}
+		if strings.Contains(output, "Nothing to prune") {
+			t.Errorf("log output = %q, want the incomplete preview reported as a failure", output)
+		}
+	})
+}
+
+// fakeS3Backend is an s3Backend whose listing and deletions are scripted. It embeds a
+// configuration-only S3Client, so the key construction and the location label the
+// location relies on are the real ones — only the network is replaced.
+type fakeS3Backend struct {
+	*S3Client
+	refs        []backupRef
+	listErr     error
+	deleteErr   error
+	deletedKeys []string
+}
+
+func (f *fakeS3Backend) List(_ context.Context) ([]backupRef, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return slices.Clone(f.refs), nil
+}
+
+func (f *fakeS3Backend) Delete(_ context.Context, key string) error {
+	f.deletedKeys = append(f.deletedKeys, key)
+	return f.deleteErr
+}
+
+var _ s3Backend = (*fakeS3Backend)(nil)
+
+// TestS3LocationDeleteUsesTheFullKey pins the wiring between an s3Location and its
+// client: a ref carries a base name, and the deletion must address the object by the
+// key an upload wrote it to. Deleting a nonexistent key succeeds silently in S3, so a
+// base name passed here would report every prune as done while deleting nothing.
+func TestS3LocationDeleteUsesTheFullKey(t *testing.T) {
+	plain := "infrahub_backup_20260804_120000.tar.gz"
+	encrypted := "infrahub_backup_20260801_090000.tar.gz.enc"
+
+	tests := []struct {
+		name     string
+		prefix   string
+		wantKeys []string
+	}{
+		{
+			name:     "configured prefix",
+			prefix:   "backups/prod",
+			wantKeys: []string{"backups/prod/" + plain, "backups/prod/" + encrypted},
+		},
+		{
+			name:     "prefix written with a trailing slash",
+			prefix:   "backups/prod/",
+			wantKeys: []string{"backups/prod/" + plain, "backups/prod/" + encrypted},
+		},
+		{
+			name:     "bucket root",
+			prefix:   "",
+			wantKeys: []string{plain, encrypted},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			refs := make([]backupRef, 0, 2)
+			for _, name := range []string{plain, encrypted} {
+				ref, ok := parseBackupName(name)
+				if !ok {
+					t.Fatalf("fixture %q is not a backup archive name", name)
+				}
+				refs = append(refs, ref)
+			}
+
+			backend := &fakeS3Backend{S3Client: s3KeyClient("infrahub-backups", tc.prefix), refs: refs}
+			location := newS3Location(backend)
+
+			listed, err := location.List(context.Background())
+			if err != nil {
+				t.Fatalf("List() = %v, want nil", err)
+			}
+			if got, want := refNames(listed), refNames(refs); !slices.Equal(got, want) {
+				t.Errorf("List() = %v, want the backend's refs unchanged %v", got, want)
+			}
+
+			for _, ref := range listed {
+				if err := location.Delete(context.Background(), ref); err != nil {
+					t.Fatalf("Delete(%q) = %v, want nil", ref.Name, err)
+				}
+			}
+			if !slices.Equal(backend.deletedKeys, tc.wantKeys) {
+				t.Errorf("deleted keys = %v, want the full object keys %v", backend.deletedKeys, tc.wantKeys)
+			}
+		})
+	}
+}
+
+// TestS3LocationDeleteReportsBackendFailure keeps a refused deletion from being
+// reported as a successful prune.
+func TestS3LocationDeleteReportsBackendFailure(t *testing.T) {
+	denied := errors.New("AccessDenied: delete forbidden")
+	ref, ok := parseBackupName("infrahub_backup_20260804_120000.tar.gz")
+	if !ok {
+		t.Fatal("fixture is not a backup archive name")
+	}
+
+	backend := &fakeS3Backend{S3Client: s3KeyClient("infrahub-backups", "prod"), deleteErr: denied}
+	err := newS3Location(backend).Delete(context.Background(), ref)
+	if !errors.Is(err, denied) {
+		t.Errorf("Delete() = %v, want it to report the backend failure", err)
+	}
+}
+
+// erroringReader is a stdin that breaks rather than answering.
+type erroringReader struct{ err error }
+
+func (r erroringReader) Read([]byte) (int, error) { return 0, r.err }
+
+// TestConfirmPruneOnStdinReadFailure separates a broken stdin from a deliberate no: an
+// I/O failure must surface as an error instead of being reported as a decline, which
+// would exit 0 and look like the operator answered.
+func TestConfirmPruneOnStdinReadFailure(t *testing.T) {
+	readFailure := errors.New("input/output error")
+
+	previousStdin, previousTTY, previousOut := pruneStdin, pruneStdinTTY, pruneOut
+	var prompt bytes.Buffer
+	pruneStdin = erroringReader{err: readFailure}
+	pruneStdinTTY = func() bool { return true }
+	pruneOut = &prompt
+	t.Cleanup(func() { pruneStdin, pruneStdinTTY, pruneOut = previousStdin, previousTTY, previousOut })
+
+	confirmed, err := confirmPruneOnStdin([]pruneOutcome{{Location: "local:/backups", Pruned: []backupRef{refDaysAgo(20)}}})
+	if err == nil {
+		t.Fatal("confirmPruneOnStdin() = nil error, want the unreadable stdin reported")
+	}
+	if !errors.Is(err, readFailure) {
+		t.Errorf("error = %q, want it to wrap the read failure", err)
+	}
+	if confirmed {
+		t.Error("confirmPruneOnStdin() = true, want no confirmation from an unreadable stdin")
+	}
+}
+
+// countLogLines returns how many logged lines contain phrase, and how many of those
+// were emitted at info level or above — what an operator sees without raising the log
+// level.
+func countLogLines(output, phrase string) (total, atInfo int) {
+	for _, line := range strings.Split(output, "\n") {
+		if !strings.Contains(line, phrase) {
+			continue
+		}
+		total++
+		if !strings.Contains(line, "level=debug") && !strings.Contains(line, "level=trace") {
+			atInfo++
+		}
+	}
+
+	return total, atInfo
+}
+
+// TestRetentionSummaryIsReportedOncePerLocation covers the account an operator gets of
+// a destructive run: every path reports each location's kept/candidate summary exactly
+// once, at a level that is visible by default — including the automatic paths
+// (`create`, `prune --force`) that nobody is watching.
+func TestRetentionSummaryIsReportedOncePerLocation(t *testing.T) {
+	newest := backupNameAt(time.Now())
+	outOfPolicy := backupNameAt(time.Now().Add(-40 * retentionDay))
+
+	runs := []struct {
+		name string
+		run  func(t *testing.T, iops *InfrahubOps) error
+	}{
+		{
+			name: "create-driven retention",
+			run: func(t *testing.T, iops *InfrahubOps) error {
+				iops.config.Retention = RetentionConfig{Days: 7}
+				return iops.applyCreateRetention(false)
+			},
+		},
+		{
+			name: "prune --force",
+			run: func(t *testing.T, iops *InfrahubOps) error {
+				return iops.Prune(RetentionPolicy{Days: 7}, PruneOptions{Force: true})
+			},
+		},
+		{
+			name: "prune --dry-run",
+			run: func(t *testing.T, iops *InfrahubOps) error {
+				return iops.Prune(RetentionPolicy{Days: 7}, PruneOptions{DryRun: true})
+			},
+		},
+		{
+			name: "prune with a confirmed prompt",
+			run: func(t *testing.T, iops *InfrahubOps) error {
+				withConfirmPrune(t, func([]pruneOutcome) (bool, error) { return true, nil })
+				return iops.Prune(RetentionPolicy{Days: 7}, PruneOptions{})
+			},
+		},
+	}
+
+	for _, tc := range runs {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := seedPruneDir(t, newest, outOfPolicy)
+			iops := &InfrahubOps{config: createRetentionConfig(dir, RetentionConfig{})}
+
+			output := captureLogrus(t, func() {
+				if err := tc.run(t, iops); err != nil {
+					t.Fatalf("run = %v, want nil", err)
+				}
+			})
+
+			total, atInfo := countLogLines(output, "Retention at local:"+dir+":")
+			if total != 1 {
+				t.Errorf("per-location summary logged %d time(s), want exactly 1:\n%s", total, output)
+			}
+			if atInfo != total {
+				t.Errorf("per-location summary logged below info level, where an operator would not see it:\n%s", output)
+			}
+		})
 	}
 }
