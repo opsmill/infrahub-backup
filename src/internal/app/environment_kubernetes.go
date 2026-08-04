@@ -373,11 +373,13 @@ func (k *KubernetesBackend) getAllPodsWith(run podRunner, service string) ([]str
 // 003-collect-tool, research R3/R4) and the optional timeout-bounded and
 // per-replica exec capabilities the diagnostics collectors prefer.
 var (
-	_ collectBackend      = (*KubernetesBackend)(nil)
-	_ contextExecer       = (*KubernetesBackend)(nil)
-	_ replicaExecer       = (*KubernetesBackend)(nil)
-	_ contextCopier       = (*KubernetesBackend)(nil)
-	_ deploymentDescriber = (*KubernetesBackend)(nil)
+	_ collectBackend        = (*KubernetesBackend)(nil)
+	_ contextExecer         = (*KubernetesBackend)(nil)
+	_ replicaExecer         = (*KubernetesBackend)(nil)
+	_ separateExecer        = (*KubernetesBackend)(nil)
+	_ separateReplicaExecer = (*KubernetesBackend)(nil)
+	_ contextCopier         = (*KubernetesBackend)(nil)
+	_ deploymentDescriber   = (*KubernetesBackend)(nil)
 )
 
 // buildExecArgsContext resolves the pod under a bounded runner and constructs
@@ -403,6 +405,26 @@ func (k *KubernetesBackend) ExecContext(ctx context.Context, timeout time.Durati
 		return "", err
 	}
 	return k.executor.runCommandContext(ctx, timeout, "kubectl", args...)
+}
+
+// ExecSeparateContext is ExecContext with the command's stdout and stderr kept
+// apart, so a collector can write the payload (stdout) to the bundle without
+// kubectl's own notices — most notably `Defaulted container "x" out of: …` on a
+// multi-container pod — or the command's diagnostics being mixed into it.
+func (k *KubernetesBackend) ExecSeparateContext(ctx context.Context, timeout time.Duration, service string, command []string, opts *ExecOptions) (string, string, error) {
+	args, err := k.buildExecArgsContext(ctx, timeout, service, command, opts)
+	if err != nil {
+		return "", "", err
+	}
+	return k.executor.runCommandSeparateContext(ctx, timeout, "kubectl", args...)
+}
+
+// ExecReplicaSeparate is ExecReplica with stdout and stderr kept apart (see
+// ExecSeparateContext).
+func (k *KubernetesBackend) ExecReplicaSeparate(ctx context.Context, timeout time.Duration, replica Replica, command []string) (string, string, error) {
+	args := []string{"exec", "-n", k.namespace, replica.Pod, "-c", replica.Container, "--"}
+	args = append(args, command...)
+	return k.executor.runCommandSeparateContext(ctx, timeout, "kubectl", args...)
 }
 
 // CopyFromContext is the timeout-bounded variant of CopyFrom used by the bundle

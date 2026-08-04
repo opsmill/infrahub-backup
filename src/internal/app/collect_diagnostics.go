@@ -59,6 +59,24 @@ type replicaExecer interface {
 	ExecReplica(ctx context.Context, timeout time.Duration, replica Replica, command []string) (string, error)
 }
 
+// separateExecer is an optional backend capability: a timeout-bounded exec that
+// returns the command's stdout and stderr separately instead of merged. Dump
+// collectors need it because a dump's file must hold the command's payload
+// alone: merged output lets kubectl's `Defaulted container "x" out of: …`
+// notice, or any warning the command writes to stderr, land inside the file and
+// corrupt it (a .json dump then parses as nothing at all). Both concrete
+// backends implement it; collectors fall back to merged output on backends (or
+// test fakes) that do not.
+type separateExecer interface {
+	ExecSeparateContext(ctx context.Context, timeout time.Duration, service string, command []string, opts *ExecOptions) (string, string, error)
+}
+
+// separateReplicaExecer is separateExecer for a specific replica: the
+// per-replica variant used by the task-worker collector.
+type separateReplicaExecer interface {
+	ExecReplicaSeparate(ctx context.Context, timeout time.Duration, replica Replica, command []string) (string, string, error)
+}
+
 // contextCopier is an optional backend capability: a timeout-bounded variant of
 // CopyFrom (research R2, FIX-1). Both concrete backends implement it; the
 // collect path must use it so a wedged container/daemon cannot hang the run on
@@ -138,6 +156,29 @@ func (cc *collectContext) execReplicaDump(replica Replica, command []string) (st
 	return cc.execDump(replica.Service, command)
 }
 
+// execDumpSeparate runs a command inside a service container and returns its
+// stdout and stderr separately, so the caller can write the payload to the
+// bundle without runtime notices or command diagnostics mixed in. Backends
+// without the capability (test fakes) fall back to merged output returned as
+// stdout.
+func (cc *collectContext) execDumpSeparate(service string, command []string) (string, string, error) {
+	if execer, ok := cc.backend.(separateExecer); ok {
+		return execer.ExecSeparateContext(cc.ctx, collectExecTimeout, service, command, nil)
+	}
+	output, err := cc.execDump(service, command)
+	return output, "", err
+}
+
+// execReplicaDumpSeparate is execDumpSeparate targeted at one replica, falling
+// back to service-level exec when the backend cannot target replicas.
+func (cc *collectContext) execReplicaDumpSeparate(replica Replica, command []string) (string, string, error) {
+	if execer, ok := cc.backend.(separateReplicaExecer); ok {
+		return execer.ExecReplicaSeparate(cc.ctx, collectExecTimeout, replica, command)
+	}
+	output, err := cc.execReplicaDump(replica, command)
+	return output, "", err
+}
+
 // skipWhenServiceAbsent mirrors serviceLogCollector's precondition: a service
 // with zero replicas is not deployed in this environment, so the collector is
 // skipped. Enumeration errors (and backends without the collect primitives)
@@ -183,25 +224,69 @@ func writeDumpFile(path, content string, mask func(string) string) error {
 	return nil
 }
 
+// dumpFailurePath is the sibling path a failed dump's diagnostics are written
+// to: flow-runs.json → flow-runs.err.txt. The failure never goes into the
+// dump's own path, so a present dump file always holds the payload the command
+// produced and nothing else — a support engineer reading flow-runs.json must
+// never find `error: command terminated with exit code 137` where the JSON
+// document belongs (FIX-8).
+func dumpFailurePath(path string) string {
+	return strings.TrimSuffix(path, filepath.Ext(path)) + ".err.txt"
+}
+
+// renderDumpFailure describes a failed dump for the bundle: what ran, how it
+// failed, and whatever the command managed to write to either stream. It is
+// never empty, so the bundle always records the attempt even when the command
+// produced no output at all (the "container not found" case, where the previous
+// file was simply missing with no explanation).
+func renderDumpFailure(command []string, err error, stdout, stderr string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "command: %s\n", strings.Join(command, " "))
+	fmt.Fprintf(&b, "error: %v\n", err)
+	if stderr != "" {
+		fmt.Fprintf(&b, "\n--- stderr ---\n%s\n", stderr)
+	}
+	if stdout != "" {
+		fmt.Fprintf(&b, "\n--- stdout ---\n%s\n", stdout)
+	}
+	return b.String()
+}
+
+// writeDumpFailure records a failed dump next to where its payload would have
+// gone. The dump's mask still applies: an error path can echo the environment
+// or configuration it choked on.
+func writeDumpFailure(path string, command []string, err error, stdout, stderr string, mask func(string) string) error {
+	return writeDumpFile(dumpFailurePath(path), renderDumpFailure(command, err, stdout, stderr), mask)
+}
+
 // execDumpsInto runs each dump inside service and writes the outputs into
 // dir, returning one failure string per dump that could not be fully
-// collected plus the first command timeout observed (FIX-4). A failing
-// command's partial output (often the tool's own error text) is still written
-// — masked — so the bundle shows what the service reported (FR-009).
+// collected plus the first command timeout observed (FIX-4). Only the command's
+// stdout reaches the dump file; a failed dump's diagnostics — masked — go to a
+// sibling .err.txt so the bundle shows what the service reported (FR-009)
+// without corrupting the payload file.
 func (cc *collectContext) execDumpsInto(service, dir string, dumps []execDumpSpec) ([]string, *timeoutError) {
 	failures := []string{}
 	var timeout *timeoutError
 	for _, dump := range dumps {
-		output, err := cc.execDump(service, dump.command)
+		path := filepath.Join(dir, dump.filename)
+		stdout, stderr, err := cc.execDumpSeparate(service, dump.command)
 		if err != nil {
 			logrus.Warnf("Failed to run %q in %s: %v", strings.Join(dump.command, " "), service, err)
 			failures = append(failures, fmt.Sprintf("%s: %v", dump.filename, err))
 			timeout = captureTimeout(timeout, err)
-			if strings.TrimSpace(output) == "" {
-				continue
+			if writeErr := writeDumpFailure(path, dump.command, err, stdout, stderr, dump.mask); writeErr != nil {
+				failures = append(failures, writeErr.Error())
 			}
+			continue
 		}
-		if writeErr := writeDumpFile(filepath.Join(dir, dump.filename), output, dump.mask); writeErr != nil {
+		// A successful command's stderr is runtime noise (kubectl container
+		// notices, deprecation warnings), not bundle content: keep it out of
+		// the payload and out of the bundle, but log it for a verbose run.
+		if stderr != "" {
+			logrus.Debugf("stderr from %q in %s: %s", strings.Join(dump.command, " "), service, stderr)
+		}
+		if writeErr := writeDumpFile(path, stdout, dump.mask); writeErr != nil {
 			failures = append(failures, writeErr.Error())
 		}
 	}
@@ -288,9 +373,12 @@ func collectDatabaseLogs(cc *collectContext) error {
 	return partialError("partial database log collection", failures, timeout)
 }
 
-// listDatabaseLogFiles enumerates the files in the Neo4j log directory.
+// listDatabaseLogFiles enumerates the files in the Neo4j log directory. Every
+// line of stdout becomes a filename to copy, so the listing must not carry
+// stderr: on a multi-container database pod kubectl's "Defaulted container"
+// notice would otherwise become a bogus log file and fail its copy.
 func (cc *collectContext) listDatabaseLogFiles() ([]string, error) {
-	output, err := cc.execDump("database", []string{"sh", "-c", "cd " + neo4jLogPath + " && ls -1"})
+	output, _, err := cc.execDumpSeparate("database", []string{"sh", "-c", "cd " + neo4jLogPath + " && ls -1"})
 	if err != nil {
 		return nil, err
 	}
@@ -387,20 +475,24 @@ func collectTaskWorkerState(cc *collectContext) error {
 			continue
 		}
 		for _, dump := range taskWorkerDumps() {
-			output, err := cc.execReplicaDump(replica, dump.command)
+			path := filepath.Join(replicaDir, dump.filename)
+			stdout, stderr, err := cc.execReplicaDumpSeparate(replica, dump.command)
 			if err != nil {
 				logrus.Warnf("Failed to run %q in %s: %v", strings.Join(dump.command, " "), replicaName, err)
 				failures = append(failures, fmt.Sprintf("%s/%s: %v", replicaName, dump.filename, err))
 				timeout = captureTimeout(timeout, err)
 				// A failing CLI often prints the interesting error itself;
-				// keep it in the bundle when there is any output.
-				if strings.TrimSpace(output) == "" {
-					continue
+				// keep it beside the (absent) dump rather than inside it.
+				if writeErr := writeDumpFailure(path, dump.command, err, stdout, stderr, dump.mask); writeErr != nil {
+					failures = append(failures, writeErr.Error())
 				}
-			} else {
-				collected++
+				continue
 			}
-			if writeErr := writeDumpFile(filepath.Join(replicaDir, dump.filename), output, dump.mask); writeErr != nil {
+			collected++
+			if stderr != "" {
+				logrus.Debugf("stderr from %q in %s: %s", strings.Join(dump.command, " "), replicaName, stderr)
+			}
+			if writeErr := writeDumpFile(path, stdout, dump.mask); writeErr != nil {
 				failures = append(failures, writeErr.Error())
 			}
 		}
@@ -422,10 +514,36 @@ func collectTaskWorkerState(cc *collectContext) error {
 
 // prefectServerCommand wraps a command so it runs with PREFECT_API_URL
 // defaulting to the local Prefect server; a value already present in the
-// container environment wins over the fallback.
+// container environment wins over the fallback. The fallback therefore only
+// applies when the query runs inside the Prefect server itself — a task-worker
+// already has the variable pointing at the task manager.
 func prefectServerCommand(command ...string) []string {
 	script := fmt.Sprintf(`export PREFECT_API_URL="${PREFECT_API_URL:-%s}"; exec "$@"`, prefectServerAPIFallback)
 	return append([]string{"sh", "-c", script, "sh"}, command...)
+}
+
+// taskManagerQueryService picks which container the Prefect state queries run
+// in. A task-worker is preferred: it is already an API client of the task
+// manager (its PREFECT_API_URL points there, and taskWorkerDumps' unwrapped
+// `prefect work-pool ls` only works because of it), so a listing that
+// materializes every recent flow run spends a worker's memory instead of the
+// Prefect server's. That matters because the server is the single point of
+// failure for the whole task pipeline: a field bundle showed
+// `prefect flow-run ls --limit 200 --output json` killed inside the server
+// container (exit code 137), after which the next two dumps reported a stream
+// error and then `container not found` — the collector had taken the task
+// manager down with it. The task-manager container stays the fallback for
+// deployments that run no worker.
+func (cc *collectContext) taskManagerQueryService() string {
+	cb, err := cc.collect()
+	if err != nil {
+		return "task-manager"
+	}
+	replicas, err := cb.ServiceReplicas("task-worker")
+	if err != nil || len(replicas) == 0 {
+		return "task-manager"
+	}
+	return "task-worker"
 }
 
 // taskManagerActiveStates are the flow/task-run state types treated as
@@ -435,7 +553,8 @@ func prefectServerCommand(command ...string) []string {
 var taskManagerActiveStates = []string{"PENDING", "RUNNING"}
 
 // taskManagerDumps lists the Prefect server state dumps collected via the
-// Prefect CLI inside the task-manager container (research R9). Alongside the
+// Prefect CLI, run in whichever container taskManagerQueryService picks
+// (research R9). Alongside the
 // recent flow runs, the PENDING and RUNNING flow runs and task runs are
 // captured explicitly: `prefect flow-run ls` returns only the most recent runs
 // regardless of state, so in-flight work can be buried beyond its limit on a
@@ -477,7 +596,9 @@ func runListCommand(resource string, states []string, jsonOutput bool) []string 
 
 // taskManagerCollector captures work pools, work queues, recent flow runs,
 // the pending/running flow and task runs, automations, and recent events into
-// bundle/task-manager/.
+// bundle/task-manager/. The precondition is the task manager itself — it owns
+// the state being captured — even though the queries are executed from a
+// task-worker where one is deployed (taskManagerQueryService).
 func taskManagerCollector() collector {
 	return collector{
 		name: "task-manager-state",
@@ -487,24 +608,24 @@ func taskManagerCollector() collector {
 }
 
 func collectTaskManagerState(cc *collectContext) error {
-	failures, timeout := cc.runExecDumps("task-manager", taskManagerBundleDir, taskManagerDumps())
+	service := cc.taskManagerQueryService()
+	logrus.Debugf("Querying task-manager state from the %s container", service)
+	failures, timeout := cc.runExecDumps(service, taskManagerBundleDir, taskManagerDumps())
 
 	dir := filepath.Join(cc.bundleDir, taskManagerBundleDir)
-	output, err := cc.runEmbeddedScriptDump("task-manager", prefectEventsScript, prefectEventsScriptTarget)
+	eventsPath := filepath.Join(dir, "events.json")
+	command, stdout, stderr, err := cc.runEmbeddedScriptDump(service, prefectEventsScript, prefectEventsScriptTarget)
 	if err != nil {
 		logrus.Warnf("Failed to collect Prefect events: %v", err)
 		failures = append(failures, fmt.Sprintf("events.json: %v", err))
 		timeout = captureTimeout(timeout, err)
-		// The script runs under CombinedOutput, so a failure merges a Python
-		// traceback into output. Writing that to events.json would masquerade
-		// as a valid events dump (FIX-8); preserve it in a sibling .err.txt for
-		// support instead. The failed reason is already recorded above.
-		if strings.TrimSpace(output) != "" {
-			if writeErr := writeDumpFile(filepath.Join(dir, "events.err.txt"), output, nil); writeErr != nil {
-				failures = append(failures, writeErr.Error())
-			}
+		// Writing a Python traceback to events.json would masquerade as a valid
+		// events dump (FIX-8); preserve it in a sibling .err.txt for support
+		// instead. The failed reason is already recorded above.
+		if writeErr := writeDumpFailure(eventsPath, command, err, stdout, stderr, nil); writeErr != nil {
+			failures = append(failures, writeErr.Error())
 		}
-	} else if writeErr := writeDumpFile(filepath.Join(dir, "events.json"), output, nil); writeErr != nil {
+	} else if writeErr := writeDumpFile(eventsPath, stdout, nil); writeErr != nil {
 		failures = append(failures, writeErr.Error())
 	}
 
@@ -515,26 +636,30 @@ func collectTaskManagerState(cc *collectContext) error {
 // container, runs it under the collect exec timeout, and removes it again.
 // Unlike executeScriptWithOpts it captures the output quietly instead of
 // streaming it to the console — dump payloads belong in the bundle, not the
-// progress log.
-func (cc *collectContext) runEmbeddedScriptDump(service, scriptName, targetPath string) (string, error) {
+// progress log. It returns the command it ran plus the script's stdout and
+// stderr separately: only stdout is the dump payload, and a Python traceback on
+// stderr must never end up inside a .json file.
+func (cc *collectContext) runEmbeddedScriptDump(service, scriptName, targetPath string) ([]string, string, string, error) {
+	command := []string{"python", "-u", targetPath}
+
 	scriptContent, err := readEmbeddedScript(scriptName)
 	if err != nil {
-		return "", fmt.Errorf("could not retrieve %s: %w", scriptName, err)
+		return command, "", "", fmt.Errorf("could not retrieve %s: %w", scriptName, err)
 	}
 
 	tmpFile, err := os.CreateTemp("", "infrahubops_collect_*.py")
 	if err != nil {
-		return "", fmt.Errorf("failed to create temp file: %w", err)
+		return command, "", "", fmt.Errorf("failed to create temp file: %w", err)
 	}
 	defer os.Remove(tmpFile.Name())
 	if _, err := tmpFile.Write(scriptContent); err != nil {
 		tmpFile.Close()
-		return "", fmt.Errorf("failed to write script: %w", err)
+		return command, "", "", fmt.Errorf("failed to write script: %w", err)
 	}
 	tmpFile.Close()
 
 	if err := cc.backend.CopyTo(service, tmpFile.Name(), targetPath); err != nil {
-		return "", fmt.Errorf("failed to copy %s to %s: %w", scriptName, service, err)
+		return command, "", "", fmt.Errorf("failed to copy %s to %s: %w", scriptName, service, err)
 	}
 	defer func() {
 		if _, err := cc.backend.Exec(service, []string{"rm", "-f", targetPath}, nil); err != nil {
@@ -542,7 +667,8 @@ func (cc *collectContext) runEmbeddedScriptDump(service, scriptName, targetPath 
 		}
 	}()
 
-	return cc.execDump(service, []string{"python", "-u", targetPath})
+	stdout, stderr, err := cc.execDumpSeparate(service, command)
+	return command, stdout, stderr, err
 }
 
 // --- server (T023) ---
@@ -556,8 +682,10 @@ type serverAPITarget struct {
 
 // serverAPITargets lists the API documents captured into bundle/server/. The
 // configuration dump is masked (research R5); info and schema carry no
-// credentials. Paths that a given Infrahub version does not serve produce an
-// observable HTTP error in the file and a failed reason in the manifest.
+// credentials. Paths that a given Infrahub version does not serve produce a
+// failed reason in the manifest and an observable HTTP error in the sibling
+// <name>.err.txt, leaving the .json file absent rather than holding a body that
+// is not the document it names.
 func serverAPITargets() []serverAPITarget {
 	return []serverAPITarget{
 		{filename: "info.json", path: "/api/info"},
@@ -621,7 +749,8 @@ const infrahubStatusQuery = `query {
 // result is re-wrapped in a {"data": ...} GraphQL envelope; any failure (import,
 // auth, transport, or a GraphQL error) is captured as {"errors": [...]} and
 // reported via the exit code, so the collector records the failure while the
-// payload stays observable. retry_on_failure defaults to false, so a wedged
+// payload stays observable in the sibling <name>.err.txt. retry_on_failure
+// defaults to false, so a wedged
 // server fails fast within the collector's exec budget rather than looping.
 func serverGraphQLFetchCommand(address, query string) []string {
 	script := strings.Join([]string{
@@ -685,11 +814,11 @@ func serverInfoCollector() collector {
 
 // kubectlDefaultedContainerNotice is the prefix of the message kubectl writes
 // to stderr when it execs into a multi-container pod without an explicit
-// container: `Defaulted container "x" out of: x, y`. Collect execs capture
-// merged stdout+stderr (CombinedOutput), so this notice is prepended to a
-// command's real output. Single-value reads (an env var, a version string)
-// must strip it, or the value carries an embedded newline — e.g. a
-// contaminated INFRAHUB_INTERNAL_ADDRESS yields a URL httpx rejects.
+// container: `Defaulted container "x" out of: x, y`. The dump path keeps stderr
+// out of captured output (separateExecer), so this is defense in depth for
+// single-value reads (an env var, a version string) on backends that still
+// return merged output: a contaminated INFRAHUB_INTERNAL_ADDRESS carries an
+// embedded newline and yields a URL httpx rejects.
 const kubectlDefaultedContainerNotice = `Defaulted container "`
 
 // stripKubectlExecNotices removes kubectl's "Defaulted container" notice lines
@@ -716,7 +845,7 @@ func stripKubectlExecNotices(output string) string {
 // bounded execDump so a wedged infrahub-server cannot hang the run; it does not
 // touch the shared unbounded path the backup tool uses.
 func (cc *collectContext) collectInfrahubVersion() string {
-	output, err := cc.execDump("infrahub-server", []string{"python", "-c", "import infrahub; print(infrahub.__version__)"})
+	output, _, err := cc.execDumpSeparate("infrahub-server", []string{"python", "-c", "import infrahub; print(infrahub.__version__)"})
 	if err != nil {
 		logrus.Warnf("Could not detect Infrahub version: %v", err)
 		return "unknown"
@@ -729,7 +858,7 @@ func (cc *collectContext) collectInfrahubVersion() string {
 // string when unset or unreachable. Unlike iops.getInfrahubInternalAddress it
 // never runs an unbounded exec and does not populate the shared cache.
 func (cc *collectContext) collectInfrahubInternalAddress() string {
-	output, err := cc.execDump("task-worker", []string{"printenv", "INFRAHUB_INTERNAL_ADDRESS"})
+	output, _, err := cc.execDumpSeparate("task-worker", []string{"printenv", "INFRAHUB_INTERNAL_ADDRESS"})
 	if err != nil {
 		logrus.Debugf("INFRAHUB_INTERNAL_ADDRESS not set in task-worker container: %v", err)
 		return ""

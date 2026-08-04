@@ -2,6 +2,9 @@ package app
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -588,5 +591,291 @@ func TestReplicaBaseName(t *testing.T) {
 				t.Errorf("replicaBaseName(%+v, %v) = %q, want %q", tt.replica, tt.multiContainer, got, tt.want)
 			}
 		})
+	}
+}
+
+// separateExecBackend implements the separated-stream exec capability with one
+// scripted (stdout, stderr, err) triple, standing in for a container runtime
+// that writes notices to stderr while the payload goes to stdout.
+type separateExecBackend struct {
+	fakeCollectBackend
+	stdout string
+	stderr string
+	err    error
+}
+
+func (b *separateExecBackend) ExecSeparateContext(ctx context.Context, timeout time.Duration, service string, command []string, opts *ExecOptions) (string, string, error) {
+	return b.stdout, b.stderr, b.err
+}
+
+func (b *separateExecBackend) ExecReplicaSeparate(ctx context.Context, timeout time.Duration, replica Replica, command []string) (string, string, error) {
+	return b.stdout, b.stderr, b.err
+}
+
+var (
+	_ separateExecer        = (*separateExecBackend)(nil)
+	_ separateReplicaExecer = (*separateExecBackend)(nil)
+)
+
+// kubectlNotice is the stderr line kubectl emits when it execs into a
+// multi-container pod without an explicit container. Merged into stdout it
+// prepends prose to every dump — the defect that made task-manager/*.json
+// unparseable in the field.
+const kubectlNotice = `Defaulted container "prefect-server" out of: prefect-server, dynatrace-operator (init)`
+
+// TestExecDumpsInto_PayloadExcludesStderr proves a JSON dump holds the
+// command's stdout alone: the runtime's stderr notice must not reach the file,
+// or the document no longer parses.
+func TestExecDumpsInto_PayloadExcludesStderr(t *testing.T) {
+	payload := `{"flow_runs": []}`
+	backend := &separateExecBackend{
+		fakeCollectBackend: *newFakeCollectBackend(),
+		stdout:             payload,
+		stderr:             kubectlNotice,
+	}
+	dir := t.TempDir()
+	cc := &collectContext{ctx: context.Background(), backend: backend, bundleDir: dir}
+
+	failures, timeout := cc.execDumpsInto("task-manager", dir, []execDumpSpec{
+		{filename: "flow-runs.json", command: []string{"prefect", "flow-run", "ls", "--output", "json"}},
+	})
+	if len(failures) != 0 || timeout != nil {
+		t.Fatalf("execDumpsInto failures = %v, timeout = %v, want none", failures, timeout)
+	}
+
+	content, err := os.ReadFile(filepath.Join(dir, "flow-runs.json"))
+	if err != nil {
+		t.Fatalf("reading dump: %v", err)
+	}
+	if strings.Contains(string(content), "Defaulted container") {
+		t.Errorf("dump carries the kubectl stderr notice:\n%s", content)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(content, &parsed); err != nil {
+		t.Errorf("dump does not parse as JSON (%v):\n%s", err, content)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "flow-runs.err.txt")); !os.IsNotExist(err) {
+		t.Errorf("a successful dump must not leave an .err.txt (stat err = %v)", err)
+	}
+}
+
+// TestExecDumpsInto_FailureWritesSiblingErrFile covers the field failure: a
+// command killed inside the container must leave the .json path absent and its
+// diagnostics in a sibling .err.txt, not error prose masquerading as the dump.
+func TestExecDumpsInto_FailureWritesSiblingErrFile(t *testing.T) {
+	backend := &separateExecBackend{
+		fakeCollectBackend: *newFakeCollectBackend(),
+		stdout:             "half a document",
+		stderr:             kubectlNotice + "\ncommand terminated with exit code 137",
+		err:                errors.New("exit status 137"),
+	}
+	dir := t.TempDir()
+	cc := &collectContext{ctx: context.Background(), backend: backend, bundleDir: dir}
+
+	failures, timeout := cc.execDumpsInto("task-manager", dir, []execDumpSpec{
+		{filename: "flow-runs.json", command: []string{"prefect", "flow-run", "ls", "--output", "json"}},
+	})
+	if timeout != nil {
+		t.Errorf("timeout = %v, want nil for a non-timeout failure", timeout)
+	}
+	want := []string{"flow-runs.json: exit status 137"}
+	if !reflect.DeepEqual(failures, want) {
+		t.Errorf("failures = %v, want %v", failures, want)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "flow-runs.json")); !os.IsNotExist(err) {
+		t.Errorf("a failed dump must not create its payload file (stat err = %v)", err)
+	}
+	content, err := os.ReadFile(filepath.Join(dir, "flow-runs.err.txt"))
+	if err != nil {
+		t.Fatalf("reading failure file: %v", err)
+	}
+	for _, fragment := range []string{
+		"command: prefect flow-run ls --output json",
+		"error: exit status 137",
+		"command terminated with exit code 137",
+		"half a document",
+	} {
+		if !strings.Contains(string(content), fragment) {
+			t.Errorf("failure file missing %q:\n%s", fragment, content)
+		}
+	}
+}
+
+// TestExecDumpsInto_FailureWithoutOutput proves the bundle records the attempt
+// even when the command produced nothing at all — the "container not found"
+// case, which previously left support with no record beyond the manifest.
+func TestExecDumpsInto_FailureWithoutOutput(t *testing.T) {
+	backend := &separateExecBackend{
+		fakeCollectBackend: *newFakeCollectBackend(),
+		err:                errors.New(`unable to upgrade connection: container not found ("prefect-server")`),
+	}
+	dir := t.TempDir()
+	cc := &collectContext{ctx: context.Background(), backend: backend, bundleDir: dir}
+
+	if _, timeout := cc.execDumpsInto("task-manager", dir, []execDumpSpec{
+		{filename: "task-runs-pending-running.txt", command: []string{"prefect", "task-run", "ls"}},
+	}); timeout != nil {
+		t.Errorf("timeout = %v, want nil", timeout)
+	}
+
+	content, err := os.ReadFile(filepath.Join(dir, "task-runs-pending-running.err.txt"))
+	if err != nil {
+		t.Fatalf("reading failure file: %v", err)
+	}
+	if !strings.Contains(string(content), "container not found") {
+		t.Errorf("failure file missing the reported error:\n%s", content)
+	}
+}
+
+// TestExecDumpsInto_FailureFileIsMasked proves a masked dump stays masked on
+// the failure path: an error echoing the environment it choked on must not
+// smuggle secrets into the bundle.
+func TestExecDumpsInto_FailureFileIsMasked(t *testing.T) {
+	backend := &separateExecBackend{
+		fakeCollectBackend: *newFakeCollectBackend(),
+		stdout:             "INFRAHUB_API_TOKEN=super-secret",
+		err:                errors.New("exit status 1"),
+	}
+	dir := t.TempDir()
+	cc := &collectContext{ctx: context.Background(), backend: backend, bundleDir: dir}
+
+	cc.execDumpsInto("infrahub-server", dir, []execDumpSpec{
+		{filename: "environment.txt", command: []string{"env"}, mask: maskEnvOutput},
+	})
+
+	content, err := os.ReadFile(filepath.Join(dir, "environment.err.txt"))
+	if err != nil {
+		t.Fatalf("reading failure file: %v", err)
+	}
+	if strings.Contains(string(content), "super-secret") {
+		t.Errorf("failure file leaks a masked value:\n%s", content)
+	}
+}
+
+func TestDumpFailurePath(t *testing.T) {
+	tests := []struct{ path, want string }{
+		{"task-manager/flow-runs.json", "task-manager/flow-runs.err.txt"},
+		{"task-manager/task-runs-pending-running.txt", "task-manager/task-runs-pending-running.err.txt"},
+		{"task-manager/events.json", "task-manager/events.err.txt"},
+		{"server/infrahub_status.json", "server/infrahub_status.err.txt"},
+	}
+	for _, tt := range tests {
+		if got := dumpFailurePath(tt.path); got != tt.want {
+			t.Errorf("dumpFailurePath(%q) = %q, want %q", tt.path, got, tt.want)
+		}
+	}
+}
+
+// TestCollectTaskWorkerState_FailureWritesSiblingErrFile covers the same
+// contract on the per-replica path: a failing dump leaves an .err.txt beside
+// the absent payload, and the collector still fails when nothing was collected.
+func TestCollectTaskWorkerState_FailureWritesSiblingErrFile(t *testing.T) {
+	backend := &separateExecBackend{
+		fakeCollectBackend: *newFakeCollectBackend(),
+		stderr:             "prefect: command not found",
+		err:                errors.New("exit status 127"),
+	}
+	backend.replicas["task-worker"] = []Replica{{Service: "task-worker", Container: "task-worker-1"}}
+	bundleDir := t.TempDir()
+	cc := &collectContext{ctx: context.Background(), backend: backend, bundleDir: bundleDir}
+
+	err := collectTaskWorkerState(cc)
+	if err == nil {
+		t.Fatal("collectTaskWorkerState succeeded, want a failure when no dump could be collected")
+	}
+
+	replicaDir := filepath.Join(bundleDir, taskWorkerBundleDir, "task-worker-1")
+	for _, dump := range taskWorkerDumps() {
+		if _, statErr := os.Stat(filepath.Join(replicaDir, dump.filename)); !os.IsNotExist(statErr) {
+			t.Errorf("%s must not be created for a failed dump (stat err = %v)", dump.filename, statErr)
+		}
+		content, readErr := os.ReadFile(dumpFailurePath(filepath.Join(replicaDir, dump.filename)))
+		if readErr != nil {
+			t.Fatalf("reading failure file for %s: %v", dump.filename, readErr)
+		}
+		if !strings.Contains(string(content), "prefect: command not found") {
+			t.Errorf("failure file for %s missing the command's stderr:\n%s", dump.filename, content)
+		}
+	}
+}
+
+// execHostBackend records which service each dump was executed against, so the
+// tests can assert where the Prefect queries run rather than only what they ask
+// for.
+type execHostBackend struct {
+	separateExecBackend
+	services []string
+}
+
+func (b *execHostBackend) ExecSeparateContext(ctx context.Context, timeout time.Duration, service string, command []string, opts *ExecOptions) (string, string, error) {
+	b.services = append(b.services, service)
+	return b.separateExecBackend.ExecSeparateContext(ctx, timeout, service, command, opts)
+}
+
+// TestTaskManagerQueryService covers where the Prefect state queries run: a
+// task-worker when one is deployed, so a heavy listing cannot OOM-kill the
+// Prefect server and take the task pipeline down with it, and the task-manager
+// itself otherwise.
+func TestTaskManagerQueryService(t *testing.T) {
+	t.Run("prefers a deployed task-worker", func(t *testing.T) {
+		backend := newFakeCollectBackend()
+		backend.replicas["task-worker"] = []Replica{{Service: "task-worker", Container: "task-worker-1"}}
+		cc := &collectContext{ctx: context.Background(), backend: backend, bundleDir: t.TempDir()}
+
+		if got := cc.taskManagerQueryService(); got != "task-worker" {
+			t.Errorf("taskManagerQueryService() = %q, want %q", got, "task-worker")
+		}
+	})
+
+	t.Run("falls back to the task-manager when no worker is deployed", func(t *testing.T) {
+		backend := newFakeCollectBackend()
+		cc := &collectContext{ctx: context.Background(), backend: backend, bundleDir: t.TempDir()}
+
+		if got := cc.taskManagerQueryService(); got != "task-manager" {
+			t.Errorf("taskManagerQueryService() = %q, want %q", got, "task-manager")
+		}
+	})
+
+	t.Run("falls back on a backend without collect primitives", func(t *testing.T) {
+		cc := &collectContext{ctx: context.Background(), backend: &bareBackend{name: "docker"}, bundleDir: t.TempDir()}
+
+		if got := cc.taskManagerQueryService(); got != "task-manager" {
+			t.Errorf("taskManagerQueryService() = %q, want %q", got, "task-manager")
+		}
+	})
+}
+
+// TestCollectTaskManagerState_RunsInTaskWorker drives the real collector and
+// asserts every Prefect query — the CLI dumps and the events script — leaves the
+// Prefect server alone while still landing in bundle/task-manager/.
+func TestCollectTaskManagerState_RunsInTaskWorker(t *testing.T) {
+	backend := &execHostBackend{separateExecBackend: separateExecBackend{
+		fakeCollectBackend: *newFakeCollectBackend(),
+		stdout:             "{}",
+	}}
+	backend.replicas["task-manager"] = []Replica{{Service: "task-manager", Container: "task-manager-1"}}
+	backend.replicas["task-worker"] = []Replica{{Service: "task-worker", Container: "task-worker-1"}}
+	bundleDir := t.TempDir()
+	cc := &collectContext{ctx: context.Background(), backend: backend, bundleDir: bundleDir}
+
+	if err := collectTaskManagerState(cc); err != nil {
+		t.Fatalf("collectTaskManagerState failed: %v", err)
+	}
+
+	if len(backend.services) != len(taskManagerDumps())+1 {
+		t.Fatalf("executed %d commands %v, want one per dump plus the events script", len(backend.services), backend.services)
+	}
+	for i, service := range backend.services {
+		if service != "task-worker" {
+			t.Errorf("command %d ran in %q, want %q", i, service, "task-worker")
+		}
+	}
+
+	// The bundle layout is unchanged: only the exec host moved.
+	for _, dump := range append(taskManagerDumps(), execDumpSpec{filename: "events.json"}) {
+		if _, err := os.Stat(filepath.Join(bundleDir, taskManagerBundleDir, dump.filename)); err != nil {
+			t.Errorf("missing %s in bundle/task-manager/: %v", dump.filename, err)
+		}
 	}
 }

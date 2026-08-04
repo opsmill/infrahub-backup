@@ -100,6 +100,31 @@ func (ce *CommandExecutor) runCommandContext(ctx context.Context, timeout time.D
 	return strings.TrimSpace(string(output)), err
 }
 
+// runCommandSeparateContext is the timeout-bounded variant of runCommand that
+// keeps the command's output streams apart: stdout is returned first, stderr
+// second. Callers that write a command's stdout to a file need this — merged
+// output (runCommandContext) lets any stderr line the tool or the container
+// runtime emits land inside the payload, which corrupts structured dumps
+// (e.g. kubectl's `Defaulted container "x" out of: …` notice prepended to a
+// JSON document). The returned error is a *timeoutError when the timeout
+// expired.
+func (ce *CommandExecutor) runCommandSeparateContext(ctx context.Context, timeout time.Duration, name string, args ...string) (string, string, error) {
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	var stdout, stderr bytes.Buffer
+	cmd := exec.CommandContext(cctx, name, args...)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	out, errOut := strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String())
+	if err != nil && errors.Is(cctx.Err(), context.DeadlineExceeded) {
+		return out, errOut, &timeoutError{timeout: timeout}
+	}
+	return out, errOut, err
+}
+
 // runCommandPipeContext is the timeout-bounded variant of runCommandPipe. The
 // caller must read from stdout and then call wait() to get the exit status;
 // wait() returns a *timeoutError when the timeout expired before the command
