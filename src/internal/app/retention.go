@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
 // retentionDay is the duration of one day for the age rule. Day-granularity
@@ -220,4 +223,136 @@ func (l *localLocation) Delete(_ context.Context, ref backupRef) error {
 	return nil
 }
 
-var _ storageLocation = (*localLocation)(nil)
+// s3Location is the configured S3 bucket and prefix, reached through the shared
+// S3Client. It is a thin adapter: key filtering and the context bounds live with
+// the client, so both locations agree on what counts as a backup.
+type s3Location struct {
+	client *S3Client
+}
+
+func newS3Location(client *S3Client) *s3Location {
+	return &s3Location{client: client}
+}
+
+// Name renders the location as the bucket and prefix the operator configured.
+func (l *s3Location) Name() string {
+	if prefix := strings.TrimSuffix(l.client.config.Prefix, "/"); prefix != "" {
+		return "s3://" + l.client.config.Bucket + "/" + prefix
+	}
+	return "s3://" + l.client.config.Bucket
+}
+
+// List returns the backup objects under the configured prefix. An empty prefix
+// yields an empty slice and no error.
+func (l *s3Location) List(ctx context.Context) ([]backupRef, error) {
+	return l.client.List(ctx)
+}
+
+// Delete removes one backup object. The ref carries only a base name, so the full
+// key is rebuilt the same way uploads build it; the name is re-checked against the
+// backup pattern first so a ref which did not come from List can never reach an
+// unrelated object.
+func (l *s3Location) Delete(ctx context.Context, ref backupRef) error {
+	if _, ok := parseBackupName(ref.Name); !ok {
+		return fmt.Errorf("refusing to delete %q from %s: not a backup archive name", ref.Name, l.Name())
+	}
+
+	return l.client.Delete(ctx, l.client.buildS3Key(ref.Name))
+}
+
+var (
+	_ storageLocation = (*localLocation)(nil)
+	_ storageLocation = (*s3Location)(nil)
+)
+
+// pruneOutcome is the result of applying the policy at one storage location. It is
+// what callers report to the operator, and it carries the leg's error rather than
+// letting a failure hide behind a successful sibling leg.
+type pruneOutcome struct {
+	// Location is the storageLocation's Name().
+	Location string
+	// Kept are the refs retention retained, whether by a rule or by the floor.
+	Kept []backupRef
+	// Pruned are the refs deleted — or, in dry-run, exactly the refs a real run
+	// would delete.
+	Pruned []backupRef
+	// Err is the joined error for this leg; nil when the leg fully succeeded.
+	Err error
+}
+
+// applyRetention evaluates the policy at every location and removes what it does
+// not keep, returning one outcome per location plus the joined errors of the legs
+// that failed.
+//
+// Failure handling is best-effort in both dimensions: every location is visited
+// even after an earlier one failed, and within a location every candidate is
+// attempted even after an individual deletion failed, so one undeletable backup
+// cannot strand the rest of the reclaimable space (FR-008). Errors are collected
+// and reported together instead of aborting the run at the first failure.
+//
+// With dryRun set nothing is deleted and Pruned reports exactly the set a real run
+// would delete (SC-004).
+//
+// An inactive policy prunes nothing here, because selectPrunable claims every
+// backup for keeping; callers still gate on Active() per FR-004.
+func applyRetention(ctx context.Context, locations []storageLocation, policy RetentionPolicy, dryRun bool) ([]pruneOutcome, error) {
+	// One evaluation instant for every location, so ages cannot drift between legs.
+	now := time.Now()
+
+	outcomes := make([]pruneOutcome, 0, len(locations))
+	var legErrs []error
+
+	for _, location := range locations {
+		outcome := pruneAtLocation(ctx, location, policy, now, dryRun)
+		outcomes = append(outcomes, outcome)
+		if outcome.Err != nil {
+			legErrs = append(legErrs, outcome.Err)
+		}
+	}
+
+	return outcomes, errors.Join(legErrs...)
+}
+
+// pruneAtLocation applies the policy at a single location. It never returns an
+// error directly: the leg's failures belong to its outcome so the caller can
+// continue with the remaining legs and still report everything.
+func pruneAtLocation(ctx context.Context, location storageLocation, policy RetentionPolicy, now time.Time, dryRun bool) pruneOutcome {
+	name := location.Name()
+	outcome := pruneOutcome{Location: name}
+
+	refs, err := location.List(ctx)
+	if err != nil {
+		outcome.Err = fmt.Errorf("retention failed at %s: %w", name, err)
+		return outcome
+	}
+
+	keep, prune := selectPrunable(refs, policy, now)
+	outcome.Kept = keep
+	logrus.Debugf("Retention at %s: %d backup(s) kept, %d candidate(s) to prune", name, len(keep), len(prune))
+
+	var deleteErrs []error
+	for _, ref := range prune {
+		if dryRun {
+			logrus.Infof("Would prune backup %s from %s (dry run)", ref.Name, name)
+			outcome.Pruned = append(outcome.Pruned, ref)
+			continue
+		}
+
+		if err := location.Delete(ctx, ref); err != nil {
+			// Best-effort: surface the failure now and keep working through the
+			// remaining candidates.
+			logrus.Warnf("Failed to prune backup %s from %s: %v", ref.Name, name, err)
+			deleteErrs = append(deleteErrs, err)
+			continue
+		}
+
+		logrus.Infof("Pruned backup %s from %s", ref.Name, name)
+		outcome.Pruned = append(outcome.Pruned, ref)
+	}
+
+	if len(deleteErrs) > 0 {
+		outcome.Err = fmt.Errorf("retention failed at %s: %w", name, errors.Join(deleteErrs...))
+	}
+
+	return outcome
+}
