@@ -35,23 +35,32 @@ touch notes.txt infrahub_backup_garbage.tar.gz somebackup.tar.gz
 infrahub-backup prune --backup-dir /tmp/ret-test --retention-days 7 --dry-run
 ```
 
-**Expected**: lists exactly the 3 old archives as candidates; exits 0; `ls` shows
-nothing was deleted (9 files still present).
+**Expected**: the 3 old archives are listed as `Would prune backup <name> from
+local:/tmp/ret-test (dry run)`, followed by one
+`Retention at local:/tmp/ret-test: 3 backup(s) kept, 3 candidate(s) to prune` summary;
+exits 0; `ls` shows nothing was deleted (9 files still present).
 
-## Scenario 2 — Confirmation prompt, decline, force (US2)
+## Scenario 2 — Confirmation prompt, decline, accept, force (US2)
 
 ```bash
 infrahub-backup prune --backup-dir /tmp/ret-test --retention-days 7   # answer: n
 ```
 
-**Expected**: same candidate list, `y/N` prompt; answering `n` aborts, nothing deleted.
+**Expected**: the same 3 candidates listed as `Would prune backup …` — with **no**
+`(dry run)` suffix, this being a real run — then the per-location summary, then
+`Prune 3 backup(s) listed above? [y/N]:`. Answering `n` logs
+`Prune aborted; no backups were deleted` and exits 0 with nothing deleted.
+
+Answering `y` instead logs one `Pruned backup <name> from <location>` per deletion and
+closes with `Pruned 3 of 3 confirmed backup(s)` — the confirmed set is the deleted set.
 
 ```bash
 infrahub-backup prune --backup-dir /tmp/ret-test --retention-days 7 --force
 ```
 
-**Expected**: the 3 old archives are deleted (each deletion logged); the 3 recent
-archives and all 3 decoys remain; exits 0.
+**Expected**: no candidate listing and no prompt; the per-location summary, then the 3
+old archives deleted (each logged); the 3 recent archives and all 3 decoys remain;
+exits 0. Requires a re-seeded fixture if the accept path above already pruned.
 
 ## Scenario 3 — Floor: policy matching everything keeps the newest (FR-003, SC-003)
 
@@ -63,8 +72,15 @@ done
 infrahub-backup prune --backup-dir /tmp/ret-test --retention-days 7 --force
 ```
 
+The reset glob also removes the `infrahub_backup_garbage.tar.gz` decoy, so only
+`notes.txt` and `somebackup.tar.gz` remain from the fixture's decoys here; re-seed if
+you want to re-run Scenarios 1–2 afterwards.
+
 **Expected**: the two oldest are deleted; the newest (40-day-old) archive **survives**
-despite matching the age rule; output states it was kept as the most recent backup.
+despite matching the age rule. The floor is visible in the summary line —
+`Retention at local:/tmp/ret-test: 1 backup(s) kept, 2 candidate(s) to prune` — and in
+the surviving file; there is no log line naming the kept archive or the reason it was
+kept.
 
 ## Scenario 4 — Validation errors (FR-001, US2 scenario 4)
 
@@ -74,8 +90,20 @@ infrahub-backup prune --backup-dir /tmp/ret-test --retention-days 0   # invalid 
 infrahub-backup prune --backup-dir /tmp/ret-test --retention-days 7 --dry-run --force
 ```
 
-**Expected**: each exits non-zero with a validation error (at least one rule required /
-value must be ≥ 1 / contradictory flags); nothing deleted.
+**Expected**: each exits non-zero before any location is listed, with, respectively:
+
+```text
+at least one retention rule is required: pass --retention-days and/or --retention-count
+--retention-days must be at least 1 when set; omit it to disable the age rule
+--dry-run and --force are contradictory: --dry-run never deletes and never prompts, so there is nothing to force
+```
+
+The same values supplied through `INFRAHUB_RETENTION_DAYS` / `INFRAHUB_RETENTION_COUNT`
+are rejected too, with the variable named in the message — for example
+`INFRAHUB_RETENTION_DAYS must be a whole number of at least 1 (got "abc"); omit it to
+disable the age rule`. A variable that is present but empty or whitespace-only is read
+as unset instead, so it yields the "at least one retention rule is required" error rather
+than a bad-value error.
 
 ## Scenario 5 — `create` with retention against a live deployment (US1)
 
@@ -103,9 +131,17 @@ infrahub-backup prune --retention-days 7 --force ...        # no --s3: bucket un
 
 **Expected**: per-location evaluation — S3 keeps its own newest object regardless of
 what exists locally; without `--s3` (or without this-run upload on `create`) no
-object is ever deleted. With upload-only credentials, the S3 leg fails, the local
-leg still prunes, and the run exits non-zero with "backup succeeded … retention
-failed" (create) / leg error (prune).
+object is ever deleted. Note that `create --s3-upload` without `--s3-keep-local`
+removes the local copy of the fresh archive before retention runs, so the local leg's
+newest is the *previous* archive.
+
+With upload-only credentials the S3 leg fails and the run exits non-zero with "backup
+succeeded … retention failed" (create) or the leg error (prune). Whether the local leg
+still prunes depends on the path: it does on `create` and on `prune --force`, but a
+non-forced `prune` that cannot **list** the bucket aborts before the confirmation and
+deletes nothing at any location. Verified against an unreachable endpoint: the non-forced
+run left all local archives intact, the same run with `--force` pruned every local
+candidate.
 
 ## Automated equivalents
 
