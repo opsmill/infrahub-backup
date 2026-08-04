@@ -40,48 +40,47 @@ func validateBackendFlags(iops *app.InfrahubOps) error {
 	return nil
 }
 
-// retentionRuleFromFlag resolves one retention rule for the command being run.
+// retentionRuleInput reads one retention rule's raw configuration for the command
+// being run: the invoked command's own flag, and the environment variable.
 //
-// The flag registered on this command wins whenever the operator set it;
-// otherwise the value comes from viper (environment variable or configuration
-// file). Reading the command's own flag matters because `create` and `prune`
-// register the same viper keys, and viper resolves a bound flag through whichever
-// command bound the key last.
-//
-// An explicit 0 is rejected here: RetentionPolicy.Validate refuses negatives but
-// treats 0 as "rule inactive", and the flag layer is the only layer that can tell
-// an explicitly requested 0 from an omitted rule (contracts/cli.md, FR-001).
-func retentionRuleFromFlag(cmd *cobra.Command, name, rule string) (int, error) {
-	if !cmd.Flags().Changed(name) {
-		return viper.GetInt(name), nil
+// Reading the command's own flag matters because `create` and `prune` register the
+// same flag name, and viper resolves a bound flag through whichever command bound the
+// key last. The environment variable is read directly rather than through viper
+// because viper coerces a malformed value to 0, which means "rule inactive" — the one
+// answer a mistyped variable must not produce. Deciding what these inputs mean belongs
+// to app.ResolveRetentionConfig.
+func retentionRuleInput(cmd *cobra.Command, flag, envVar string) (app.RetentionRuleInput, error) {
+	input := app.RetentionRuleInput{}
+
+	if cmd.Flags().Changed(flag) {
+		value, err := cmd.Flags().GetInt(flag)
+		if err != nil {
+			return input, err
+		}
+		input.FlagValue, input.FlagSet = value, true
 	}
 
-	value, err := cmd.Flags().GetInt(name)
-	if err != nil {
-		return 0, err
-	}
-	if value == 0 {
-		return 0, fmt.Errorf("--%s must be at least 1 when set; omit it to disable the %s rule", name, rule)
-	}
+	input.EnvValue, input.EnvSet = os.LookupEnv(envVar)
 
-	return value, nil
+	return input, nil
 }
 
-// resolveRetentionFlags stores the validated retention rules on the configuration
-// so the operation can read them like any other option. It runs before any backup
-// work so an invalid policy aborts the run without touching the deployment.
+// resolveRetentionFlags stores the resolved retention rules on the configuration so
+// the operation can read them like any other option. It runs before any backup work so
+// an invalid policy aborts the run without touching the deployment.
 func resolveRetentionFlags(cmd *cobra.Command, iops *app.InfrahubOps) error {
-	days, err := retentionRuleFromFlag(cmd, "retention-days", "age")
-	if err != nil {
-		return err
-	}
-	count, err := retentionRuleFromFlag(cmd, "retention-count", "count")
+	days, err := retentionRuleInput(cmd, app.RetentionDaysFlag, app.RetentionDaysEnvVar)
 	if err != nil {
 		return err
 	}
 
-	retention := app.RetentionConfig{Days: days, Count: count}
-	if err := retention.Policy().Validate(); err != nil {
+	count, err := retentionRuleInput(cmd, app.RetentionCountFlag, app.RetentionCountEnvVar)
+	if err != nil {
+		return err
+	}
+
+	retention, err := app.ResolveRetentionConfig(app.RetentionInputs{Days: days, Count: count})
+	if err != nil {
 		return err
 	}
 	iops.Config().Retention = retention
@@ -164,8 +163,8 @@ func main() {
 	createCmd.Flags().DurationVar(&sleepDuration, "sleep", 0, "Sleep duration after backup creation (e.g., 5m, 300s) for manual file transfer")
 	createCmd.Flags().BoolVar(&encrypt, "encrypt", false, "Encrypt the backup archive (uses built-in OpsMill key unless --encrypt-key is set)")
 	createCmd.Flags().StringVar(&encryptKey, "encrypt-key", "", "Path to custom public key file for encryption (implies --encrypt)")
-	createCmd.Flags().Int("retention-days", 0, "Prune backups older than N days after a successful backup (N >= 1, omit to disable)")
-	createCmd.Flags().Int("retention-count", 0, "Keep only the N most recent backups after a successful backup (N >= 1, omit to disable)")
+	createCmd.Flags().Int(app.RetentionDaysFlag, 0, "Prune backups older than N days after a successful backup (N >= 1, omit to disable)")
+	createCmd.Flags().Int(app.RetentionCountFlag, 0, "Keep only the N most recent backups after a successful backup (N >= 1, omit to disable)")
 
 	// Bind create flags to Viper for environment variable support (INFRAHUB_<FLAG_NAME>)
 	viper.BindPFlag("force", createCmd.Flags().Lookup("force"))
@@ -177,8 +176,10 @@ func main() {
 	viper.BindPFlag("sleep", createCmd.Flags().Lookup("sleep"))
 	viper.BindPFlag("encrypt", createCmd.Flags().Lookup("encrypt"))
 	viper.BindPFlag("encrypt-key", createCmd.Flags().Lookup("encrypt-key"))
-	viper.BindPFlag("retention-days", createCmd.Flags().Lookup("retention-days"))
-	viper.BindPFlag("retention-count", createCmd.Flags().Lookup("retention-count"))
+	// The retention flags are deliberately not bound: resolveRetentionFlags reads the
+	// invoked command's own flag and INFRAHUB_RETENTION_* directly, because a bound key
+	// resolves through whichever command bound it last and because viper coerces a
+	// malformed environment value to 0, which reads as "rule inactive".
 
 	// Undocumented subcommand: create from-files
 	fromFilesCmd := &cobra.Command{
@@ -265,19 +266,16 @@ func main() {
 			})
 		},
 	}
-	pruneCmd.Flags().Int("retention-days", 0, "Delete backups older than N days (N >= 1)")
-	pruneCmd.Flags().Int("retention-count", 0, "Keep only the N most recent backups (N >= 1)")
+	pruneCmd.Flags().Int(app.RetentionDaysFlag, 0, "Delete backups older than N days (N >= 1)")
+	pruneCmd.Flags().Int(app.RetentionCountFlag, 0, "Keep only the N most recent backups (N >= 1)")
 	pruneCmd.Flags().BoolVar(&pruneDryRun, "dry-run", false, "List exactly what a real run would delete, delete nothing, and never prompt")
 	pruneCmd.Flags().BoolVar(&pruneForce, "force", false, "Skip the confirmation prompt (for non-interactive and scripted use)")
 	pruneCmd.Flags().BoolVar(&pruneS3, "s3", false, "Also prune backups under the configured S3 bucket/prefix (S3 is never touched without this flag)")
 
-	// The retention flags are deliberately NOT bound to viper here: `create` already
-	// bound these keys, and viper resolves a bound flag through whichever command
-	// bound it last, so re-binding would break `create --retention-days`.
-	// resolveRetentionFlags reads the invoked command's own flag and falls back to
-	// viper only for environment/configuration values, which keeps FR-011 working on
-	// both commands. --dry-run, --force, and --s3 are per-invocation switches and are
-	// intentionally not configurable at all (contracts/cli.md).
+	// Like `create`'s, these retention flags are not bound to viper: resolveRetentionFlags
+	// reads the invoked command's own flag and INFRAHUB_RETENTION_* directly, which keeps
+	// FR-011 working on both commands. --dry-run, --force, and --s3 are per-invocation
+	// switches and are intentionally not configurable at all (contracts/cli.md).
 
 	rootCmd.AddCommand(pruneCmd)
 

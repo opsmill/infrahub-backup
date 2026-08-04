@@ -127,6 +127,16 @@ func (c *S3Client) buildS3Key(filename string) string {
 	return strings.TrimSuffix(c.config.Prefix, "/") + "/" + filename
 }
 
+// locationName renders the configured bucket and prefix the way an operator wrote
+// them. It is how the S3 retention location labels itself in logs and errors.
+func (c *S3Client) locationName() string {
+	if prefix := strings.TrimSuffix(c.config.Prefix, "/"); prefix != "" {
+		return "s3://" + c.config.Bucket + "/" + prefix
+	}
+
+	return "s3://" + c.config.Bucket
+}
+
 // listPrefix is the key prefix that scopes a listing to where buildS3Key writes.
 // An empty configured prefix lists the bucket root; otherwise the prefix always
 // ends in a slash so that a prefix of "backups" cannot also match "backups-old/".
