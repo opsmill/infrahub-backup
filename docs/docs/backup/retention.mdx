@@ -27,7 +27,11 @@ Two independent rules define a policy, and you can set either one or both:
 | `--retention-days N` | Keep backups newer than N days | `INFRAHUB_RETENTION_DAYS` |
 | `--retention-count N` | Keep the N most recent backups | `INFRAHUB_RETENTION_COUNT` |
 
-Both flags accept values of 1 or greater. Omit a flag to leave its rule inactive. Passing an explicit `0` is rejected as a validation error rather than treated as "disabled", so a schedule set up incorrectly fails loudly instead of quietly deleting more than you intended.
+Flags and environment variables are the only two ways to configure retention. Where both supply the same rule, the flag on the command you ran wins.
+
+Both rules accept whole numbers of 1 or greater. To leave a rule inactive, omit its flag and leave its variable unset. Any other value either channel supplies — an explicit `0`, a negative number, `7.5`, `7d` — is a validation error that aborts the run before a single archive is examined, rather than being read as "disabled". A schedule configured wrongly fails loudly instead of quietly keeping everything or deleting more than you intended.
+
+A variable that is present but empty or whitespace-only counts as unset rather than as a bad value, because that is what Docker Compose and Kubernetes produce when a variable they were told to substitute has no value. Whitespace around a real value is tolerated.
 
 Four properties govern every deletion decision.
 
@@ -46,8 +50,10 @@ That policy keeps every archive from the last seven days *and* the 14 most recen
 **Only recognized archives are considered.** Retention acts on files named `infrahub_backup_<YYYYMMDD_HHMMSS>.tar.gz` or `infrahub_backup_<YYYYMMDD_HHMMSS>.tar.gz.enc`, and it reads each backup's age from the timestamp embedded in that name rather than from the file modification time. Anything else in the directory — notes, unrelated archives, renamed backups — is invisible to retention and is never deleted.
 
 :::warning
-Because age comes from the filename, renaming an archive changes when retention considers it expired. Keep the generated names if you want the policy to behave predictably.
+Because age comes from the filename, renaming an archive changes when retention considers it expired, and touching a file does not extend its life. Keep the generated names if you want the policy to behave predictably.
 :::
+
+That embedded timestamp carries no timezone. `infrahub-backup` writes it in the local time of the host taking the backup, reads it in the local time of the host applying retention, and measures a day as a fixed 24 hours. Archives written and pruned on the same host therefore always agree. If you prune from a container or scheduler host whose timezone differs, the age boundary moves by that offset and an archive can be deleted up to a day earlier or later than you expect. Give both hosts the same `TZ` if you split the work between them.
 
 ## Step 1: Preview what a policy would delete
 
@@ -76,25 +82,42 @@ infrahub-backup prune --backup-dir /data/backups/infrahub --retention-days 7
 ```
 
 ```text
+INFO[0000] Applying retention policy (days: 7, count: 0) to 1 location(s)
+INFO[0000] Would prune backup infrahub_backup_20260715_073229.tar.gz from local:/data/backups/infrahub
+INFO[0000] Would prune backup infrahub_backup_20260710_073229.tar.gz from local:/data/backups/infrahub
+INFO[0000] Would prune backup infrahub_backup_20260705_073229.tar.gz from local:/data/backups/infrahub
+INFO[0000] Retention at local:/data/backups/infrahub: 3 backup(s) kept, 3 candidate(s) to prune
 Prune 3 backup(s) listed above? [y/N]: y
+INFO[0000] Pruned backup infrahub_backup_20260715_073229.tar.gz from local:/data/backups/infrahub
+INFO[0000] Pruned backup infrahub_backup_20260710_073229.tar.gz from local:/data/backups/infrahub
+INFO[0000] Pruned backup infrahub_backup_20260705_073229.tar.gz from local:/data/backups/infrahub
+INFO[0000] Pruned 3 of 3 confirmed backup(s)
 ```
+
+The set you confirm is the set that is deleted: the candidates are chosen once, before the question, and nothing is listed again afterwards. A candidate another process removed in the meantime counts as already satisfied rather than as a failure, so the closing line can report fewer deletions than candidates without the run failing.
 
 Anything other than `y` or `yes` declines. A declined run deletes nothing and exits successfully, so an operator who changes their mind has not caused a failure.
 
-For scheduled and scripted runs, pass `--force` to skip the prompt:
+For scheduled and scripted runs, pass `--force` to skip both the prompt and the candidate listing. Every deletion is still logged as it happens, so a forced run remains auditable after the fact:
 
 ```bash
 infrahub-backup prune --backup-dir /data/backups/infrahub --retention-days 7 --force
 ```
 
-Every deletion is logged as it happens, so a forced run remains auditable after the fact:
-
 ```text
+INFO[0000] Applying retention policy (days: 7, count: 0) to 1 location(s)
+INFO[0000] Retention at local:/data/backups/infrahub: 3 backup(s) kept, 3 candidate(s) to prune
 INFO[0000] Pruned backup infrahub_backup_20260715_073229.tar.gz from local:/data/backups/infrahub
+INFO[0000] Pruned backup infrahub_backup_20260710_073229.tar.gz from local:/data/backups/infrahub
+INFO[0000] Pruned backup infrahub_backup_20260705_073229.tar.gz from local:/data/backups/infrahub
 ```
 
 :::info
 Without `--force`, a run whose standard input is not a terminal refuses to delete anything and tells you to pass `--force`. This keeps a `prune` that was written for a terminal from deleting silently when it later runs under cron. `--dry-run` and `--force` together are rejected as contradictory: a dry run never deletes and never prompts, so there is nothing to force.
+:::
+
+:::warning
+Without `--force`, a run that cannot list one of its locations exits non-zero without prompting and without deleting anything at any location. Confirming a partial preview would mean answering for a set the tool does not fully know, and a bucket it cannot list is not the same as a bucket with nothing to prune. A mistyped `--backup-dir` and an unreachable S3 endpoint both land here. `--force` behaves differently by design: it prunes every location it could list and still exits non-zero naming the one that failed.
 :::
 
 ## Step 3: Attach retention to scheduled backups
@@ -104,6 +127,8 @@ Passing a retention flag to `create` applies the policy automatically after the 
 ```bash
 infrahub-backup create --retention-days 7 --retention-count 14
 ```
+
+Retention on `create` logs what a forced `prune` logs — the policy it applied, a `Retention at <location>` summary of how many archives it kept and how many it selected, and one line per deletion — so an unattended nightly run accounts for what it removed at the default log level.
 
 This replaces the `find`-based cleanup that backup scripts often carry, and it prunes only recognized archives instead of everything matching a glob:
 
@@ -119,7 +144,8 @@ This replaces the `find`-based cleanup that backup scripts often carry, and it p
 <TabItem value="env-vars" label="Environment variables">
 
 ```bash
-# Both rules are configurable through the environment, like every other flag
+# Both rules are also settable through the environment, for schedulers that
+# supply configuration that way rather than on the command line
 export INFRAHUB_BACKUP_DIR=/data/backups/infrahub
 export INFRAHUB_RETENTION_DAYS=30
 export INFRAHUB_RETENTION_COUNT=60
@@ -128,21 +154,12 @@ infrahub-backup create
 ```
 
 </TabItem>
-<TabItem value="config-file" label="Configuration file">
-
-```yaml
-# Configuration-file keys mirror the flag names
-retention-days: 30
-retention-count: 60
-```
-
-</TabItem>
 </Tabs>
 
-Running `create` with no retention flag behaves exactly as it always has: nothing is pruned, and no archive is examined.
+Running `create` with no retention rule configured behaves exactly as it always has: nothing is pruned, and no archive is examined.
 
 :::note
-`--dry-run`, `--force`, and `--s3` belong to `prune` alone and are deliberately not configurable through the environment or a configuration file. A persistent `force` setting would disarm the confirmation that makes pruning safe.
+`--dry-run`, `--force`, and `--s3` belong to `prune` alone and are deliberately per-invocation switches, with no environment variable behind them. A persistent `force` setting would disarm the confirmation that makes pruning safe, and a persistent `s3` would delete objects an operator only configured for upload.
 :::
 
 If the backup succeeds but a deletion fails, the run exits non-zero with a message that states the backup succeeded and names the new archive, so you can tell a retention problem from a lost backup. Within each location, deletion is best-effort: one failure does not strand the remaining candidates.
@@ -153,6 +170,10 @@ Retention treats object storage as a second location, and it never touches that 
 
 - On `create`, the S3 leg runs exactly when that run uploaded an archive, which means `--s3-upload` was passed and the upload succeeded.
 - On `prune`, the S3 leg runs only when you pass `--s3`. Without it, a fully configured bucket is left alone.
+
+:::note
+`--s3-upload` without `--s3-keep-local` deletes the local copy of the new archive as soon as the upload succeeds, before retention runs. The keep-newest floor still protects each location's newest archive, but in the local directory that is the *previous* archive, not the one this run just made. Pass `--s3-keep-local` if you want the fresh archive in both places.
+:::
 
 ```bash
 # Prune both the local directory and the configured bucket/prefix
@@ -198,7 +219,14 @@ Uploading a backup needs write permission. Pruning one also needs to list the pr
 }
 ```
 
-With upload-only credentials, the local directory still prunes correctly, the S3 leg fails, and the run exits non-zero reporting which location failed.
+With upload-only credentials the S3 leg fails and the run exits non-zero naming that location. What happens to the local directory depends on which right is missing and whether you passed `--force`:
+
+| Missing right | `--dry-run` | Interactive (no `--force`) | `--force` |
+|---|---|---|---|
+| `s3:ListBucket` | Nothing deleted | Nothing deleted anywhere; you are not asked | Local directory pruned |
+| `s3:DeleteObject` only | Nothing deleted | Candidates listed for both locations; on `y`, local deletions succeed and S3 deletions fail | Local directory pruned |
+
+Without list permission the S3 leg cannot be previewed at all, and a preview the tool cannot complete stops the whole non-forced run before it deletes anything. Grant both rights together, and use `--dry-run` to confirm the bucket is being listed before you rely on a scheduled `--force` run.
 
 ### Combine with bucket lifecycle rules
 
@@ -225,9 +253,11 @@ Confirm your retention setup works:
 
 Check whether it is the newest at its location — the floor keeps it unconditionally. Otherwise, confirm the name still matches `infrahub_backup_<YYYYMMDD_HHMMSS>.tar.gz`; a renamed archive is invisible to retention. Remember also that the two rules combine as a union, so an archive older than `--retention-days` still survives while it sits within `--retention-count`.
 
-### A restored archive reappeared as a deletion candidate
+### An archive I copied back from the bucket became a deletion candidate
 
-Restoring from an S3 URI downloads the archive into the backup directory under its original name, which carries its original timestamp. That copy is a normal archive as far as retention is concerned, so the next scheduled run may well delete it. This is expected. If you need to keep a restored archive, move it outside the backup directory or rename it.
+An archive you place in the backup directory yourself — copying one down from the bucket with `aws s3 cp` or `mc cp`, or restoring one from tape — keeps its original name and therefore its original timestamp. Retention reads it as an archive of that age, not as one that arrived today, so the next run may well delete it. Keep such a copy outside the backup directory, or rename it, if you need it to survive.
+
+`infrahub-backup restore s3://…` does not leave you in this situation: it downloads into the backup directory but removes its own copy once the restore finishes.
 
 ### Retention did nothing on the `plakar` backend
 

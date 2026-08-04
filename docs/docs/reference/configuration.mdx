@@ -29,7 +29,7 @@ Tools can be configured through these methods, applied in precedence order:
 | `INFRAHUB_RETENTION_DAYS` | Keep backups newer than N days (N >= 1, unset to disable) | unset | `30` |
 | `INFRAHUB_RETENTION_COUNT` | Keep the N most recent backups (N >= 1, unset to disable) | unset | `60` |
 
-Both rules combine as a union, and the most recent backup at each location always survives. See [Manage backup retention](../backup/retention.mdx).
+Both rules combine as a union, and the most recent backup at each location always survives. A value that is not a whole number of at least 1 — including an explicit `0` — is a validation error that aborts the run rather than disabling the rule; a variable that is present but empty counts as unset. See [Manage backup retention](../backup/retention.mdx).
 
 ### Docker compose configuration
 

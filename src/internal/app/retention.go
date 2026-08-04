@@ -19,8 +19,15 @@ import (
 	"golang.org/x/term"
 )
 
-// retentionDay is the duration of one day for the age rule. Day-granularity
-// retention deliberately tolerates DST shifts and timezone skew between hosts.
+// retentionDay is the age rule's day: a fixed 24 hours, not a calendar day.
+//
+// Together with filename timestamps parsed in the host's local zone
+// (backupTimestamp), this makes the age boundary depend on the zone of the host
+// running retention. Archives written and pruned on one host always agree, which
+// is the arrangement the tool is built for. Pruning the same directory from a
+// host whose offset differs by N hours moves the cut-off by N hours, and a DST
+// transition inside the window moves it by that transition, so an archive can be
+// deleted up to a day earlier or later than the writing host would expect.
 const retentionDay = 24 * time.Hour
 
 // backupNameTimestampLayout is the layout of the timestamp that
