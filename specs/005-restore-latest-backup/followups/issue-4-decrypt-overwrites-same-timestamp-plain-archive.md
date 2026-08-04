@@ -1,8 +1,8 @@
 # Follow-up issue draft 4
 
-Ready to file on `opsmill/infrahub-backup`. Not yet filed — awaiting approval.
+Filed as <https://github.com/opsmill/infrahub-backup/issues/157>.
 
-Suggested labels: `bug`, `backup`, `data-integrity`
+Labels applied: `type: bug`, `claude-code-assisted`.
 
 Found by the code-quality review of the `005-restore-latest-backup` change set, not by a
 task in it. Pre-existing in `RestoreBackup`; recorded here because `restore --latest` is

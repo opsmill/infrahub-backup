@@ -1,8 +1,10 @@
 # Follow-up issue draft 2
 
-Ready to file on `opsmill/infrahub-backup`. Not yet filed — awaiting approval.
+Filed as <https://github.com/opsmill/infrahub-backup/issues/156>.
 
-Suggested labels: `bug`, `data-integrity`, `priority/high`
+Labels applied: `type: bug`, `claude-code-assisted`. The originally suggested
+`data-integrity` and `priority/high` labels do not exist in this repository — worth adding
+them, or setting the priority on the issue directly, since this is the most severe of the four.
 
 ## Title
 

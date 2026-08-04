@@ -1,8 +1,8 @@
 # Follow-up issue draft 1
 
-Ready to file on `opsmill/infrahub-backup`. Not yet filed — awaiting approval.
+Filed as <https://github.com/opsmill/infrahub-backup/issues/158>.
 
-Suggested labels: `bug`, `backup`, `data-integrity`
+Labels applied: `type: bug`, `claude-code-assisted`.
 
 ## Title
 
