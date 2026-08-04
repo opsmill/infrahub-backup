@@ -174,12 +174,21 @@ class TestDockerPlakar(TestInfrahubDockerClient):
         FR-004: on this backend `--latest` is an explicit alias, not a second mechanism —
         the flag exists so a scheduled restore can be written once and run against either
         backend without knowing which one it got. The repository holds two groups, so
-        "the latest" is a real choice; both invocations must name the newer one and both
-        must actually restore it.
+        "the latest" is a real choice, and both invocations must name the newer one.
 
         The group id is asserted rather than only the exit code because a restore that
         resolved the *older* group would still succeed and still exit 0 — it would simply
         bring back data from the wrong point in time.
+
+        What each invocation verifies differs, deliberately:
+
+        - `restore --latest` is data-verified end to end — the seeded tag is deleted first
+          and has to come back — because that a `--latest` restore really restores rather
+          than merely printing a group id is this spec's claim.
+        - the bare `restore` is checked only for the group id it resolved. Bare `restore`
+          is pre-existing behaviour, already data-verified by
+          `test_backup_restore_plakar_local` in this class, so a second round trip here
+          would buy nothing but another database recovery wait.
         """
         url = f"http://localhost:{infrahub_port}"
         project = infrahub_compose.project_name
@@ -204,25 +213,29 @@ class TestDockerPlakar(TestInfrahubDockerClient):
         assert len(listed) == 2, f"expected two backup groups in the repository, found {listed}:\n{groups.stdout}"
         newest = max(listed)
 
-        # 3. `restore --latest`, then the bare form, each proving itself by bringing the
-        #    deleted tag back. Both are run against the same repository so the group they
-        #    resolve is comparable.
         resolved = {}
-        for label, args in (("--latest", ["restore", "--latest"]), ("bare", ["restore"])):
-            await modify_infrahub_data(url, ADMIN_TOKEN, seed)
 
-            result = run_restore(backup_binary, repo_args + args)
-            resolved[label] = _resolved_backup_group(result.stdout + result.stderr)
+        # 3. `restore --latest`, proving itself by bringing the deleted tag back.
+        await modify_infrahub_data(url, ADMIN_TOKEN, seed)
+        result = run_restore(backup_binary, repo_args + ["restore", "--latest"])
+        resolved["--latest"] = _resolved_backup_group(result.stdout + result.stderr)
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
+        await verify_infrahub_data(url, ADMIN_TOKEN, seed)
 
-            await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
-            await verify_infrahub_data(url, ADMIN_TOKEN, seed)
+        # 4. The bare form, against the same repository so the group it resolves is
+        #    comparable. Only the resolved id is read back; the recovery wait stays because
+        #    the next test in this class opens with `create --force`, which would otherwise
+        #    meet a deployment that is still restarting.
+        result = run_restore(backup_binary, repo_args + ["restore"])
+        resolved["bare"] = _resolved_backup_group(result.stdout + result.stderr)
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=5.0)
 
-        # 4. The parity claim itself.
+        # 5. The parity claim itself.
         assert resolved["--latest"] == resolved["bare"], (
             f"--latest resolved group {resolved['--latest']} but bare restore resolved {resolved['bare']}"
         )
 
-        # 5. And the group they agreed on is the newest one in the repository, not just any
+        # 6. And the group they agreed on is the newest one in the repository, not just any
         #    shared answer.
         assert resolved["--latest"] == newest, (
             f"both invocations resolved {resolved['--latest']}, but the repository's newest group is {newest} "
