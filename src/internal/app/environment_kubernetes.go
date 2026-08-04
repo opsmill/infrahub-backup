@@ -463,7 +463,7 @@ func kubectlContainerStatusArgs(namespace, pod string) []string {
 
 // parsePodContainerStatuses converts kubectlContainerStatusArgs output into
 // one Replica per pod container, with Restarted derived from that container's
-// restartCount (critique E2: restart counts live per container).
+// restartCount, because restart counts live per container.
 func parsePodContainerStatuses(service, pod, output string) ([]Replica, error) {
 	replicas := []Replica{}
 	for _, line := range nonEmptyLines(output) {

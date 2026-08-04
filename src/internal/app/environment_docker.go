@@ -200,7 +200,7 @@ func parseComposePSContainers(output string) ([]composePSContainer, error) {
 
 // replicasFromComposePS converts compose ps entries for one service into
 // Replicas sorted by container name: every replica of a scaled service
-// appears, each carrying its human-meaningful container name (critique P2).
+// appears, each carrying its human-meaningful container name.
 // Pod stays empty and Restarted false — previous logs do not exist on Docker.
 func replicasFromComposePS(service string, containers []composePSContainer) []Replica {
 	replicas := []Replica{}

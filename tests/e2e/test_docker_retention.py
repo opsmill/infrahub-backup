@@ -10,8 +10,6 @@ from infrahub_sdk.testing.docker import TestInfrahubDockerClient
 
 from tests.helpers.utils import run_backup, wait_for_http
 
-ADMIN_TOKEN = "06438eb2-8019-4776-878c-0941b1f1d1ec"
-
 # Files that share the backup directory but are not backups: retention must never
 # touch them, including the name that looks like a backup but carries no timestamp.
 DECOYS = ["notes.txt", "infrahub_backup_garbage.tar.gz", "somebackup.tar.gz"]
