@@ -60,8 +60,21 @@ For `--latest`, the following are checked **in order, before any side effect**
    provided → exit ≠ 0 with an error naming the archive and `--decrypt-key`.
    **Never** falls back to an older archive.
 
+The pool snapshot is therefore taken **before** any `--sleep` wait: an archive
+transferred into place during the sleep is not considered by `--latest` (the
+sleep exists so a *named* file can be transferred in; with `--latest`, selection
+has already happened).
+
 The existing content-based encryption detection inside the restore path is
 unchanged and still applies after download (defense in depth).
+
+## Local-copy safety (`--latest --s3`)
+
+The S3 leg downloads the selected object to a temporary path inside the backup
+directory whose name can never match the backup archive pattern, and removes it
+after the restore. Consequence: a pre-existing local archive with the same name
+as the selected S3 object (the `create --s3-upload` keep-local flow) is **never
+overwritten and never deleted** by `restore --latest --s3`.
 
 ## Observability contract (FR-009)
 
