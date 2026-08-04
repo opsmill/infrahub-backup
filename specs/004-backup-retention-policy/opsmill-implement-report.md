@@ -8,11 +8,15 @@
 | **Spec directory** | `specs/004-backup-retention-policy` |
 | **Branch** | `fac/backup-retention-policy-fouxa` |
 | **Base commit** | `ff41f04` |
-| **Head commit** | `fcf9961` |
-| **Commits produced** | 12 |
-| **Diff** | 24 files, +4902 / −69 |
+| **Head commit** | `f151f8a` |
+| **Commits produced** | 16 |
+| **Diff** | 28 files, +5752 / −80 |
 | **Tasks** | 25 of 25 complete (`[X]`), 0 outstanding |
-| **Wall clock** | ≈ 4h 45m (first chunk ~06:37Z → final verification 11:22Z, derived from evidence timestamps) |
+| **Wall clock** | ≈ 5h 30m (first chunk ~06:37Z → final verification 12:06Z, derived from evidence timestamps) |
+
+The last four commits landed after the report was first written: a spec edge-case
+clarification found by the pre-PR ship gate, removal of spec-kit local state from the
+repo, and the minio-backed S3 retention e2e that closes residual gap 1 (§4).
 
 **Final gate state** (verified by the orchestrator directly, not reported second-hand, on a cleared test cache):
 
@@ -23,8 +27,9 @@
 | `make lint` | exit 0 — `0 issues.` |
 | `make build` | exit 0 — all three binaries |
 | `make test` | exit 0 — **524 `--- PASS`, 0 `FAIL`** |
-| e2e collection | 10 tests collect under `-m docker` (CI's selector) |
-| e2e prune suite | 9 passed in 0.80s |
+| e2e collection | 20 tests collect under `-m docker` (CI's selector) |
+| e2e no-stack suites | 18 passed in 2.54s (`TestPruneRetention` + `TestS3Retention`, the latter against a real minio endpoint) |
+| e2e live-stack cases | 2, each passing against a real Docker Compose Infrahub stack (~156s apiece): `TestDockerRetention` (local leg) and `TestDockerS3RetentionOnCreate` (S3 leg on `create`) |
 | `go.mod` / `go.sum` | byte-identical to `ff41f04` — no dependencies added, no vendor-hash update needed |
 | `git status` | clean before and after gates |
 
