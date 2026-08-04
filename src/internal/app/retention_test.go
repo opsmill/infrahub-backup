@@ -191,10 +191,21 @@ func TestResolveRetentionConfig(t *testing.T) {
 			inputs:      RetentionInputs{Days: env("-5")},
 			errContains: `INFRAHUB_RETENTION_DAYS must be a whole number of at least 1 (got "-5")`,
 		},
+		// A variable that is present but empty is how Docker Compose and Kubernetes
+		// render a substitution with nothing to substitute, so it must mean the same
+		// as an absent variable rather than aborting an otherwise valid deployment.
 		{
-			name:        "empty environment value is rejected",
-			inputs:      RetentionInputs{Count: env("")},
-			errContains: `INFRAHUB_RETENTION_COUNT must be a whole number of at least 1 (got ""); omit it to disable the count rule`,
+			name:   "an empty environment value reads as unset",
+			inputs: RetentionInputs{Count: env("")},
+		},
+		{
+			name:   "a whitespace-only environment value reads as unset",
+			inputs: RetentionInputs{Days: env("   ")},
+		},
+		{
+			name:   "an empty value leaves the other rule alone",
+			inputs: RetentionInputs{Days: env(""), Count: env("14")},
+			want:   RetentionConfig{Count: 14},
 		},
 		{
 			name:        "a bad count value is reported for its own variable",

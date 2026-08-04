@@ -201,9 +201,20 @@ func TestResolveRetentionFlagsFromEnvironment(t *testing.T) {
 			wantRetention: app.RetentionConfig{Days: 1},
 		},
 		{
-			name:        "an empty value aborts",
-			env:         map[string]string{app.RetentionDaysEnvVar: ""},
-			errContains: `INFRAHUB_RETENTION_DAYS must be a whole number of at least 1 (got "")`,
+			// `INFRAHUB_RETENTION_DAYS=${RETENTION_DAYS}` with nothing to substitute is
+			// how Docker Compose and Kubernetes render an unset variable, so an empty
+			// value must leave the rule inactive instead of failing the run.
+			name: "an empty value leaves the rule inactive",
+			env:  map[string]string{app.RetentionDaysEnvVar: ""},
+		},
+		{
+			name: "a whitespace-only value leaves the rule inactive",
+			env:  map[string]string{app.RetentionCountEnvVar: "  "},
+		},
+		{
+			name:          "an empty value leaves the other rule alone",
+			env:           map[string]string{app.RetentionDaysEnvVar: "", app.RetentionCountEnvVar: "14"},
+			wantRetention: app.RetentionConfig{Count: 14},
 		},
 		{
 			name:          "the command's own flag outranks the variable",
