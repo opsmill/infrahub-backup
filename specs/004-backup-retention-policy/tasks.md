@@ -51,11 +51,11 @@
 
 ### Implementation for User Story 1
 
-- [ ] T013 [US1] Register `--retention-days` / `--retention-count` on the create command with viper bindings (`retention-days`, `retention-count` → `INFRAHUB_RETENTION_*`) in src/cmd/infrahub-backup/main.go (FR-011, contracts/cli.md)
-- [ ] T014 [US1] Extract a testable gating helper (e.g. `retentionLegsForCreate(cfg, s3UploadedThisRun) []storageLocation`) and invoke `applyRetention` at the end of `CreateBackup` — strictly after archive write, checksum, and (when requested) successful S3 upload; on leg errors return `backup succeeded (<name>); retention failed: <joined>` in src/internal/app/backup.go (FR-004, FR-007, FR-008, research.md R7)
-- [ ] T015 [US1] FR-012 guard on the Plakar early-return path in src/internal/app/backup.go: when `Backend == plakar` and the policy is active, log an explicit "retention not yet supported for the plakar backend; skipping" warning, perform no pruning, do not fail the backup
-- [ ] T016 [US1] Unit tests for the gating helper and FR-012 warn-path in src/internal/app/retention_test.go: no active policy → no legs; policy active → local leg; policy + uploaded-this-run → local+S3 legs; plakar + policy → warn and skip
-- [ ] T017 [US1] End-to-end test in tests/e2e/: create-with-retention prunes seeded old archives after a successful backup, leaves decoys untouched, exits 0; create without flags prunes nothing (US1 acceptance scenarios 1, 3)
+- [X] T013 [US1] Register `--retention-days` / `--retention-count` on the create command with viper bindings (`retention-days`, `retention-count` → `INFRAHUB_RETENTION_*`) in src/cmd/infrahub-backup/main.go (FR-011, contracts/cli.md)
+- [X] T014 [US1] Extract a testable gating helper (e.g. `retentionLegsForCreate(cfg, s3UploadedThisRun) []storageLocation`) and invoke `applyRetention` at the end of `CreateBackup` — strictly after archive write, checksum, and (when requested) successful S3 upload; on leg errors return `backup succeeded (<name>); retention failed: <joined>` in src/internal/app/backup.go (FR-004, FR-007, FR-008, research.md R7)
+- [X] T015 [US1] FR-012 guard on the Plakar early-return path in src/internal/app/backup.go: when `Backend == plakar` and the policy is active, log an explicit "retention not yet supported for the plakar backend; skipping" warning, perform no pruning, do not fail the backup
+- [X] T016 [US1] Unit tests for the gating helper and FR-012 warn-path in src/internal/app/retention_test.go: no active policy → no legs; policy active → local leg; policy + uploaded-this-run → local+S3 legs; plakar + policy → warn and skip
+- [X] T017 [US1] End-to-end test in tests/e2e/: create-with-retention prunes seeded old archives after a successful backup, leaves decoys untouched, exits 0; create without flags prunes nothing (US1 acceptance scenarios 1, 3)
 
 **Checkpoint**: US1 fully functional — scheduled backups are self-bounding. MVP shippable.
 

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
 // retentionNow is the fixed evaluation instant used by the selection tests, in
@@ -781,6 +784,253 @@ func TestApplyRetentionNoOpCases(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// createRetentionConfig builds a tarball-backend configuration with the given
+// retention rules, pointed at dir and at an S3 bucket reachable only in name.
+func createRetentionConfig(dir string, retention RetentionConfig) *Configuration {
+	return &Configuration{
+		BackupDir: dir,
+		S3: &S3Config{
+			Bucket:   "infrahub-backups",
+			Prefix:   "prod",
+			Endpoint: "http://127.0.0.1:9000",
+			Region:   "us-east-1",
+		},
+		Retention: retention,
+		Backend:   BackendTarball,
+	}
+}
+
+func locationNames(locations []storageLocation) []string {
+	names := make([]string, 0, len(locations))
+	for _, location := range locations {
+		names = append(names, location.Name())
+	}
+	return names
+}
+
+// TestRetentionLegsForCreate covers the `create` gate: retention is opt-in
+// (FR-004) and the S3 leg exists exactly when the run uploaded (FR-007).
+func TestRetentionLegsForCreate(t *testing.T) {
+	dir := t.TempDir()
+
+	tests := []struct {
+		name        string
+		retention   RetentionConfig
+		s3Uploaded  bool
+		wantLegs    []string
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name:      "no policy means no legs",
+			retention: RetentionConfig{},
+		},
+		{
+			name:       "no policy means no legs even when this run uploaded",
+			retention:  RetentionConfig{},
+			s3Uploaded: true,
+		},
+		{
+			name:      "days rule prunes the local directory",
+			retention: RetentionConfig{Days: 7},
+			wantLegs:  []string{"local:" + dir},
+		},
+		{
+			name:      "count rule prunes the local directory",
+			retention: RetentionConfig{Count: 14},
+			wantLegs:  []string{"local:" + dir},
+		},
+		{
+			name:      "configured S3 alone never becomes a leg",
+			retention: RetentionConfig{Days: 7, Count: 14},
+			wantLegs:  []string{"local:" + dir},
+		},
+		{
+			name:       "an upload this run adds the S3 leg",
+			retention:  RetentionConfig{Days: 7, Count: 14},
+			s3Uploaded: true,
+			wantLegs:   []string{"local:" + dir, "s3://infrahub-backups/prod"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			legs, err := retentionLegsForCreate(createRetentionConfig(dir, tc.retention), tc.s3Uploaded)
+			if err != nil {
+				t.Fatalf("retentionLegsForCreate() = %v, want nil", err)
+			}
+			if got := locationNames(legs); !slices.Equal(got, tc.wantLegs) {
+				t.Errorf("legs = %v, want %v", got, tc.wantLegs)
+			}
+		})
+	}
+}
+
+// TestRetentionLegsForCreateS3ClientFailure keeps an unusable S3 configuration from
+// silently dropping the S3 leg: the run must report it instead.
+func TestRetentionLegsForCreateS3ClientFailure(t *testing.T) {
+	cfg := createRetentionConfig(t.TempDir(), RetentionConfig{Days: 7})
+	cfg.S3.Endpoint = "://not-a-url"
+
+	legs, err := retentionLegsForCreate(cfg, true)
+	if err == nil {
+		t.Fatalf("retentionLegsForCreate() = %v, nil error; want the unusable S3 configuration reported", locationNames(legs))
+	}
+	if !strings.Contains(err.Error(), "S3 client") {
+		t.Errorf("error = %q, want it to name the S3 client as the failure", err)
+	}
+}
+
+// TestApplyCreateRetentionPrunesLocalLeg is the `create` wiring: a configured
+// policy prunes out-of-policy archives in the backup directory and leaves
+// everything that is not a backup alone (FR-006).
+func TestApplyCreateRetentionPrunesLocalLeg(t *testing.T) {
+	dir := t.TempDir()
+
+	newest := backupNameAt(time.Now())
+	inPolicy := backupNameAt(time.Now().Add(-2 * retentionDay))
+	outOfPolicy := []string{
+		backupNameAt(time.Now().Add(-20 * retentionDay)),
+		backupNameAt(time.Now().Add(-30*retentionDay)) + ".enc",
+	}
+	decoys := []string{"notes.txt", "infrahub_backup_garbage.tar.gz", "somebackup.tar.gz"}
+
+	seed := func() {
+		for _, name := range append([]string{newest, inPolicy}, append(slices.Clone(outOfPolicy), decoys...)...) {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	remaining := func() []string {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		names := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		slices.Sort(names)
+		return names
+	}
+
+	// Without retention configured the directory is untouched (US1 scenario 3).
+	seed()
+	before := remaining()
+	iops := &InfrahubOps{config: createRetentionConfig(dir, RetentionConfig{})}
+	if err := iops.applyCreateRetention(false); err != nil {
+		t.Fatalf("applyCreateRetention() without a policy = %v, want nil", err)
+	}
+	if got := remaining(); !slices.Equal(got, before) {
+		t.Fatalf("directory after a run without retention = %v, want it untouched %v", got, before)
+	}
+
+	// With retention configured only out-of-policy archives go away.
+	iops = &InfrahubOps{config: createRetentionConfig(dir, RetentionConfig{Days: 7})}
+	if err := iops.applyCreateRetention(false); err != nil {
+		t.Fatalf("applyCreateRetention() = %v, want nil", err)
+	}
+	want := append([]string{newest, inPolicy}, decoys...)
+	slices.Sort(want)
+	if got := remaining(); !slices.Equal(got, want) {
+		t.Errorf("directory after retention = %v, want %v", got, want)
+	}
+}
+
+// TestApplyCreateRetentionReportsLegFailure checks that a failing leg surfaces with
+// its location, which is what `CreateBackup` reports after "backup succeeded"
+// (FR-008).
+func TestApplyCreateRetentionReportsLegFailure(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	iops := &InfrahubOps{config: createRetentionConfig(missing, RetentionConfig{Days: 7})}
+
+	err := iops.applyCreateRetention(false)
+	if err == nil {
+		t.Fatal("applyCreateRetention() = nil, want the unusable backup directory reported")
+	}
+	if !strings.Contains(err.Error(), "retention failed at local:"+missing) {
+		t.Errorf("error = %q, want it to name the failing leg", err)
+	}
+}
+
+// captureLogrus collects everything written to the global logger while fn runs.
+func captureLogrus(t *testing.T, fn func()) string {
+	t.Helper()
+
+	var buf bytes.Buffer
+	previousOut := logrus.StandardLogger().Out
+	previousLevel := logrus.GetLevel()
+	logrus.SetOutput(&buf)
+	logrus.SetLevel(logrus.DebugLevel)
+	t.Cleanup(func() {
+		logrus.SetOutput(previousOut)
+		logrus.SetLevel(previousLevel)
+	})
+
+	fn()
+
+	return buf.String()
+}
+
+// TestWarnRetentionUnsupportedBackend is FR-012's create half: an active policy on
+// the Plakar backend must warn explicitly rather than prune or stay silent.
+func TestWarnRetentionUnsupportedBackend(t *testing.T) {
+	tests := []struct {
+		name      string
+		retention RetentionConfig
+		wantWarn  bool
+	}{
+		{name: "active policy warns", retention: RetentionConfig{Days: 7}, wantWarn: true},
+		{name: "count-only policy warns", retention: RetentionConfig{Count: 14}, wantWarn: true},
+		{name: "no policy stays quiet", retention: RetentionConfig{}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := createRetentionConfig(t.TempDir(), tc.retention)
+			cfg.Backend = BackendPlakar
+
+			output := captureLogrus(t, func() { warnRetentionUnsupportedBackend(cfg) })
+
+			mentionsRetention := strings.Contains(output, "retention not yet supported for the plakar backend")
+			if mentionsRetention != tc.wantWarn {
+				t.Fatalf("log output = %q, want a plakar retention warning: %v", output, tc.wantWarn)
+			}
+			if !tc.wantWarn {
+				return
+			}
+			if !strings.Contains(output, "level=warning") {
+				t.Errorf("log output = %q, want it emitted at warning level", output)
+			}
+		})
+	}
+}
+
+// TestPlakarBackendPrunesNothing pairs the warning with its promise: the Plakar
+// path never selects a leg, so nothing can be deleted (FR-012).
+func TestPlakarBackendPrunesNothing(t *testing.T) {
+	dir := t.TempDir()
+	name := backupNameAt(time.Now().Add(-40 * retentionDay))
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := createRetentionConfig(dir, RetentionConfig{Days: 7, Count: 1})
+	cfg.Backend = BackendPlakar
+
+	output := captureLogrus(t, func() { warnRetentionUnsupportedBackend(cfg) })
+	if !strings.Contains(output, "skipping retention") {
+		t.Errorf("log output = %q, want it to state retention was skipped", output)
+	}
+
+	// The archive is out of policy under both rules and still there: the Plakar
+	// path warns instead of pruning.
+	if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+		t.Errorf("stat(%q) = %v, want the archive untouched on the plakar backend", name, err)
 	}
 }
 
