@@ -210,7 +210,15 @@ always prepends the local leg, which the one-pool rule forbids).
 
 ## 6. Suggested next steps
 
-1. **Read follow-up draft 2 first.** `restore` after a `create` on the same host does not
+> **Update after the report was written**: the four drafts were approved and filed on
+> `opsmill/infrahub-backup` — [#156](https://github.com/opsmill/infrahub-backup/issues/156)
+> (Neo4j stale dump), [#157](https://github.com/opsmill/infrahub-backup/issues/157) (decrypt
+> overwrites a same-timestamp archive), [#158](https://github.com/opsmill/infrahub-backup/issues/158)
+> (positional `s3://` footgun), [#159](https://github.com/opsmill/infrahub-backup/issues/159)
+> (dead viper bindings) — each labelled `type: bug` + `claude-code-assisted`. Step 2 below is
+> therefore done. The branch was pushed and a draft PR opened.
+
+1. **Read [#156](https://github.com/opsmill/infrahub-backup/issues/156) first.** `restore` after a `create` on the same host does not
    reliably restore the requested archive — it reads a leftover dump from `/tmp/infrahubops`.
    Observed both as a silent wrong-data restore ("Restore completed successfully", exit 0,
    marker tag absent) and as a hard failure. This is a data-integrity defect in a backup
