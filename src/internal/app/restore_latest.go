@@ -2,10 +2,7 @@ package app
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io/fs"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -26,12 +23,15 @@ const encryptedArchiveSuffix = ".enc"
 // local archive sharing the selected object's name — the state
 // `create --s3-upload --s3-keep-local` leaves behind — neither overwritten nor deleted by
 // a restore (contracts/cli.md "Local-copy safety").
+//
+// It is one of the patterns restore_inputs.go collects: every intermediate file a restore
+// writes goes through a reserved name of this shape, and the leg it belongs to is readable
+// from the name.
 const s3RestoreTempPattern = "restore-latest-*.download"
 
-// s3RestoreDownloadTimeout bounds the download of the selected archive. It matches the
-// allowance the positional s3:// URI restore path already gives a download, and exists so
-// that an endpoint which accepts the connection but never answers cannot hang a scheduled
-// restore forever.
+// s3RestoreDownloadTimeout bounds the download of the selected archive, and the positional
+// s3:// URI path's download with it. It exists so that an endpoint which accepts the
+// connection but never answers cannot hang a scheduled restore forever.
 const s3RestoreDownloadTimeout = 30 * time.Minute
 
 // s3RestoreClient is the slice of S3Client the `--latest --s3` leg needs on top of the
@@ -133,37 +133,16 @@ func restoreLatestFrom(ctx context.Context, loc storageLocation, decryptKey stri
 // abandoned download would otherwise hold a full archive's worth of disk in the backup
 // directory for nobody.
 func downloadLatestS3Backup(ctx context.Context, client s3RestoreClient, dir string, ref backupRef, restore func(path string) error) error {
-	// An S3 restore may well run on a host that has never taken a backup, so the
-	// directory the download lands in is created rather than assumed — the same
-	// allowance the positional s3:// URI path makes.
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("failed to create backup directory %s: %w", dir, err)
-	}
-
 	// Created rather than merely named: the name is reserved on disk, so two restores
-	// sharing a backup directory cannot download over each other.
-	file, err := os.CreateTemp(dir, s3RestoreTempPattern)
+	// sharing a backup directory cannot download over each other. The directory itself is
+	// created rather than assumed — an S3 restore may well run on a host that has never
+	// taken a backup.
+	tempPath, err := reserveRestoreTempPath(dir, s3RestoreTempPattern)
 	if err != nil {
-		return fmt.Errorf("failed to create a temporary download path in %s: %w", dir, err)
-	}
-	tempPath := file.Name()
-
-	// The download opens the path itself, so this handle has no further use; the reserved
-	// name stays on disk.
-	if err := file.Close(); err != nil {
-		os.Remove(tempPath)
-
-		return fmt.Errorf("failed to prepare the temporary download path %s: %w", tempPath, err)
+		return fmt.Errorf("failed to prepare the download of %s: %w", ref.Name, err)
 	}
 
-	defer func() {
-		// The restore's own outcome is what the caller has to see, so a cleanup failure is
-		// reported rather than returned. It cannot pollute the pool either way: the name
-		// is not a backup archive name.
-		if err := os.Remove(tempPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			logrus.Warnf("Failed to remove the temporary download %s: %v", tempPath, err)
-		}
-	}()
+	defer removeRestoreTempPath(tempPath)
 
 	downloadCtx, cancel := context.WithTimeout(ctx, s3RestoreDownloadTimeout)
 	downloadErr := client.Download(downloadCtx, client.buildS3Key(ref.Name), tempPath)
