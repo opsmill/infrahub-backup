@@ -350,6 +350,110 @@ func TestRetentionFlagsResolvePerCommand(t *testing.T) {
 	})
 }
 
+// restoreOptionCommand builds a command carrying restore's two viper-backed flags exactly as
+// main() registers and binds them — no flag variables, bound to the same keys, with viper's
+// INFRAHUB_ environment resolution in place — and parses the given command line.
+//
+// Registering them the way main() does is the point: the defect this pins was the binding and
+// the read disagreeing, so a test that read the flags directly would pass either way.
+func restoreOptionCommand(t *testing.T, args ...string) *cobra.Command {
+	t.Helper()
+
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	viper.SetEnvPrefix("INFRAHUB")
+	viper.SetEnvKeyReplacer(strings.NewReplacer("-", "_"))
+	viper.AutomaticEnv()
+
+	cmd := &cobra.Command{Use: "restore", RunE: func(*cobra.Command, []string) error { return nil }}
+	cmd.Flags().String("decrypt-key", "", "")
+	cmd.Flags().Bool("reset-deployment-id", false, "")
+	for _, name := range []string{"decrypt-key", "reset-deployment-id"} {
+		if err := viper.BindPFlag(name, cmd.Flags().Lookup(name)); err != nil {
+			t.Fatalf("BindPFlag(%q) = %v, want nil", name, err)
+		}
+	}
+	if err := cmd.Flags().Parse(args); err != nil {
+		t.Fatalf("parsing %v = %v, want nil", args, err)
+	}
+
+	return cmd
+}
+
+// TestResolveRestoreOptions pins the channels restore's decryption key and deployment-ID
+// reset resolve from. Both flags were bound to viper and then read from their flag variables
+// instead, so INFRAHUB_DECRYPT_KEY and INFRAHUB_RESET_DEPLOYMENT_ID silently did nothing —
+// which meant an unattended restore configured entirely through the environment could not
+// supply a decryption key at all.
+func TestResolveRestoreOptions(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+		args []string
+		want restoreOptions
+	}{
+		{
+			name: "neither channel leaves both unset",
+		},
+		{
+			name: "flags configure both",
+			args: []string{"--decrypt-key", "/keys/backup.key", "--reset-deployment-id"},
+			want: restoreOptions{DecryptKey: "/keys/backup.key", ResetDeploymentID: true},
+		},
+		{
+			name: "the decryption key comes from the environment",
+			env:  map[string]string{"INFRAHUB_DECRYPT_KEY": "/keys/from-env.key"},
+			want: restoreOptions{DecryptKey: "/keys/from-env.key"},
+		},
+		{
+			name: "the deployment-id reset comes from the environment",
+			env:  map[string]string{"INFRAHUB_RESET_DEPLOYMENT_ID": "true"},
+			want: restoreOptions{ResetDeploymentID: true},
+		},
+		{
+			name: "both variables together",
+			env: map[string]string{
+				"INFRAHUB_DECRYPT_KEY":         "/keys/from-env.key",
+				"INFRAHUB_RESET_DEPLOYMENT_ID": "true",
+			},
+			want: restoreOptions{DecryptKey: "/keys/from-env.key", ResetDeploymentID: true},
+		},
+		{
+			name: "the flag outranks the variable",
+			env:  map[string]string{"INFRAHUB_DECRYPT_KEY": "/keys/from-env.key"},
+			args: []string{"--decrypt-key", "/keys/from-flag.key"},
+			want: restoreOptions{DecryptKey: "/keys/from-flag.key"},
+		},
+		{
+			// `INFRAHUB_DECRYPT_KEY=${DECRYPT_KEY}` with nothing to substitute is how
+			// Docker Compose and Kubernetes render an unset variable, so an empty value
+			// must read as "no key" rather than as a path.
+			name: "an empty variable is not a key",
+			env:  map[string]string{"INFRAHUB_DECRYPT_KEY": ""},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, name := range []string{"INFRAHUB_DECRYPT_KEY", "INFRAHUB_RESET_DEPLOYMENT_ID"} {
+				t.Setenv(name, "")
+				if err := os.Unsetenv(name); err != nil {
+					t.Fatalf("unsetting %s = %v, want nil", name, err)
+				}
+			}
+			for name, value := range tc.env {
+				t.Setenv(name, value)
+			}
+
+			restoreOptionCommand(t, tc.args...)
+
+			if got := resolveRestoreOptions(); got != tc.want {
+				t.Errorf("resolveRestoreOptions() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestResolveRestoreInvocation is the invocation matrix of contracts/cli.md, backend by
 // backend. Every rejected row is a command line that could mean two things on a command
 // that overwrites a deployment's data, so each one must fail rather than resolve to a

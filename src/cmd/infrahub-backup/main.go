@@ -98,6 +98,32 @@ func resolveRestoreInvocation(backend app.BackendType, args []string, latest, s3
 	return restoreRequest{Archive: args[0]}, nil
 }
 
+// restoreOptions are the `restore` options that resolve through viper, and therefore from
+// the environment as well as from the command line.
+type restoreOptions struct {
+	// DecryptKey is the path to the private key PEM file an encrypted archive is decrypted
+	// with, from --decrypt-key or INFRAHUB_DECRYPT_KEY.
+	DecryptKey string
+	// ResetDeploymentID generates a new Root node UUID after the restore, from
+	// --reset-deployment-id or INFRAHUB_RESET_DEPLOYMENT_ID.
+	ResetDeploymentID bool
+}
+
+// resolveRestoreOptions reads the two `restore` options bound to viper below, the way
+// `create` reads its own: through viper, so the flag and the INFRAHUB_ variable are both
+// live and the flag wins where both supply a value.
+//
+// Reading them from the flag variables instead is what made the bindings dead — the
+// variables only ever hold what the command line supplied, so both environment variables
+// silently did nothing. They matter to an unattended restore in particular: a scheduled job
+// configured entirely through the environment could not pass a decryption key at all.
+func resolveRestoreOptions() restoreOptions {
+	return restoreOptions{
+		DecryptKey:        viper.GetString("decrypt-key"),
+		ResetDeploymentID: viper.GetBool("reset-deployment-id"),
+	}
+}
+
 // retentionRuleInput reads one retention rule's raw configuration for the command
 // being run: the invoked command's own flag, and the environment variable.
 //
@@ -173,8 +199,6 @@ func main() {
 	var encryptKey string
 	var restoreExcludeTaskManagerDB bool
 	var restoreMigrateFormat bool
-	var restoreResetDeploymentID bool
-	var restoreDecryptKey string
 	var restoreLatest bool
 	var restoreLatestFromS3 bool
 	var s3Upload bool
@@ -280,26 +304,37 @@ func main() {
 				return err
 			}
 			forceRestore, _ := cmd.Flags().GetBool("force")
+			options := resolveRestoreOptions()
 
 			if request.Latest {
-				return iops.RestoreLatestBackup(request.S3, restoreExcludeTaskManagerDB, restoreMigrateFormat, restoreSleepDuration, restoreDecryptKey, forceRestore, restoreResetDeploymentID)
+				return iops.RestoreLatestBackup(request.S3, restoreExcludeTaskManagerDB, restoreMigrateFormat, restoreSleepDuration, options.DecryptKey, forceRestore, options.ResetDeploymentID)
 			}
-			return iops.RestoreBackup(request.Archive, restoreExcludeTaskManagerDB, restoreMigrateFormat, restoreSleepDuration, restoreDecryptKey, forceRestore, restoreResetDeploymentID)
+			return iops.RestoreBackup(request.Archive, restoreExcludeTaskManagerDB, restoreMigrateFormat, restoreSleepDuration, options.DecryptKey, forceRestore, options.ResetDeploymentID)
 		},
 	}
 	restoreCmd.Flags().BoolVar(&restoreExcludeTaskManagerDB, "exclude-taskmanager", false, "Skip restoring the task manager database even if present in the archive")
 	restoreCmd.Flags().BoolVar(&restoreMigrateFormat, "migrate-format", false, "Run neo4j-admin database migrate --to-format=block after the restore completes")
 	restoreCmd.Flags().DurationVar(&restoreSleepDuration, "sleep", 0, "Sleep duration before restore begins (e.g., 5m, 300s) for manual file transfer")
-	restoreCmd.Flags().StringVar(&restoreDecryptKey, "decrypt-key", "", "Path to private key PEM file for decrypting an encrypted backup")
+	// Registered without a flag variable on purpose: resolveRestoreOptions reads these two
+	// through viper, and a variable next to the binding is what let the two disagree.
+	restoreCmd.Flags().String("decrypt-key", "", "Path to private key PEM file for decrypting an encrypted backup")
 	restoreCmd.Flags().Bool("force", false, "Force restore of incomplete backup group")
-	restoreCmd.Flags().BoolVar(&restoreResetDeploymentID, "reset-deployment-id", false, "Generate a new Root node UUID after restore to detach this instance from the source deployment ID")
+	restoreCmd.Flags().Bool("reset-deployment-id", false, "Generate a new Root node UUID after restore to detach this instance from the source deployment ID")
 	restoreCmd.Flags().BoolVar(&restoreLatest, "latest", false, "Restore the most recent backup instead of naming an archive (mutually exclusive with [backup-file])")
 	restoreCmd.Flags().BoolVar(&restoreLatestFromS3, "s3", false, "With --latest: choose from the configured S3 bucket/prefix instead of the local backup directory")
-	// --latest and --s3 are per-invocation switches and are deliberately not bound to
-	// viper: a persistent --latest would turn a mistyped `restore` into a data-overwriting
-	// default, and a persistent --s3 would silently move the pool for every restore.
+
+	// Bind restore flags to Viper for environment variable support (INFRAHUB_<FLAG_NAME>).
 	viper.BindPFlag("decrypt-key", restoreCmd.Flags().Lookup("decrypt-key"))
 	viper.BindPFlag("reset-deployment-id", restoreCmd.Flags().Lookup("reset-deployment-id"))
+	// The rest of restore's flags are deliberately not bound, and are read from their own
+	// flag variables:
+	//   --latest and --s3 are per-invocation switches: a persistent --latest would turn a
+	//   mistyped `restore` into a data-overwriting default, and a persistent --s3 would
+	//   silently move the pool for every restore.
+	//   --exclude-taskmanager, --migrate-format, and --sleep share a name with a bound
+	//   `create` flag, and viper resolves a key through whichever command bound it last, so
+	//   binding them here would make each command answer with the other's value.
+	//   INFRAHUB_SLEEP therefore configures `create` only.
 
 	rootCmd.AddCommand(createCmd)
 	rootCmd.AddCommand(restoreCmd)
