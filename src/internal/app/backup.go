@@ -304,14 +304,17 @@ func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager boo
 
 	actualBackupFile := backupFile
 
-	// Check if backup file is an S3 URI
+	// An `s3://bucket/key` argument names an object that has to be on this host before it
+	// can be restored. It is downloaded under a reserved temporary name rather than its own
+	// — so it cannot land on a local archive of the same name — and removed again whatever
+	// the restore's outcome. See restore_inputs.go.
 	if IsS3URI(backupFile) {
 		downloadedPath, err := iops.downloadBackupFromS3(backupFile)
 		if err != nil {
 			return err
 		}
 		actualBackupFile = downloadedPath
-		defer os.Remove(actualBackupFile) // Clean up downloaded file after restore
+		defer removeRestoreTempPath(downloadedPath)
 	}
 
 	// Sleep if requested (for K8s users to transfer backup file into pod)
@@ -341,23 +344,33 @@ func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager boo
 			return fmt.Errorf("failed to load decryption key: %w", err)
 		}
 
-		decryptedPath := strings.TrimSuffix(actualBackupFile, ".enc")
-		if decryptedPath == actualBackupFile {
-			decryptedPath = actualBackupFile + ".decrypted.tar.gz"
+		// Decrypt through a reserved temporary name beside the archive, never to the
+		// archive's own name minus ".enc": that name is a valid archive name in the same
+		// pool, so a plain archive of the same timestamp sitting next to the encrypted one
+		// was overwritten by the plaintext and then deleted with it when the restore
+		// finished — two archives in, one out, and a run that reported success. The
+		// `--latest` tiebreak deliberately prefers the .enc member of such a pair, so an
+		// operator could reach this without ever naming the encrypted archive.
+		// See restore_inputs.go for the convention this follows.
+		decryptedPath, err := reserveRestoreTempPath(filepath.Dir(actualBackupFile), decryptRestoreTempPattern)
+		if err != nil {
+			return fmt.Errorf("failed to prepare the decryption of %s: %w", actualBackupFile, err)
 		}
+		defer removeRestoreTempPath(decryptedPath)
 
 		logrus.Info("Decrypting backup archive...")
 		if err := DecryptFile(actualBackupFile, decryptedPath, privKey); err != nil {
 			return fmt.Errorf("failed to decrypt backup: %w", err)
 		}
 
-		// If the encrypted file was downloaded from S3 (temporary), remove it
+		// A downloaded encrypted archive has no further use once its plaintext exists, so it
+		// goes now rather than at the end of the run: holding both is twice the archive's
+		// size on a disk that only ever had to hold one.
 		if IsS3URI(backupFile) {
-			os.Remove(actualBackupFile)
+			removeRestoreTempPath(actualBackupFile)
 		}
 
 		actualBackupFile = decryptedPath
-		defer os.Remove(actualBackupFile)
 	} else if decryptKey != "" {
 		return fmt.Errorf("--decrypt-key provided but backup file is not encrypted")
 	}
