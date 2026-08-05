@@ -95,10 +95,6 @@ infrahub-backup:
         endpoint: "https://s3.amazonaws.com"
         region: "us-east-1"
         secretName: "backup-s3-credentials"
-
-    options:
-      extraArgs:
-        - "--reset-deployment-id"
 ```
 
 </TabItem>
@@ -125,10 +121,6 @@ restore:
       endpoint: "https://s3.amazonaws.com"
       region: "us-east-1"
       secretName: "backup-s3-credentials"
-
-  options:
-    extraArgs:
-      - "--reset-deployment-id"
 ```
 
 </TabItem>
@@ -142,13 +134,8 @@ The values that distinguish a scheduled restore from the one-shot restore Job:
 | `restore.schedule` | Cron expression for the refresh. Defaults to `0 4 * * *`, two hours after the backup chart's default `0 2 * * *`, so a nightly backup lands before the refresh reads the prefix. |
 | `restore.storage.s3.latest` | Selects the newest archive under the bucket and prefix on every run, instead of naming one. |
 | `restore.storage.s3.prefix` | The prefix the archives live under. Match the source release's `backup.storage.s3.prefix`. |
-| `restore.options.extraArgs` | Extra `restore` flags. The chart has no dedicated key for `--reset-deployment-id`. |
 
 Pick a schedule that leaves room for the source backup to finish uploading. A refresh that fires while the source is still uploading selects the previous archive instead — a valid restore, one cycle behind the data you expected.
-
-### Reset the deployment ID
-
-A restored instance inherits the deployment ID of the instance the backup came from, so without `--reset-deployment-id` the refreshed target reports the same identity as the source. The flag generates a new UUID after the database is restored and before the Infrahub containers start, so the application never observes the source deployment ID. See [Reset the deployment ID](./restore.mdx#reset-the-deployment-id).
 
 ## Step 3: Deploy and verify the schedule
 
@@ -311,7 +298,6 @@ Confirm the schedule is working end to end:
 - [ ] The job log names the archive and source location it restored from
 - [ ] All Infrahub pods in the target namespace are running
 - [ ] The restored data matches the source backup
-- [ ] The target reports its own deployment ID, not the source's
 - [ ] `backup.enabled` is `false` on the target release
 
 ## Related resources
