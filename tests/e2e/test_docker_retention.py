@@ -642,6 +642,7 @@ class TestS3Retention:
 
 @pytest.mark.e2e
 @pytest.mark.docker
+@pytest.mark.enterprise
 class TestDockerRetention(TestInfrahubDockerClient):
     """Retention as `create` applies it, against one class-scoped compose stack.
 
@@ -649,6 +650,13 @@ class TestDockerRetention(TestInfrahubDockerClient):
     rather than paying its setup and teardown each. The local leg is covered first; the S3
     leg follows, and needs a deployment for the same reason — `create` prunes the bucket
     because this run uploaded to it, not because the bucket was configured.
+
+    The `enterprise` mark places these in the Enterprise CI leg only. Nothing here depends
+    on the Neo4j edition — retention selects archives by name and never reads one, so these
+    backups only have to succeed — while on Community every one of them takes the offline
+    dump path, stopping and restarting the whole deployment. Enterprise backs up online, and
+    the Community path stays covered by the tarball, S3, and plakar cases, which restore the
+    archives they take and therefore have to exercise it.
     """
 
     async def test_create_applies_retention(self, infrahub_compose, infrahub_port, backup_binary, tmp_path):

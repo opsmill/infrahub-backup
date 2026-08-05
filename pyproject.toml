@@ -34,6 +34,7 @@ markers = [
     "e2e: end-to-end tests",
     "docker: tests requiring Docker Compose Infrahub deployment",
     "k8s: tests requiring Kubernetes (vcluster) Infrahub deployment",
+    "enterprise: tests the CI matrix runs in the Enterprise leg only, because they do not depend on the edition and are slower on Community",
 ]
 
 [tool.ruff]
