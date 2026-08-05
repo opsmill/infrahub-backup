@@ -116,6 +116,59 @@ class TestDockerTarball(TestInfrahubDockerClient):
         # 6. Verify the tag is back
         await verify_infrahub_data(url, ADMIN_TOKEN, seed)
 
+    async def test_restore_after_a_second_backup_loads_the_named_archive(
+        self, infrahub_compose, infrahub_port, backup_binary, tmp_path
+    ):
+        """A restore that follows two real `create` runs loads the archive it was named.
+
+        The regression test for the wrong-dump defect. `create` used to leave its Neo4j dump
+        inside the container, in the very directory a restore copies an archive's dump into,
+        and the loader read that leftover instead of the archive it was given — silently
+        restoring the *other* backup's data, with exit 0 and "Neo4j dump restored
+        successfully" in the log.
+
+        Two real `create` runs are what makes the substitution observable: with one, the
+        leftover dump *is* the archive being restored, so the wrong file and the right file
+        are the same bytes. The archive is named explicitly, so nothing about `--latest` is
+        involved, and the assertion is on the restored data rather than on the exit code,
+        because the broken run exited 0.
+        """
+        url = f"http://localhost:{infrahub_port}"
+        project = infrahub_compose.project_name
+        backup_dir = tmp_path / "two-backups"
+
+        # 1. Seed the tag that only the first archive holds.
+        seed = await seed_infrahub_data(url, ADMIN_TOKEN)
+
+        # 2. The archive to restore later, taken while the tag exists.
+        run_backup(backup_binary, ["--project", project, "--backup-dir", str(backup_dir), "create", "--force"])
+        first = _archives(backup_dir)
+        assert len(first) == 1, f"expected exactly one archive after the first backup, found {first}"
+        wanted = first[0]
+
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=1.0)
+
+        # 3. Delete the tag, then take a second real backup without it. This is the run whose
+        #    leftover dump used to be what a later restore loaded.
+        await modify_infrahub_data(url, ADMIN_TOKEN, seed)
+        run_backup(backup_binary, ["--project", project, "--backup-dir", str(backup_dir), "create", "--force"])
+        both = _archives(backup_dir)
+        assert len(both) == 2, f"expected two archives after the second backup, found {both}"
+        assert both[0] == wanted, f"{wanted} is not the older of {both}"
+
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=1.0)
+
+        # 4. Restore the first archive by name. A non-zero exit raises.
+        run_restore(
+            backup_binary,
+            ["--project", project, "--backup-dir", str(backup_dir), "restore", str(backup_dir / wanted)],
+        )
+
+        # 5. The tag is back, so the data loaded came from the archive that was named and not
+        #    from the second backup's leftovers.
+        await wait_for_http(f"{url}/api/config", timeout=180.0, interval=1.0)
+        await verify_infrahub_data(url, ADMIN_TOKEN, seed)
+
     async def test_restore_latest_empty_pool_is_an_error(
         self, infrahub_compose, infrahub_port, backup_binary, tmp_path
     ):
@@ -165,10 +218,11 @@ class TestDockerTarball(TestInfrahubDockerClient):
         The older entry is fabricated rather than backed up. Selection ranks names and never
         contents, so a name-only decoy is a full member of the pool, and one holding no
         archive at all is the stronger control: had it been ranked first, the restore would
-        have failed outright instead of restoring the archive the audit line names. A second
-        real `create` is also not available here — it leaves its dump in the same container
-        directory a later restore copies into, which breaks the shared Neo4j restore path
-        however the archive was chosen.
+        have failed outright instead of restoring the archive the audit line names. What a
+        second real `create` adds — that the restore reads the selected archive rather than
+        the previous backup's leftovers — is covered by
+        test_restore_after_a_second_backup_loads_the_named_archive without paying for a
+        second backup here.
         """
         url = f"http://localhost:{infrahub_port}"
         project = infrahub_compose.project_name
@@ -220,6 +274,13 @@ class TestDockerTarball(TestInfrahubDockerClient):
         and that the archive it refused is nonetheless perfectly restorable once the key is
         supplied. Splitting them would leave the refusal indistinguishable from a broken
         archive.
+
+        Two regressions ride along on the same pool, because the state they need is the state
+        this test already builds. A plain archive of the encrypted one's timestamp sits beside
+        it: decryption used to write the plaintext to exactly that name and then delete it, so
+        two archives went in and one came out. And the key is offered once through
+        INFRAHUB_DECRYPT_KEY, which was bound to viper but never read, leaving a restore
+        configured entirely through the environment unable to decrypt anything.
         """
         url = f"http://localhost:{infrahub_port}"
         project = infrahub_compose.project_name
@@ -260,6 +321,14 @@ class TestDockerTarball(TestInfrahubDockerClient):
         older = _older_archive_name(selected)
         (backup_dir / older).write_text("an older archive --latest must never fall back to")
         assert older < selected, f"{older} must be older than the encrypted {selected}"
+
+        # 4b. The plain member of a same-timestamp pair: the exact name the decryption used to
+        #     write its plaintext to, and then delete. Its contents are not an archive, so any
+        #     run that reads it fails loudly instead of quietly succeeding — but nothing may
+        #     read it at all, because the tiebreak deliberately ranks the .enc member first.
+        twin = backup_dir / selected.removesuffix(".enc")
+        twin_body = "the plain archive that shares the encrypted one's timestamp"
+        twin.write_text(twin_body)
 
         await wait_for_http(f"{url}/api/config", timeout=180.0, interval=1.0)
 
@@ -305,6 +374,24 @@ class TestDockerTarball(TestInfrahubDockerClient):
         assert older not in output, f"--latest fell back to the older unencrypted archive:\n{output}"
         assert compose_container_runtimes(project) == before, "the deployment was touched despite the refusal"
 
+        # 6b. The key offered through INFRAHUB_DECRYPT_KEY reaches the restore. The variable
+        #     points at a path that does not exist, so the run still fails — but on loading the
+        #     key rather than on the "no key was passed" gate, which is only possible if the
+        #     variable was read. A restore that got as far as a container would be a far more
+        #     expensive way to assert the same thing.
+        from_env = run_cli(
+            backup_binary,
+            ["--project", project, "--backup-dir", str(backup_dir), "restore", "--latest"],
+            env={"INFRAHUB_DECRYPT_KEY": str(tmp_path / "absent.key")},
+        )
+        assert from_env.returncode != 0, f"expected a non-zero exit:\n{from_env.stdout}\n{from_env.stderr}"
+        output = from_env.stdout + from_env.stderr
+        assert "failed to load decryption key" in output, f"INFRAHUB_DECRYPT_KEY did not reach the restore:\n{output}"
+        assert "is encrypted" not in output, f"the key from the environment was not seen at all:\n{output}"
+        assert compose_container_runtimes(project) == before, (
+            "the deployment was touched by a run whose key could not be loaded"
+        )
+
         # 7. The same archive, with the key. A non-zero exit raises (FR-007).
         result = run_restore(
             backup_binary,
@@ -323,11 +410,16 @@ class TestDockerTarball(TestInfrahubDockerClient):
         expected_line = f"Restoring latest backup {selected} from local:{backup_dir}"
         assert expected_line in output, f"selection was not reported as {expected_line!r}:\n{output}"
 
-        # 8. The pool is as it was: the plaintext copy the decryption made is not left behind
+        # 8. The pool is as it was: every archive still there, and no plaintext left behind
         #    for the next --latest to rank.
-        assert _archives(backup_dir) == sorted([selected, older]), (
+        assert _archives(backup_dir) == sorted([selected, older, twin.name]), (
             f"unexpected backup directory contents: {sorted(path.name for path in backup_dir.iterdir())}"
         )
+        assert twin.read_text() == twin_body, (
+            f"{twin.name} was overwritten by the decryption of {selected}, which shares its timestamp"
+        )
+        leftovers = [path.name for path in backup_dir.iterdir() if path.name.startswith("restore-")]
+        assert not leftovers, f"temporary restore files were left behind: {leftovers}"
 
         # 9. The encrypted archive's data is back: it really was restored.
         await wait_for_http(f"{url}/api/config", timeout=180.0, interval=1.0)

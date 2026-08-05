@@ -47,7 +47,14 @@ class TestDockerS3(TestInfrahubDockerClient):
     async def test_backup_restore_s3_tarball(
         self, infrahub_compose, infrahub_port, backup_binary, minio_docker, tmp_path
     ):
-        """Create a tarball backup uploaded to S3, restore from S3, and verify."""
+        """Create a tarball backup uploaded to S3, restore from S3, and verify.
+
+        The upload keeps its local copy, so the restore below runs against the state
+        `create --s3-upload --s3-keep-local` leaves on every host: the same archive name in
+        the bucket and in the backup directory. A positional-URI restore used to download onto
+        that name and then delete it, consuming the local copy an operator reaches for when
+        the bucket is unreachable — which is why the local copy is checked afterwards.
+        """
         url = f"http://localhost:{infrahub_port}"
         project = infrahub_compose.project_name
         minio = minio_docker
@@ -60,7 +67,7 @@ class TestDockerS3(TestInfrahubDockerClient):
         # 1. Seed test data
         seed = await seed_infrahub_data(url, ADMIN_TOKEN)
 
-        # 2. Create backup with S3 upload
+        # 2. Create backup with S3 upload, keeping the local copy
         run_backup(
             backup_binary,
             [
@@ -77,9 +84,14 @@ class TestDockerS3(TestInfrahubDockerClient):
                 "create",
                 "--force",
                 "--s3-upload",
+                "--s3-keep-local",
             ],
             env=s3_env,
         )
+        uploaded = _archives(tmp_path)
+        assert len(uploaded) == 1, f"expected exactly one local archive after the upload, found {uploaded}"
+        local_copy = tmp_path / uploaded[0]
+        local_digest = _digest(local_copy)
 
         # 3. Find the backup key in S3
         s3_key = get_s3_backup_key(
@@ -103,6 +115,8 @@ class TestDockerS3(TestInfrahubDockerClient):
             [
                 "--project",
                 project,
+                "--backup-dir",
+                str(tmp_path),
                 "--s3-bucket",
                 minio["bucket"],
                 "--s3-endpoint",
@@ -115,10 +129,17 @@ class TestDockerS3(TestInfrahubDockerClient):
             env=s3_env,
         )
 
-        # 6. Wait for Infrahub to recover
+        # 6. The local archive of the same name is still there, byte for byte, and the
+        #    download the restore made is not.
+        assert local_copy.exists(), f"{local_copy.name} was deleted from the backup directory"
+        assert _digest(local_copy) == local_digest, f"{local_copy.name} was overwritten by the download"
+        leftovers = [path.name for path in tmp_path.iterdir() if path.name.startswith("restore-")]
+        assert not leftovers, f"temporary downloads were left behind: {leftovers}"
+
+        # 7. Wait for Infrahub to recover
         await wait_for_http(f"{url}/api/config", timeout=180.0, interval=1.0)
 
-        # 7. Verify the tag is back
+        # 8. Verify the tag is back
         await verify_infrahub_data(url, ADMIN_TOKEN, seed)
 
     async def test_restore_latest_from_s3(self, infrahub_compose, infrahub_port, backup_binary, minio_docker, tmp_path):
