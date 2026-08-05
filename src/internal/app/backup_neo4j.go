@@ -319,6 +319,25 @@ func (iops *InfrahubOps) backupNeo4jCommunity(backupDir string) (retErr error) {
 		return fmt.Errorf("failed to prepare local dump directory: %w", err)
 	}
 
+	dumpFilename := fmt.Sprintf("%s.dump", iops.config.Neo4jDatabase)
+	remoteDumpPath := neo4jRemoteWorkDir + "/" + dumpFilename
+
+	// The dump is a byproduct of this backup, and it lands in the very directory a later
+	// restore copies an archive's dump into. Left behind, it is a complete, loadable
+	// archive of *this* deployment sitting where the loader looks — so the archive an
+	// operator names for a restore is not necessarily what gets loaded. Removing it is
+	// half of that fix; restoreNeo4j clearing the directory before it copies is the other.
+	//
+	// Deferred, and registered before the dump runs, so a dump that was written but could
+	// not be copied out is cleaned up as well. The deferred watchdog cleanup below it
+	// removes the artifacts that share this directory, so a plain `rm -f` of the dump is
+	// what keeps the two from stepping on each other.
+	defer func() {
+		if _, err := iops.Exec("database", []string{"rm", "-f", remoteDumpPath}, nil); err != nil {
+			logrus.Warnf("Failed to remove the temporary Neo4j dump %s: %v", remoteDumpPath, err)
+		}
+	}()
+
 	dumpCmd := []string{
 		"neo4j-admin", "database", "dump",
 		"--overwrite-destination=true",
@@ -329,8 +348,7 @@ func (iops *InfrahubOps) backupNeo4jCommunity(backupDir string) (retErr error) {
 		return fmt.Errorf("failed to dump neo4j database: %w\nOutput: %v", dumpErr, output)
 	}
 
-	dumpFilename := fmt.Sprintf("%s.dump", iops.config.Neo4jDatabase)
-	if err := iops.CopyFrom("database", neo4jRemoteWorkDir+"/"+dumpFilename, filepath.Join(databaseDir, dumpFilename)); err != nil {
+	if err := iops.CopyFrom("database", remoteDumpPath, filepath.Join(databaseDir, dumpFilename)); err != nil {
 		return fmt.Errorf("failed to copy neo4j dump: %w", err)
 	}
 
@@ -341,12 +359,30 @@ func (iops *InfrahubOps) backupNeo4jCommunity(backupDir string) (retErr error) {
 func (iops *InfrahubOps) restoreNeo4j(workDir, neo4jEdition string, restoreMigrateFormat bool) error {
 	backupPath := filepath.Join(workDir, "backup", "database")
 
+	// Clear the destination before copying into it, and abort if it cannot be cleared.
+	// Neither backend replaces a directory that already exists: `docker cp` copies the
+	// source *inside* it, `kubectl cp` merges *into* it. So whatever an earlier run left
+	// there decides where the archive's dump ends up and which dump the loader then reads
+	// — the archive's, or the leftover one. Removing the directory first makes the copy's
+	// shape the same on both backends and on every run, which is what makes the dump that
+	// is loaded necessarily the one from the archive that was asked for.
+	//
+	// It also means the cleanup below is best-effort in fact as well as in name: a failed
+	// removal can no longer decide a later restore.
+	if _, err := iops.Exec("database", []string{"rm", "-rf", neo4jTempBackupDir}, nil); err != nil {
+		return fmt.Errorf("failed to clear the temporary Neo4j restore directory %s: %w", neo4jTempBackupDir, err)
+	}
+
 	if err := iops.CopyTo("database", backupPath, neo4jTempBackupDir); err != nil {
 		return fmt.Errorf("failed to copy backup to container: %w", err)
 	}
 	defer func() {
+		// The community path removes this directory itself, and a container that is
+		// restarting after the restore refuses the exec outright, so a failure here is
+		// ordinary rather than alarming — and harmless, because the next restore clears the
+		// directory before it copies.
 		if _, err := iops.Exec("database", []string{"rm", "-rf", neo4jTempBackupDir}, nil); err != nil {
-			logrus.Warnf("Failed to cleanup temporary Neo4j backup data (this is expected for community restore method): %v", err)
+			logrus.Warnf("Failed to remove the temporary Neo4j restore directory %s; it is cleared again before the next restore copies into it: %v", neo4jTempBackupDir, err)
 		}
 	}()
 
