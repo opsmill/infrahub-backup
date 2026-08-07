@@ -263,6 +263,7 @@ The codebase uses explicit error wrapping with `fmt.Errorf` for context. All com
 - The explanation answers "why" questions, not just "what" or "how"
 
 ## Active Technologies
+
 - Go 1.25.0 + `github.com/PlakarKorp/kloset` (target stable v1.1.0), `go-kloset-sdk` v1.1.0 (fallback path), `integration-postgresql` v1.1.0-beta.7, `integration-fs`/`integration-s3`, `cobra`, `viper`, `logrus`, `pgx/v5` (retained for the separate task-manager tool); `testcontainers-go` for integration tests (003-upstream-plakar-integrations)
 - kloset repository — `fs://` (local dir) or `s3://` (object store); plaintext by default (unchanged) (003-upstream-plakar-integrations)
 - Go 1.25.0 + `github.com/PlakarKorp/kloset` v1.1.0 — `encryption` (symmetric: `NewDefaultConfiguration`, `DeriveKey`, `DeriveCanary`, `VerifyCanary`), `connectors/storage` (`Configuration.Encryption`, `NewConfigurationFromBytes`), `repository.New(secret, …)`; builds on the 003 runner (`runner.go`, `run_connector.go`) (004-plakar-encryption)

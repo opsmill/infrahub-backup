@@ -4,6 +4,9 @@ extends: default
 ignore: |
   docs/node_modules/
   .git/
+  # Vendored spec-kit tooling — installed by `speckit`, not authored here, and
+  # reformatting it would be overwritten on the next upgrade.
+  .specify/
 
 rules:
   braces:
