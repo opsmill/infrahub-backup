@@ -1,0 +1,57 @@
+# Throwaway Infrahub-shaped stack, Neo4j ENTERPRISE — exercises the ONLINE
+# neo4j:// path (neo4j-admin database backup --from=database:6362), which needs
+# the backup service enabled and listening on all interfaces so the co-located
+# runner container can reach it by service name.
+services:
+  database:
+    image: neo4j:2025.10.1-enterprise
+    environment:
+      NEO4J_AUTH: neo4j/e2epassword
+      NEO4J_ACCEPT_LICENSE_AGREEMENT: "yes"
+      NEO4J_server_backup_enabled: "true"
+      NEO4J_server_backup_listen__address: "0.0.0.0:6362"
+      NEO4J_server_memory_heap_max__size: 512m
+      NEO4J_server_memory_pagecache_size: 256m
+    volumes:
+      - neo4j-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p e2epassword 'RETURN 1' || exit 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 40
+
+  task-manager-db:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: prefect
+      POSTGRES_PASSWORD: prefectpass
+      POSTGRES_DB: prefect
+    volumes:
+      - pg-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U prefect -d prefect"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  infrahub-server:
+    image: alpine:3
+    command: ["sleep", "infinity"]
+    environment:
+      INFRAHUB_DB_DATABASE: neo4j
+      INFRAHUB_DB_USERNAME: neo4j
+      INFRAHUB_DB_PASSWORD: e2epassword
+
+  task-manager:
+    image: alpine:3
+    command: ["sleep", "infinity"]
+    environment:
+      PREFECT_SERVER_DATABASE_CONNECTION_URL: postgresql+asyncpg://prefect:prefectpass@task-manager-db:5432/prefect
+
+  task-worker:
+    image: alpine:3
+    command: ["sleep", "infinity"]
+
+volumes:
+  neo4j-data:
+  pg-data:

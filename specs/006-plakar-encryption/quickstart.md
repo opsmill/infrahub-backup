@@ -70,6 +70,19 @@ docker inspect <runner-cid> --format '{{json .Args}} {{json .Config.Env}}'   # �
 
 ## Test recipe (throwaway Infrahub, like 003)
 
+> **Automated.** This recipe is implemented by [`test/e2e/run-e2e.sh`](../../test/e2e/run-e2e.sh),
+> which brings up its own throwaway stack, seeds it, and asserts the wipe emptied
+> both databases before restoring. Prefer it over the manual steps below:
+>
+> ```bash
+> ./test/e2e/run-e2e.sh community          # neo4j+offline://
+> ./test/e2e/run-e2e.sh enterprise         # neo4j://
+> ENCRYPT=1 ./test/e2e/run-e2e.sh community
+> ```
+>
+> The manual commands that follow assume a deployment you already have; the
+> `restoretest` project name is a placeholder for whatever yours is called.
+
 ```bash
 # 1. encrypted backup of the throwaway
 INFRAHUB_BACKUP_PASSPHRASE=testpass infrahub-backup create --backend plakar --repo /tmp/encrepo --project restoretest --force
@@ -153,9 +166,11 @@ go list -m github.com/opsmill/plakar-integration-neo4j   # expect: v0.1.0
 ### 6. Re-run both Neo4j round-trips through the external module
 
 ```bash
-# Enterprise online (neo4j://) and Community offline (neo4j+offline://) — same checks as 003
-infrahub-backup create  --backend plakar --repo /tmp/extrepo --project restoretest --force
-infrahub-backup restore --backend plakar --repo /tmp/extrepo --project restoretest --force
+# Both editions, plus the encrypted variant. Each run builds its own throwaway
+# stack and asserts the wipe emptied the databases before restoring.
+./test/e2e/run-e2e.sh community            # neo4j+offline:// (offline dump/load)
+./test/e2e/run-e2e.sh enterprise           # neo4j:// (online backup/restore)
+ENCRYPT=1 ./test/e2e/run-e2e.sh community  # encrypted repository
 ```
 
 ### 7. Author the hub recipe (submit only after steps 2–3 pass)
