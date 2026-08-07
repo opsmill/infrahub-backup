@@ -1,5 +1,7 @@
 # Phase 0 Research: Rework Plakar backend onto upstream database integrations
 
+> **⚠️ Partly superseded (2026-08-07).** R-decisions about consuming the Neo4j integration "from the fork via `go.mod replace` until upstream merges/publishes the standalone mirror" no longer apply — there is no upstream merge to wait for. It now lives at `opsmill/plakar-integration-neo4j` and is consumed as a tagged external dependency. See [SUPERSEDED-BY-004.md](./SUPERSEDED-BY-004.md).
+
 **Feature**: `003-upstream-plakar-integrations` · **Date**: 2026-06-29
 
 This document resolves the unknowns flagged in the spec's Assumptions & Dependencies and Technical Context. Each item is recorded as Decision / Rationale / Alternatives.

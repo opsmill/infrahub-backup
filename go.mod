@@ -4,7 +4,6 @@ go 1.25.0
 
 require (
 	github.com/PlakarKorp/integration-fs v1.1.0-beta.5
-	github.com/PlakarKorp/integration-neo4j v0.0.0-00010101000000-000000000000
 	github.com/PlakarKorp/integration-postgresql v1.1.0-beta.7
 	github.com/PlakarKorp/integration-s3 v1.1.0-beta.5
 	github.com/PlakarKorp/kloset v1.1.0
@@ -48,7 +47,7 @@ require (
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99 // indirect
-	github.com/klauspost/compress v1.18.2 // indirect
+	github.com/klauspost/compress v1.18.5 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/kr/text v0.2.0 // indirect
@@ -59,6 +58,7 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/nickball/go-aes-key-wrap v0.0.0-20170929221519-1c3aa3e4dfc5 // indirect
+	github.com/opsmill/plakar-integration-neo4j v0.1.0
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/pierrec/lz4/v4 v4.1.27 // indirect
@@ -97,5 +97,3 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 	modernc.org/sqlite v1.51.0 // indirect
 )
-
-replace github.com/PlakarKorp/integration-neo4j => ./contrib/integration-neo4j

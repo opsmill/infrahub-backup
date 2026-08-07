@@ -1,5 +1,7 @@
 # Implementation Plan: Rework Plakar backend onto upstream database integrations
 
+> **⚠️ Partly superseded (2026-08-07).** Where this plan says the Neo4j integration is developed in a fork worktree of `PlakarKorp/integrations` under module `github.com/PlakarKorp/integration-neo4j` and contributed upstream, read instead: its own repository `opsmill/plakar-integration-neo4j`, module `github.com/opsmill/plakar-integration-neo4j`, distributed via a hub recipe. See [SUPERSEDED-BY-004.md](./SUPERSEDED-BY-004.md).
+
 **Branch**: `003-upstream-plakar-integrations` | **Date**: 2026-06-29 | **Spec**: [spec.md](./spec.md)
 **Input**: Feature specification from `specs/003-upstream-plakar-integrations/spec.md`
 

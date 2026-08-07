@@ -1,6 +1,8 @@
-# Quickstart: encrypted Plakar backups
+# Quickstart: encrypted Plakar backups, and the extracted Neo4j integration
 
 **Feature**: `004-plakar-encryption` (builds on 003)
+
+Workstream A (encryption) is operator-facing and **done**. Workstream B (integration extraction) is maintainer-facing and **planned** — its commands below are the intended sequence, not a record of completed runs.
 
 ## Operator — encrypted backup & restore
 
@@ -55,3 +57,102 @@ INFRAHUB_BACKUP_PASSPHRASE=testpass infrahub-backup restore --backend plakar --r
 # 4. negative: restore with a wrong passphrase → canary failure, no changes
 INFRAHUB_BACKUP_PASSPHRASE=wrong infrahub-backup restore --backend plakar --repo /tmp/encrepo --project restoretest --force
 ```
+
+---
+
+## Maintainer — extract the Neo4j integration (workstream B, planned)
+
+### 1. Seed the new repository from the fork's subtree
+
+```bash
+# The fork's neo4j/ subtree is the complete source — contrib/ lacks plugin/, tests/, LICENSE, CI
+git clone --branch integration/neo4j --single-branch \
+    https://github.com/BeArchiTek/integrations.git /tmp/fork
+mkdir /tmp/plakar-integration-neo4j
+cp -R /tmp/fork/neo4j/. /tmp/plakar-integration-neo4j/
+cd /tmp/plakar-integration-neo4j
+
+# Module path: github.com/PlakarKorp/integration-neo4j -> github.com/opsmill/plakar-integration-neo4j
+#   go.mod module line + the two plugin/ entrypoint imports
+# manifest.yaml: tier official->third-party, homepage/contact -> OpsMill  (see contracts/neo4j-integration-repo.md)
+# LICENSE: add the OpsMill 2026 copyright line alongside PlakarKorp 2025
+# .github/workflows/test.yml: drop the monorepo `neo4j/` working-directory assumption
+```
+
+### 2. Verify before publishing (cheaper than after)
+
+```bash
+go build ./... && go vet ./...
+make build                      # must yield neo4jImporter AND neo4jExporter
+make test                       # testcontainers; needs a quiet Docker host
+plakar pkg create ./manifest.yaml v0.1.0
+
+# Manifest/entrypoint agreement — the defect contrib/ carried (VR-8).
+# Every declared executable must have a plugin dir, and vice versa:
+grep -E '^\s+executable:' manifest.yaml | awk '{print $2}' | sort > /tmp/declared
+ls plugin/ | sed 's/neo4j-importer/neo4jImporter/; s/neo4j-exporter/neo4jExporter/' | sort > /tmp/built
+diff /tmp/declared /tmp/built   # must be empty
+```
+
+### 3. Publish with fresh history
+
+```bash
+rm -rf .git && git init && git add -A
+git commit -m "feat: Neo4j integration for Plakar (Enterprise online + Community offline)"
+gh repo create opsmill/plakar-integration-neo4j --public --source=. --push
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+### 4. Rewire this repository
+
+```bash
+cd ~/automation/opsmill/infrahub-backup
+git rm -r contrib/integration-neo4j
+
+# go.mod: drop `replace github.com/PlakarKorp/integration-neo4j => ./contrib/integration-neo4j`
+go get github.com/opsmill/plakar-integration-neo4j@v0.1.0
+# src/internal/app/connectors.go: retarget the two blank imports + the scheme-mapping comment
+go mod tidy
+./scripts/update-vendor-hash.sh        # mandatory on any go.mod change (CLAUDE.md)
+
+make build && make test && make lint && make vet
+```
+
+### 5. Verify the dependency boundary
+
+```bash
+# SDK and testcontainers serve only plugin/ and tests/ — they must not enter this build (SC-010)
+go mod graph | grep -E 'go-kloset-sdk|testcontainers'   # expect: no match
+grep -n 'replace' go.mod                                 # expect: no integration replace
+go list -m github.com/opsmill/plakar-integration-neo4j   # expect: v0.1.0
+```
+
+### 6. Re-run both Neo4j round-trips through the external module
+
+```bash
+# Enterprise online (neo4j://) and Community offline (neo4j+offline://) — same checks as 003
+infrahub-backup create  --backend plakar --repo /tmp/extrepo --project restoretest --force
+infrahub-backup restore --backend plakar --repo /tmp/extrepo --project restoretest --force
+```
+
+### 7. Author the hub recipe (submit only after steps 2–3 pass)
+
+```bash
+# community/v1.1.0/neo4j/recipe.yaml in a fork of PlakarKorp/hub
+cat <<'YAML'
+name: neo4j
+version: v0.1.0
+repository: https://github.com/opsmill/plakar-integration-neo4j
+YAML
+```
+
+### Validation checklist — workstream B (maps to Success Criteria)
+
+Not yet run; each maps to a gate in `plan.md`.
+
+- [ ] **SC-007**: clean checkout builds, vets, tests green; a plugin executable exists for every declared connector, none declared but missing.
+- [ ] **SC-008**: this repo builds/tests/lints/vets clean; no `replace`; no in-tree copy.
+- [ ] **SC-009**: `neo4j://` and `neo4j+offline://` both round-trip, matching the 003 results.
+- [ ] **SC-010**: `go mod graph` free of `go-kloset-sdk` and `testcontainers`.
+- [ ] **SC-011**: no stray `PlakarKorp/integration-neo4j` or fork references outside deliberate history.
+- [ ] **SC-012**: manifest states third-party tier + OpsMill contact; `LICENSE` credits both parties.

@@ -4,6 +4,8 @@
 
 Two audiences: an **operator** running backups/restores, and a **contributor** developing the new Neo4j integration.
 
+> **⚠️ The contributor section is superseded (2026-08-07).** Do not clone a fork of `PlakarKorp/integrations` and work in `neo4j/`. The integration lives at `opsmill/plakar-integration-neo4j` with its module at the repository root. For the extraction procedure and the current contributor workflow, see [`specs/004-plakar-encryption/quickstart.md`](../004-plakar-encryption/quickstart.md) and [SUPERSEDED-BY-004.md](./SUPERSEDED-BY-004.md). The operator section below is unaffected.
+
 ## Operator — back up & restore (after this feature ships)
 
 Prerequisites: a running Infrahub deployment (Docker Compose or Kubernetes); a backup repository (`fs://` local dir or `s3://`). **No** database client tools required on the host.

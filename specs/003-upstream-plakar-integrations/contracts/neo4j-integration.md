@@ -1,5 +1,7 @@
 # Contract: `integration-neo4j` (new upstream connector)
 
+> **⚠️ SUPERSEDED (2026-08-07)** by [`specs/004-plakar-encryption/contracts/neo4j-integration-repo.md`](../../004-plakar-encryption/contracts/neo4j-integration-repo.md). The module is **not** `github.com/PlakarKorp/integration-neo4j` and is not destined for their monorepo — it is `github.com/opsmill/plakar-integration-neo4j`, in its own repository, distributed via a `PlakarKorp/hub` recipe. The *technical* contract below (protocols, layout, behaviour) still describes the integration accurately; only its identity and distribution changed. Note also that the manifest form recorded here was later found to declare connector executables that nothing builds — see [SUPERSEDED-BY-004.md](../SUPERSEDED-BY-004.md).
+
 Generic Plakar integration for Neo4j. No Infrahub-specific assumptions. Mirrors the `integration-mysql` layout. Module: `github.com/PlakarKorp/integration-neo4j`.
 
 ## Importer protocols (source URIs)

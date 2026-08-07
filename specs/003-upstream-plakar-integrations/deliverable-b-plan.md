@@ -1,5 +1,7 @@
 # Deliverable B — tool rework: implementation plan (E2E-informed)
 
+> **⚠️ One status line superseded (2026-08-07).** Where the remaining Deliverable-A work is listed as including an "upstream PR", that item is dropped — the integration is not upstreamed. Remaining integration work is tracked as 004 workstream B. See [SUPERSEDED-BY-004.md](./SUPERSEDED-BY-004.md).
+
 **Feature**: `003-upstream-plakar-integrations` · **Date**: 2026-06-30
 **Status**: foundation + orchestration primitive DONE and tested against the live Infrahub; create/restore-flow wiring + lifecycle pending.
 

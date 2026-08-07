@@ -1,19 +1,29 @@
-# Tasks: Encrypt the Plakar backend at rest
+# Tasks: Encrypt the Plakar backend at rest, and extract the Neo4j integration
 
 **Feature**: `004-plakar-encryption` | **Branch**: `004-plakar-encryption`
-**Input**: plan.md, spec.md, research.md, data-model.md, contracts/encryption-and-keys.md, quickstart.md
+**Input**: plan.md, spec.md, research.md, data-model.md, contracts/encryption-and-keys.md, contracts/neo4j-integration-repo.md, quickstart.md
 
-**Tech**: Go 1.25.0; `github.com/PlakarKorp/kloset` v1.1.0 (`encryption`, `connectors/storage`, `repository`). No new module dependencies → no vendor-hash change. In-place extension of the 003 plakar backend + co-located runner.
+Two independent workstreams on one branch:
 
-**Tests**: requested — the spec mandates an encrypted round-trip plus negative/no-leak checks (SC-001…SC-006). Test tasks are included per story.
+- **A — encryption** (T001–T024, US1–US3): **complete and E2E-validated.**
+- **B — integration extraction** (T025–T056, US4–US5): **not started.**
+
+**Tech (A)**: Go 1.25.0; `github.com/PlakarKorp/kloset` v1.1.0 (`encryption`, `connectors/storage`, `repository`). No new module dependencies → no vendor-hash change. In-place extension of the 003 plakar backend + co-located runner.
+
+**Tech (B)**: Go 1.25.0; new external module `github.com/opsmill/plakar-integration-neo4j` v0.1.0 replacing the `replace`-directed `github.com/PlakarKorp/integration-neo4j`. **Does** change `go.mod` → vendor hash must be regenerated. The new module's `go-kloset-sdk` + `testcontainers-go` deps must not enter this repo's build graph.
+
+**Tests**: requested. A mandates an encrypted round-trip plus negative/no-leak checks (SC-001…SC-006). B's checks are verification gates plus the new repository's own testcontainers suite (SC-007…SC-012); several require a working, uncontended Docker host.
 
 ## Conventions
 
 - `[P]` = parallelizable (distinct file, no dependency on an incomplete task in the same phase).
 - `[USn]` maps to the spec's user stories. Setup/Foundational/Polish carry no story label.
-- All paths are repo-relative under `src/`.
+- Unprefixed paths are repo-relative (workstream A lives under `src/`).
+- **`NEW:` prefixes a path in the new integration repository's working tree** (`opsmill/plakar-integration-neo4j`), which is outside this repo.
 
 ---
+
+**Workstream A — encryption (Phases 1–6, T001–T024). Complete.**
 
 ## Phase 1: Setup
 
@@ -91,9 +101,92 @@
 
 ---
 
+**Workstream B — integration extraction (Phases 7–10, T025–T056). Not started.**
+
+## Phase 7: Foundational — workstream B (blocking — required by US4, US5)
+
+**Goal**: a correct local working tree for the new integration repository. Nothing about packaging, publishing, or consuming can start until the module path, provenance, license, and CI are right.
+
+- [X] T025 Seed a fresh working tree for the new repository from the fork's subtree: `git clone --branch integration/neo4j --single-branch https://github.com/BeArchiTek/integrations.git`, then copy its `neo4j/` directory to the new repo root. Use the **fork**, not `contrib/integration-neo4j` — only the fork carries `plugin/`, `tests/`, `LICENSE`, a populated `Makefile`, and CI (R6). **Done** — 19 files seeded to `~/automation/opsmill/plakar-integration-neo4j`, no `.git` carried over.
+- [X] T026 Rewrite the module path in `NEW:go.mod`: `module github.com/PlakarKorp/integration-neo4j` → `module github.com/opsmill/plakar-integration-neo4j` (FR-014).
+- [X] T027 Retarget **every** reference to the old module path — not just the plugin entrypoints. Six occurrences across five files: `NEW:plugin/neo4j-importer/neo4j-importer.go`, `NEW:plugin/neo4j-exporter/neo4j-exporter.go`, `NEW:importer/importer.go` (imports `manifest` + `neo4jconn`), `NEW:exporter/exporter.go` (`neo4jconn`), `NEW:manifest/manifest.go` (`neo4jconn`), `NEW:tests/logical/offline_test.go` (`tests/testhelpers`). **Not `[P]`** — the internal cross-package imports must all move together or the module will not resolve (FR-014).
+- [X] T028 [P] Correct provenance in `NEW:manifest.yaml`: keep the fork's **two-connector** form (each declaring `protocols: [neo4j, neo4j+offline]`); set `tier: third-party`, `homepage: https://github.com/opsmill/plakar-integration-neo4j`, `contact: mailto:support@opsmill.com`. Do **not** carry `contrib/`'s four-executable form — those executables are phantom (R10, FR-016, FR-018, VR-8, VR-9).
+- [X] T029 [P] Add the OpsMill 2026 copyright line alongside PlakarKorp's 2025 line in `NEW:LICENSE`, keeping the ISC terms, with a sentence naming the derived scaffolding (FR-019, VR-13).
+- [X] T030 [P] Verify CI in `NEW:.github/workflows/test.yml` targets a root-level module. **No change was needed** — the workflow is already root-relative (`go-version-file: go.mod`, `go build ./...`, `make build`, `go vet ./...`, `make test`). Note that in the monorepo it lived at `neo4j/.github/workflows/`, where GitHub never ran it; at the new repo root it becomes active for the first time.
+- [X] T031 [P] Merge the READMEs into `NEW:README.md` — the fork's as base, folding in the operational detail from `contrib/integration-neo4j/README.md`; retarget every URL, module path, and install instruction to the OpsMill repository. Dropped the stale DRAFT banner and the "TODO before upstream contribution" list; kept the validated-manually evidence and added the two operational gotchas (restore takes the artifact *file*; the dump output path must be `neo4j`-writable).
+- [X] T032 Set `VERSION ?= v0.1.0` in `NEW:Makefile` and confirm the `build`/`package`/`install`/`uninstall`/`test`/`clean` targets reference `./plugin/neo4j-importer` and `./plugin/neo4j-exporter` (FR-023).
+- [X] T033 Run `go mod tidy` in the new working tree, then confirm `go build ./...` and `go vet ./...` are clean (SC-007). **Done** — both clean, zero residual references to the old module path.
+
+**Checkpoint**: the new working tree builds and vets clean under the OpsMill module path, with corrected provenance. Nothing published yet.
+
+---
+
+## Phase 8: User Story 4 — Install the Neo4j integration standalone (P2)
+
+**Goal**: a Plakar user with no OpsMill software can build, install, and use the integration for both protocols.
+
+**Independent test**: from a clean checkout of the new repository (no publish required), build the package, install it into Plakar, and confirm both URI schemes back up and restore against a throwaway Neo4j.
+
+- [X] T034 [US4] Build both plugin binaries via `make build` in the new repository → `neo4jImporter` and `neo4jExporter` produced (FR-016, SC-007). **Done** — both arm64 binaries built, ~21 MB each.
+- [X] T035 [US4] Verify manifest↔entrypoint agreement — the exact defect `contrib/` carried: every `executable:` in `NEW:manifest.yaml` has a corresponding `NEW:plugin/` entrypoint and vice versa. Diff the declared set against the built set; it must be empty (VR-8, SC-007, US4 scenario 1). **Done** — declared `{neo4jExporter, neo4jImporter}` == built set, diff empty.
+- [X] T036 [P] [US4] Confirm both schemes register: `NEW:importer/importer.go` registers `neo4j` **and** `neo4j+offline` against `NewImporter`, `NEW:exporter/exporter.go` likewise against `NewExporter`, and each plugin entrypoint passes the requested protocol through for dispatch (FR-021, US4 scenario 2). **Done** — importer lines 31–32, exporter lines 26–27, both entrypoints pass the constructor to the SDK.
+- [X] T037 [US4] Run the new repository's own suite: `make test` (testcontainers — needs a working, uncontended Docker host) (SC-007). **PASS after T037a + T037b** — `TestOfflineDumpLoadRoundTrip` green in 49.5 s: seed 25 nodes → offline dump (36 files, 257.9 MiB) → wipe → load → restart → count restored.
+- [X] T037a [US4] Testcontainers could not find the Docker socket on this host: the active Docker context is **OrbStack** (`~/.orbstack/run/docker.sock`) and `/var/run/docker.sock` does not exist, so auto-discovery failed with "rootless Docker not found". Documented the required env (`DOCKER_HOST`, `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE`) in `NEW:README.md`. Not a code defect.
+- [X] T037b [US4] **Real harness defect fixed** in `NEW:tests/testhelpers/neo4j.go`. Root cause was *not* the file ownership the error message pointed at — running the lifecycle as `neo4j` removed that warning and `stop` still timed out. The cause is that `Entrypoint: ["sleep","infinity"]` makes PID 1 a process that **never reaps children**; the image's real PID 1 is `tini`. So the JVM exits and lingers as a `<defunct>` zombie, `neo4j stop` polls the pid for liveness, still sees it, and fails after its internal 120 s timeout even though the server is already down. Fix: `Entrypoint: ["tini","-g","--","sleep","infinity"]` — same stop now returns in ~11 s, no zombie. Verified as a single-variable change (exec user left as root). Documented in the helper so it is not "simplified" back.
+- [X] T038 [US4] Package it: `plakar pkg create ./manifest.yaml v0.1.0` produces the `.ptar` (FR-016, SC-007). **Done** — required installing the `plakar` CLI (`go install github.com/PlakarKorp/plakar@v1.1.3`); produced `neo4j_v0.1.0_darwin_arm64.ptar` (27 MB) containing both binaries, `manifest.yaml`, and both schemas.
+- [X] T039 [US4] Install and smoke-test out-of-process: `plakar pkg add` succeeded, and **both protocols dispatch to the out-of-process plugin** — probes produced `rpc error` (i.e. they crossed the gRPC plugin boundary) with correctly-constructed command lines: `neo4j-admin database backup --to-path=… --compress=false --from=…` and `neo4j-admin database dump --to-path=…`; the offline path even wrote `/manifest.json` into the snapshot before failing. Both fail *only* because `neo4j-admin` is not on this host's PATH — the connector shells out to it by design. **A complete host-side CLI data round-trip is not achievable here** (it needs Neo4j installed on the host, or the in-container plakar harness the README lists as not automated); the data round-trip is instead covered by T037 and by 003's live Enterprise/Community validations.
+- [X] T040 [P] [US4] Review published provenance in `NEW:manifest.yaml` and `NEW:LICENSE`: third-party tier, OpsMill homepage and contact, no Plakar-official claim, dual copyright (US4 scenario 3, SC-012). **Verified.**
+
+**Checkpoint**: US4 fully verified from a local clean checkout — deliberately provable before anything is published or `contrib/` is deleted.
+
+---
+
+## Phase 9: User Story 5 — Consume the integration as a versioned dependency (P2)
+
+**Goal**: this repository resolves the integration as an external tagged module, with no `replace` and no in-tree copy.
+
+**Independent test**: from a clean checkout, build and test this repository with no vendored integration tree and no `replace` directive present.
+
+- [X] T041 [US5] Publish with fresh history: single commit (no fork lineage, no PlakarKorp monorepo history), then create the **public** repository `opsmill/plakar-integration-neo4j` and push (FR-014). **Done** — commit `bfbcff9`, 19 files / 1566 insertions, build artifacts correctly excluded by `.gitignore`; repo public, `isFork: false`, default branch `main`.
+- [X] T042 [US5] Tag and push `v0.1.0`; confirm `go get …@v0.1.0` resolves from outside the working tree (FR-023, VR-14). **Done** — note `tag.gpgsign true` is set globally, so a lightweight `git tag` fails with "no tag message?"; an annotated tag is required. Verified end-to-end in a scratch module: `go get` resolved v0.1.0 through the proxy and a consumer importing only `importer`/`exporter` builds.
+- [X] T043 [US5] Delete the vendored tree: `git rm -r contrib/integration-neo4j` (10 tracked files) (FR-015, VR-10). **Done** — `contrib/` is gone entirely.
+- [X] T044 [US5] In `go.mod`: drop the `replace` and the old pseudo-version `require`; add `github.com/opsmill/plakar-integration-neo4j v0.1.0` (FR-015, VR-10). **Done** via `go mod edit` — zero `replace` directives remain.
+- [X] T045 [US5] Retarget the two blank imports and the scheme-mapping comment in `src/internal/app/connectors.go` (FR-017). **Done** — in-process `init()` registration unchanged, comment now records why the plugin binaries are irrelevant here.
+- [~] T046 [US5] `go mod tidy` **done**. `./scripts/update-vendor-hash.sh` **BLOCKED on this host** — and doubly so: (1) `nix` is not installed; (2) the script is Linux-only regardless, using GNU `grep -oP` and GNU `sed -i`, both of which fail on macOS (verified). The hash was **not** hand-edited (VR-15 forbids it), so `flake.nix` now carries a **stale `vendorHash`** and the Nix build will fail until it is regenerated on a Linux/Nix host or in CI. Pre-existing script portability gap, not caused by the extraction.
+- [X] T047 [US5] Verify the dependency boundary (SC-008, SC-010, VR-11). **Done, with a correction to the criterion**: `go mod graph` *does* show one edge each for `go-kloset-sdk` and `testcontainers-go`, because the integration's own `go.mod` declares them — that is the module graph, not the build list, so grepping `go mod graph` is the wrong test and would report a false failure. The meaningful checks both pass: `go list -deps ./src/...` contains **0** packages from either, and `go mod why` reports "main module does not need package" for both. Also verified: 0 `replace` directives, `contrib/` absent, integration resolves at `v0.1.0`.
+- [X] T048 [US5] `make build` clean (both CLI binaries + cross-compiled watchdog); `go vet ./src/...` clean; `make test` — all `src/internal/app` tests pass, including the full encryption suite. **`make test` exits non-zero only on `tools/neo4jwatchdog [build failed]`, which fails identically at HEAD** (verified in a detached worktree): it uses Linux-only inotify APIs with no `//go:build linux` constraint, so it never built on macOS. Pre-existing, unrelated to this work. `make lint` not run (golangci-lint not installed here).
+- [X] T049 [US5] Re-run both Neo4j round-trips in-process through the external module — Enterprise online (`neo4j://`) and Community offline (`neo4j+offline://`) — and confirm they match the results recorded for 003 (FR-021, SC-009). **PASS, all three runs.** Built a throwaway Infrahub-shaped Compose stack (only `database` and `task-manager-db` real; `infrahub-server`/`task-manager`/`task-worker` are placeholders carrying the `INFRAHUB_DB_*` / `PREFECT_*` env the tool reads for credential discovery), seeded 25 Neo4j nodes + 12 Postgres rows, backed up, wiped, restored, verified:
+  - **Community** (`neo4j+offline://`, stop → dump → restart): 25 + 12 restored.
+  - **Enterprise** (`neo4j://` online, no stop on the backup side — 5 s vs Community's 13 s, confirming the online path): 25 + 12 restored.
+  - **Community + `--encrypt`** (workstreams A and B together, encrypted repo written by the external integration): 25 + 12 restored; listing without the passphrase fails with `repository is encrypted; a passphrase is required`, and with it succeeds.
+
+  Harness at `scratchpad/e2e/` (`run-e2e.sh` + per-edition compose files); cross-built runner via `GOOS=linux GOARCH=arm64` and `INFRAHUB_RUNNER_BINARY`.
+
+  **Two flaws in my first pass, both fixed — worth recording because either would have produced a false PASS:**
+  1. *The wipe was never verified.* Neo4j is stopped/restarted around the offline backup and around every restore, so a count taken before Bolt returns silently yields empty. The first Community run printed `neo4j=` and the first encrypted run printed `neo4j=25` after the "wipe" — meaning the delete had not taken effect and the restore was being validated against data that was never removed. Added a `wait_bolt` poll plus a **hard gate** that aborts unless both stores actually read 0 before restoring.
+  2. *A bogus leak check.* I grepped the encrypted repo for the 3-byte string `E2E` and it "matched". A 3-byte sequence occurs by chance roughly every 16 MB of high-entropy data — control strings `Q7X` and `J8Q`, which never existed anywhere, matched identically. There is no leak, and the rigorous check already exists as `TestEncryptedRepoHidesPlaintext` (random 1024-byte marker **with** a plaintext control), which passes in `make test`.
+
+  Incidental: `postgres:18` moved `PGDATA` to `/var/lib/postgresql/18/docker` and requires the volume mounted at `/var/lib/postgresql`, not `.../data` — the old mount makes the container exit 1. Only affects my throwaway compose.
+
+**Checkpoint**: exactly one source of truth for the integration; both schemes still round-trip; Nix build reproducible.
+
+---
+
+## Phase 10: Polish & Cross-Cutting — workstream B
+
+- [X] T050 [P] Record the supersession of 003's upstreaming plan: new `specs/003-upstream-plakar-integrations/SUPERSEDED-BY-004.md`, banners on the six affected 003 documents, and 003's own T040 struck through as DROPPED (FR-022, SC-011). **Done 2026-08-07.**
+- [X] T051 [P] Update `CLAUDE.md`: drop the stale `integration-neo4j (new, fork build)` entry, remove the duplicated storage line, and add the "being extracted" section covering the wrong vendored manifest and the no-upstreaming guidance (FR-022). **Done 2026-08-07.**
+- [X] T052 [P] Correct `specs/004-plakar-encryption/checklists/requirements.md`, which still recorded the key model as keypair/asymmetric — contradicting the spec's own passphrase decision — and extend it with workstream-B coverage. **Done 2026-08-07.**
+- [X] T053 [P] Final stale-reference sweep, only meaningful **after** T043–T045: confirm no `PlakarKorp/integration-neo4j` or fork reference survives in code, specs, or docs outside deliberately-recorded history (FR-022, SC-011). **Done** — `git grep` finds zero occurrences outside `specs/` (where they are deliberate history). The sweep caught one live staleness: the `CLAUDE.md` section written mid-migration still described the vendored tree as "the state on disk today"; rewritten to describe the integration's real home, the in-process consumption model, the engine-coupling rule, and two pre-existing host gotchas.
+- [X] T054 [P] Author the hub recipe at `community/v1.1.0/neo4j/recipe.yaml` — three fields: `name: neo4j`, `version: v0.1.0`, `repository: https://github.com/opsmill/plakar-integration-neo4j`. **Author only; do not open the PR** (FR-020). **Done** — content staged in the session scratchpad at `hub-recipe/community/v1.1.0/neo4j/recipe.yaml`; no fork created and no PR opened, pending your go-ahead.
+- [ ] T055 Gated submission: open the `PlakarKorp/hub` PR carrying `community/v1.1.0/neo4j/recipe.yaml` (from T054) **only after** T038 (package verified), T041 (repo public) and T042 (tag resolvable) all pass. This PR is where it gets confirmed whether the builder accepts an out-of-organisation `repository` — no existing recipe has one; the fallback is the proxmox arrangement (R8, FR-020).
+- [~] T056 Final gate B. **Passing**: `make build`, `go vet ./src/...`, all `src/internal/app` tests, zero `replace` directives, no `contrib/` tree, integration resolved at `v0.1.0`, plugin/test deps absent from the build closure. **Outstanding**: the `flake.nix` vendorHash is stale and must be regenerated on a Linux/Nix host or in CI (T046); `make lint` unrun (golangci-lint absent); `make test` exits non-zero only on the pre-existing macOS-only `tools/neo4jwatchdog` build failure.
+
+---
+
 ## Dependencies & Execution Order
 
-```
+```text
 Setup (T001)
   └─ Foundational (T002 → T003,T004 → T005 → T006 → T007 → T008)   [BLOCKS all stories]
        ├─ US1 (T009,T010 → T011 → T012 → T013)        ← MVP
@@ -106,6 +199,23 @@ Setup (T001)
 - **Within Foundational**: T003/T004 are `[P]` (both new funcs in utils.go but independent — if a contributor splits them, fine; else do sequentially). T005 before T006 (open reuses the create-side config understanding); T007 before T008 (runner must know the worker flag exists).
 - **Story order**: US1 (P1, MVP) → US2 (P1) → US3 (P2). US2/US3 only touch their own command path + one app file each, so they can proceed in parallel once Foundational is done; the E2E (T021) needs an encrypted repo, so run it after US1+US2.
 
+Workstream B (T025–T056), independent of A:
+
+```text
+Foundational B (T025 → T026 → T027,T028,T029,T030,T031 → T032 → T033)   [BLOCKS US4, US5]
+  └─ US4  (T034 → T035,T036 → T037 → T038 → T039 → T040)
+       │      verifiable entirely from a LOCAL checkout — no publish, contrib/ still intact
+       └─ US5  (T041 → T042 → T043 → T044 → T045 → T046 → T047 → T048 → T049)
+                  T041/T042 publish+tag;  T043 is the point of no return for contrib/
+            └─ Polish B (T050–T052 done · T053 after T045 · T054 → T055 gated on T038+T041+T042 · T056 last)
+```
+
+- **Order is deliberate, not incidental**: US4 proves build, manifest agreement, tests, packaging and install *before* US5's T043 deletes `contrib/`. Every check that is cheaper to run while the vendored tree still exists is front-loaded.
+- **T041/T042 gate US5**: `go get` needs a resolvable tag, so publish and tag precede the dependency swap.
+- **T046 is not optional**: any `go.mod` change requires the vendor-hash regeneration, or the Nix build breaks.
+- **T055 is externally gated**: it depends on Plakar accepting the recipe, which no existing recipe's `repository` field precedents (all are in-org). Not a blocker for T025–T054 — the fallback preserves every other outcome.
+- **A and B do not interact**: B touches `go.mod`, `connectors.go`, `contrib/`, and docs; A touched the encryption path in `src/internal/app` + `main.go`. They can be worked in either order.
+
 ## Parallel Opportunities
 
 - Foundational: T003 + T004 together (`[P]`).
@@ -113,14 +223,30 @@ Setup (T001)
 - Test tasks T013, T016, T019 are `[P]` (distinct `_test.go` files).
 - Polish T020, T022, T023 are `[P]`; T021 then T024 are sequential and last.
 
+Workstream B:
+
+- Foundational B: T027, T028, T029, T030, T031 all `[P]` — five distinct files in the new tree (plugin imports, manifest, license, CI, README), none dependent on another.
+- US4: T035 + T036 `[P]` (one inspects manifest-vs-plugin sets, the other the registration calls); T040 `[P]` with anything in the phase.
+- US5: strictly sequential. Each step invalidates the previous state — publish, tag, delete, swap, tidy, hash, verify — so there is nothing safe to parallelise here.
+- Polish B: T053 and T054 `[P]`; T055 gated externally; T056 last.
+
 ## Implementation Strategy
 
 - **MVP = Phase 1 + Phase 2 + Phase 3 (US1)**: an encrypted repo that demonstrably hides plaintext (SC-001). Ship/validate this first.
 - **Increment 2 = US2**: prove the round-trip restores both editions + Postgres (SC-002) and that a wrong key fails safe (SC-003/SC-006).
 - **Increment 3 = US3 + Polish**: listing parity, the no-leak scan (SC-004), and the plaintext-unchanged regression (SC-005).
 
+Workstream B:
+
+- **Increment B1 = Phase 7 + US4**: a correct, buildable, packageable, installable integration repository — still local, `contrib/` untouched, nothing published. This is the reversible increment: if anything is wrong, discard the tree and retry at no cost to this repo.
+- **Increment B2 = US5**: publish, tag, then swap this repo onto the external module. T043 (deleting `contrib/`) is the irreversible step, and by then build, manifest agreement, tests, packaging and install have all passed.
+- **Increment B3 = Polish B**: stale-reference sweep, recipe authoring, and the externally-gated hub PR.
+- **Order between workstreams**: A is already done, so B can start immediately. If both were pending, either order works — they share no files.
+
 ## Independent Test Criteria (per story)
 
 - **US1**: encrypted repo bytes reveal no DB plaintext; `--encrypt` without a (≥12-char) passphrase refuses before create.
 - **US2**: encrypted backup→restore round-trips Neo4j (enterprise+community) + Postgres with matching counts; wrong/absent key fails fast, zero changes.
 - **US3**: list shows groups with the key, returns a clear key-required error without it.
+- **US4**: from a clean local checkout — `make build` yields a plugin executable for every declared connector with none declared-but-missing, `make test` green, `plakar pkg create` produces the `.ptar`, and the installed package backs up and restores over both `neo4j://` and `neo4j+offline://`. Manifest claims third-party tier with OpsMill contact.
+- **US5**: from a clean checkout of this repo — builds, tests, lints, vets clean with no `replace` directive and no `contrib/` tree; `go mod graph` free of `go-kloset-sdk` and `testcontainers`; both Neo4j schemes still round-trip in-process.
