@@ -308,26 +308,51 @@ func runConnectorRestore(repoPath, destURI, snapHex, passphrase, preserveOwnerDi
 	if err != nil {
 		return fmt.Errorf("creating exporter for %q: %w", destURI, err)
 	}
-	// Closed exactly once, on every path. The ownership fix-up below has to run after
-	// the close — the exporter is what drives neo4j-admin, so anything it writes while
-	// closing would otherwise be left root-owned behind the chown.
-	closed := false
-	closeExporter := func() error {
-		if closed {
-			return nil
-		}
-		closed = true
-		return exp.Close(kctx.Context)
-	}
-	defer func() { _ = closeExporter() }()
 
-	if err := snap.Export(exp, "/", &snapshot.ExportOptions{SkipPermissions: true}); err != nil {
-		return fmt.Errorf("restore failed: %w", err)
-	}
-	if err := closeExporter(); err != nil {
-		return fmt.Errorf("closing exporter for %q: %w", destURI, err)
-	}
-	return restoreOwnership()
+	return exportWithOwnershipRestored(
+		func() error {
+			if err := snap.Export(exp, "/", &snapshot.ExportOptions{SkipPermissions: true}); err != nil {
+				return fmt.Errorf("restore failed: %w", err)
+			}
+			return nil
+		},
+		func() error {
+			if err := exp.Close(kctx.Context); err != nil {
+				return fmt.Errorf("closing exporter for %q: %w", destURI, err)
+			}
+			return nil
+		},
+		restoreOwnership,
+	)
+}
+
+// exportWithOwnershipRestored drives a snapshot export, then closes the exporter,
+// then restores the data directory's ownership — the last two on EVERY exit path,
+// including a failed export.
+//
+// A failed restore needs the chown at least as much as a successful one does. The
+// runner bypasses the database image's entrypoint so --user root takes effect, so
+// by the time an export fails neo4j-admin may already have written into the shared
+// /data as real root. Returning early from there left the store root-owned, and
+// the orchestrator's deferred StartServices("database") then booted Neo4j as uid
+// 7474 on a directory it cannot read: a failed restore became a dead deployment.
+//
+// Order matters as much as coverage. The exporter is what drives neo4j-admin, so
+// anything it writes while closing has to be chowned too — hence close first,
+// ownership last (the deferred calls run in reverse registration order). The first
+// error wins, so a genuine restore failure is never masked by a clean-up error.
+func exportWithOwnershipRestored(export, closeExporter, restoreOwnership func() error) (retErr error) {
+	defer func() {
+		if err := restoreOwnership(); err != nil && retErr == nil {
+			retErr = err
+		}
+	}()
+	defer func() {
+		if err := closeExporter(); err != nil && retErr == nil {
+			retErr = err
+		}
+	}()
+	return export()
 }
 
 func parseMAC(s string) (objects.MAC, error) {

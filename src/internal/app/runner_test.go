@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -101,6 +102,66 @@ func TestPreserveOwnershipWalksATreeGrownDuringRestore(t *testing.T) {
 	if err := apply(); err != nil {
 		t.Errorf("applying preserved ownership over a grown tree errored: %v", err)
 	}
+}
+
+// A failed restore needs the ownership fix-up as much as a successful one: by the
+// time an export fails, neo4j-admin may already have written into the shared /data
+// as real root, and a root-owned store is one Neo4j (uid 7474) will not start on.
+// The close has to happen before the chown, because the exporter is what drives
+// neo4j-admin. These cases pin both.
+func TestExportWithOwnershipRestored(t *testing.T) {
+	steps := func() (*[]string, func(string, error) func() error) {
+		var calls []string
+		return &calls, func(name string, err error) func() error {
+			return func() error { calls = append(calls, name); return err }
+		}
+	}
+
+	t.Run("a failed export still closes and restores ownership", func(t *testing.T) {
+		calls, step := steps()
+		exportErr := errors.New("neo4j-admin exited 1")
+		err := exportWithOwnershipRestored(step("export", exportErr), step("close", nil), step("chown", nil))
+		if !errors.Is(err, exportErr) {
+			t.Fatalf("err = %v, want the export error", err)
+		}
+		if got := strings.Join(*calls, ","); got != "export,close,chown" {
+			t.Fatalf("call order = %q, want \"export,close,chown\"", got)
+		}
+	})
+
+	t.Run("a failing close still restores ownership", func(t *testing.T) {
+		calls, step := steps()
+		closeErr := errors.New("closing exporter")
+		err := exportWithOwnershipRestored(step("export", nil), step("close", closeErr), step("chown", nil))
+		if !errors.Is(err, closeErr) {
+			t.Fatalf("err = %v, want the close error", err)
+		}
+		if got := strings.Join(*calls, ","); got != "export,close,chown" {
+			t.Fatalf("call order = %q, want \"export,close,chown\"", got)
+		}
+	})
+
+	t.Run("the restore failure wins over a clean-up failure", func(t *testing.T) {
+		_, step := steps()
+		exportErr := errors.New("restore failed")
+		err := exportWithOwnershipRestored(
+			step("export", exportErr),
+			step("close", errors.New("close also failed")),
+			step("chown", errors.New("chown also failed")),
+		)
+		if !errors.Is(err, exportErr) {
+			t.Fatalf("err = %v, want the export error to win", err)
+		}
+	})
+
+	t.Run("a chown failure on an otherwise clean restore is reported", func(t *testing.T) {
+		_, step := steps()
+		chownErr := errors.New("restoring ownership of /data")
+		err := exportWithOwnershipRestored(step("export", nil), step("close", nil), step("chown", chownErr))
+		if !errors.Is(err, chownErr) {
+			t.Fatalf("err = %v, want the chown error", err)
+		}
+	})
 }
 
 // containerReachable is what lets the runner reach an S3 endpoint published on the
