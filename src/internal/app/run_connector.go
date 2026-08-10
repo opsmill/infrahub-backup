@@ -5,8 +5,11 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/PlakarKorp/kloset/connectors"
 	"github.com/PlakarKorp/kloset/connectors/exporter"
@@ -15,6 +18,7 @@ import (
 	"github.com/PlakarKorp/kloset/objects"
 	"github.com/PlakarKorp/kloset/repository"
 	"github.com/PlakarKorp/kloset/snapshot"
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
 
@@ -56,6 +60,7 @@ func RunConnectorCommand() *cobra.Command {
 
 	var restoreOpts []string
 	var restorePassphraseStdin bool
+	var restorePreserveOwner string
 	restoreCmd := &cobra.Command{
 		Use:          "restore <repo> <dest-uri> <snapshot-hex>",
 		Args:         cobra.ExactArgs(3),
@@ -65,10 +70,12 @@ func RunConnectorCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runConnectorRestore(args[0], args[1], args[2], passphrase, parseKV(restoreOpts))
+			return runConnectorRestore(args[0], args[1], args[2], passphrase, restorePreserveOwner, parseKV(restoreOpts))
 		},
 	}
 	restoreCmd.Flags().StringArrayVar(&restoreOpts, "opt", nil, "connector option key=value (repeatable)")
+	restoreCmd.Flags().StringVar(&restorePreserveOwner, "preserve-owner", "",
+		"directory whose ownership must survive the restore (the DB data dir, written as root)")
 	addPassphraseStdinFlag(restoreCmd, &restorePassphraseStdin)
 
 	// launch: exercise the co-located runner launcher through the tool (testing the
@@ -199,8 +206,77 @@ func runConnectorBackup(repoPath, sourceURI, passphrase string, opts map[string]
 	return nil
 }
 
+// preserveOwnership records the ownership of dir and returns a function that re-applies
+// it to dir and everything beneath it.
+//
+// The runner bypasses the database image's entrypoint so that --user root takes effect,
+// which means a restore writes the data directory as root. Neo4j runs as its own user
+// (uid 7474) and will not start on a database directory it cannot read, so the ownership
+// the directory had before the restore has to be the ownership it has after. Until the
+// entrypoint was bypassed this was correct only by accident: neo4j's entrypoint dropped
+// privileges, so the restore happened to run as the right user.
+//
+// An empty dir disables this, and a dir that does not exist is not an error — the
+// Postgres restore shares no volumes and has no data directory here.
+func preserveOwnership(dir string) (func() error, error) {
+	if dir == "" {
+		return func() error { return nil }, nil
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return func() error { return nil }, nil
+		}
+		return nil, fmt.Errorf("inspecting %s before restore: %w", dir, err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		// Not a platform that reports uid/gid; the runner is always Linux, so this
+		// only spares a developer running the worker directly on another OS.
+		logrus.Debugf("ownership of %s cannot be read on this platform; leaving it alone", dir)
+		return func() error { return nil }, nil
+	}
+	uid, gid := int(stat.Uid), int(stat.Gid)
+
+	return func() error {
+		restored := 0
+		err := filepath.WalkDir(dir, func(path string, _ fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			fi, err := os.Lstat(path)
+			if err != nil {
+				return err
+			}
+			st, ok := fi.Sys().(*syscall.Stat_t)
+			if ok && int(st.Uid) == uid && int(st.Gid) == gid {
+				return nil
+			}
+			if err := os.Lchown(path, uid, gid); err != nil {
+				return fmt.Errorf("restoring ownership of %s: %w", path, err)
+			}
+			restored++
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		if restored > 0 {
+			logrus.Infof("Restored ownership of %d path(s) under %s to %d:%d", restored, dir, uid, gid)
+		}
+		return nil
+	}, nil
+}
+
 // runConnectorRestore loads the snapshot and drives the registered exporter for destURI.
-func runConnectorRestore(repoPath, destURI, snapHex, passphrase string, opts map[string]string) error {
+func runConnectorRestore(repoPath, destURI, snapHex, passphrase, preserveOwnerDir string, opts map[string]string) error {
+	// Captured before the export so it reflects the ownership the database had, not
+	// whatever the restore leaves behind.
+	restoreOwnership, err := preserveOwnership(preserveOwnerDir)
+	if err != nil {
+		return err
+	}
+
 	cfg := &PlakarConfig{RepoPath: repoPath, Passphrase: passphrase}
 	kctx, err := initPlakarContext(cfg)
 	if err != nil {
@@ -232,12 +308,26 @@ func runConnectorRestore(repoPath, destURI, snapHex, passphrase string, opts map
 	if err != nil {
 		return fmt.Errorf("creating exporter for %q: %w", destURI, err)
 	}
-	defer exp.Close(kctx.Context)
+	// Closed exactly once, on every path. The ownership fix-up below has to run after
+	// the close — the exporter is what drives neo4j-admin, so anything it writes while
+	// closing would otherwise be left root-owned behind the chown.
+	closed := false
+	closeExporter := func() error {
+		if closed {
+			return nil
+		}
+		closed = true
+		return exp.Close(kctx.Context)
+	}
+	defer func() { _ = closeExporter() }()
 
 	if err := snap.Export(exp, "/", &snapshot.ExportOptions{SkipPermissions: true}); err != nil {
 		return fmt.Errorf("restore failed: %w", err)
 	}
-	return nil
+	if err := closeExporter(); err != nil {
+		return fmt.Errorf("closing exporter for %q: %w", destURI, err)
+	}
+	return restoreOwnership()
 }
 
 func parseMAC(s string) (objects.MAC, error) {

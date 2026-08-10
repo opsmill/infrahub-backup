@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -55,6 +56,14 @@ func LaunchComposeRestore(project, dbService, repoPath, destURI, snapshot, passp
 	}
 	repoArg := repoArgFor(repoPath)
 	args = append(args, "__run-connector", "restore", repoArg, destURI, snapshot)
+	if mountDBVolumes {
+		// The runner writes into the database's own data volume, and now does so as
+		// real root (see the entrypoint note in composeRunnerArgs). A data directory
+		// the database user cannot read is one the server will not start on, so the
+		// worker restores the directory's original ownership when it is done. 003
+		// recorded this as the tool's job rather than the connector's.
+		args = append(args, "--preserve-owner", dbDataDir)
+	}
 	if passphrase != "" {
 		args = append(args, "--passphrase-stdin")
 	}
@@ -98,16 +107,22 @@ func composeRunnerArgs(project, dbService, repoPath string, mountDBVolumes, with
 		"--user", "root", // neo4j-admin/pg tools; online backup tolerates root
 		"-e", "HOME=/tmp",
 		"-w", "/tmp", // kloset writes a relative "<ver>/store" cache under CWD — keep it writable
-		"-v", bin+":/usr/local/bin/infrahub-backup:ro",
+		"-v", bin+":"+runnerBinaryPath+":ro",
 	)
 	if local, hostPath := parseRepoLocation(repoPath); local {
 		// Local repo, spelled either /path or fs:///path — bind-mount the host
 		// directory into the runner, where repoArgFor points the worker at /repo.
 		args = append(args, "-v", hostPath+":/repo")
 	} else if strings.HasPrefix(repoPath, "s3://") {
+		// The runner is on the database's compose network, so it has no route to a
+		// service published on the host's loopback. An operator running MinIO or
+		// another S3-compatible store on the Docker host is a normal deployment, so
+		// map the host in and rewrite loopback endpoints to it rather than failing
+		// with a bare "connection refused" from inside the container.
+		args = append(args, "--add-host", dockerHostAlias+":host-gateway")
 		for _, e := range []string{"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "INFRAHUB_S3_ENDPOINT"} {
 			if v := os.Getenv(e); v != "" {
-				args = append(args, "-e", e+"="+v)
+				args = append(args, "-e", e+"="+containerReachable(v))
 			}
 		}
 	}
@@ -115,8 +130,74 @@ func composeRunnerArgs(project, dbService, repoPath string, mountDBVolumes, with
 		// Neo4j community offline dump / restore: share the DB's data volume.
 		args = append(args, "--volumes-from", cid)
 	}
-	args = append(args, image, "/usr/local/bin/infrahub-backup")
+	// Bypass the image's own entrypoint. The runner borrows the database image for its
+	// tools (neo4j-admin, pg client) and runs our binary in it; it is not starting a
+	// database, so a server entrypoint has no work to do here — and running it silently
+	// undoes --user root above. neo4j's docker-entrypoint.sh drops to the neo4j user
+	// (uid 7474) even when started as root, which left the worker unable to read a
+	// repository directory owned by whoever ran the tool:
+	//
+	//	failed to open plakar repository /repo: open /repo/CONFIG: permission denied
+	//
+	// postgres' entrypoint honours root, so neo4j was the only image deviating from
+	// what this function already asks for. Bypassing the entrypoint keeps the tools
+	// usable — NEO4J_HOME and java come from the image's ENV, not its entrypoint.
+	//
+	// Restores then write as root, so LaunchComposeRestore asks the worker to put the
+	// data directory's ownership back; see preserveOwnership in run_connector.go.
+	args = append(args, "--entrypoint", runnerBinaryPath, image)
 	return args, nil
+}
+
+const (
+	// runnerBinaryPath is where the tool binary is mounted inside the runner, and the
+	// entrypoint the runner is started with.
+	runnerBinaryPath = "/usr/local/bin/infrahub-backup"
+	// dockerHostAlias resolves to the Docker host from inside the runner, via
+	// --add-host …:host-gateway.
+	dockerHostAlias = "host.docker.internal"
+	// dbDataDir is the database data directory shared into the runner by
+	// --volumes-from, and the directory whose ownership a restore must leave intact.
+	// Both Neo4j restore paths write here; the Postgres one restores over the wire and
+	// does not share volumes at all.
+	dbDataDir = "/data"
+)
+
+// containerReachable rewrites a loopback host in an endpoint or URI so the runner can
+// reach it, because "localhost" inside the container is the container itself.
+//
+// It only ever substitutes the host: credentials, port, path and query are untouched,
+// and anything that is not loopback is returned unchanged.
+func containerReachable(s string) string {
+	// An endpoint may be given without a scheme ("localhost:9000"), which url.Parse
+	// would read as scheme "localhost". Parse those behind a placeholder scheme and
+	// hand back the same shape they came in.
+	bare := !strings.Contains(s, "://")
+	parsed := s
+	if bare {
+		parsed = "placeholder://" + s
+	}
+
+	u, err := url.Parse(parsed)
+	if err != nil || u.Host == "" {
+		return s
+	}
+	switch u.Hostname() {
+	case "localhost", "127.0.0.1", "::1":
+	default:
+		return s
+	}
+
+	// Read the port before reassigning Host, or it is gone by the time it is asked for.
+	if port := u.Port(); port != "" {
+		u.Host = dockerHostAlias + ":" + port
+	} else {
+		u.Host = dockerHostAlias
+	}
+	if bare {
+		return strings.TrimPrefix(u.String(), "placeholder://")
+	}
+	return u.String()
 }
 
 // parseRepoLocation classifies a --repo value and, for a local repository, returns
@@ -140,13 +221,14 @@ func parseRepoLocation(repoPath string) (local bool, path string) {
 	return true, repoPath
 }
 
-// repoArgFor maps the configured repo to the path the in-container worker uses:
-// a local repo is bind-mounted at /repo; a remote URI is passed through.
+// repoArgFor maps the configured repo to the location the in-container worker opens:
+// a local repo is bind-mounted at /repo; a remote URI is passed through, with a
+// loopback host rewritten so it resolves to the Docker host rather than to the runner.
 func repoArgFor(repoPath string) string {
 	if local, _ := parseRepoLocation(repoPath); local {
 		return "/repo"
 	}
-	return repoPath
+	return containerReachable(repoPath)
 }
 
 func composeContainerID(project, service string) (string, error) {

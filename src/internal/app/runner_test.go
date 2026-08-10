@@ -1,6 +1,7 @@
 package app
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -45,9 +46,82 @@ func TestRepoArgForUsesMountPointForBothLocalSpellings(t *testing.T) {
 			t.Errorf("repoArgFor(%q) = %q, want %q — a host path cannot be opened inside the runner", repo, got, "/repo")
 		}
 	}
-	remote := "s3://key:secret@localhost:9000/bucket/prefix"
+	// A remote repo on a real host is passed through untouched.
+	remote := "s3://key:secret@minio.example.com:9000/bucket/prefix"
 	if got := repoArgFor(remote); got != remote {
 		t.Errorf("repoArgFor(%q) = %q, want it passed through unchanged", remote, got)
+	}
+
+	// A loopback host is rewritten, because inside the runner "localhost" is the
+	// runner. Everything else about the URI has to survive — dropping the port is a
+	// mistake this asserts against, having made it once.
+	loopback := "s3://key:secret@localhost:9000/bucket/prefix"
+	want := "s3://key:secret@host.docker.internal:9000/bucket/prefix"
+	if got := repoArgFor(loopback); got != want {
+		t.Errorf("repoArgFor(%q) = %q, want %q", loopback, got, want)
+	}
+}
+
+// preserveOwnership must be inert where there is nothing to preserve: the Postgres
+// restore shares no volumes, so the directory it is told about may not exist.
+func TestPreserveOwnershipIsInertWithoutADirectory(t *testing.T) {
+	for _, dir := range []string{"", filepath.Join(t.TempDir(), "absent")} {
+		apply, err := preserveOwnership(dir)
+		if err != nil {
+			t.Fatalf("preserveOwnership(%q) errored: %v", dir, err)
+		}
+		if err := apply(); err != nil {
+			t.Errorf("applying preserved ownership for %q errored: %v", dir, err)
+		}
+	}
+}
+
+// The walk has to cope with a tree that grew during the restore, including
+// subdirectories and symlinks, without erroring. The chown itself only does work where
+// the uid actually differs, which needs two uids and therefore the runner in CI; this
+// covers the traversal.
+func TestPreserveOwnershipWalksATreeGrownDuringRestore(t *testing.T) {
+	dir := t.TempDir()
+	apply, err := preserveOwnership(dir)
+	if err != nil {
+		t.Fatalf("preserveOwnership errored: %v", err)
+	}
+
+	nested := filepath.Join(dir, "databases", "neo4j")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, "store.db"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(nested, "store.db"), filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := apply(); err != nil {
+		t.Errorf("applying preserved ownership over a grown tree errored: %v", err)
+	}
+}
+
+// containerReachable is what lets the runner reach an S3 endpoint published on the
+// Docker host. It must only ever touch the host, and only for loopback.
+func TestContainerReachable(t *testing.T) {
+	for _, tc := range []struct{ name, in, want string }{
+		{"s3 uri with credentials and port", "s3://k:s@localhost:9000/b/p", "s3://k:s@host.docker.internal:9000/b/p"},
+		{"loopback ipv4", "http://127.0.0.1:9000", "http://host.docker.internal:9000"},
+		{"loopback ipv6", "http://[::1]:9000", "http://host.docker.internal:9000"},
+		{"bare host:port keeps its shape", "localhost:9000", "host.docker.internal:9000"},
+		{"no port", "http://localhost", "http://host.docker.internal"},
+		{"real host untouched", "https://s3.eu-west-1.amazonaws.com/bucket", "https://s3.eu-west-1.amazonaws.com/bucket"},
+		{"real host with port untouched", "http://minio.internal:9000/b", "http://minio.internal:9000/b"},
+		{"host merely containing localhost untouched", "http://localhost.example.com:9000", "http://localhost.example.com:9000"},
+		{"empty stays empty", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := containerReachable(tc.in); got != tc.want {
+				t.Errorf("containerReachable(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
 	}
 }
 
