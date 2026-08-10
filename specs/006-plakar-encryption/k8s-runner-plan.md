@@ -124,6 +124,47 @@ of by vigilance.
 Do this while it is still free: nothing has shipped, so there is no migration burden. Once
 backups exist in the wild, changing the layout means supporting both forever.
 
+## Revision after implementing step 1: no streaming importer is needed
+
+Building the shared emission changed the plan for the better. The two components need
+co-location for **different reasons**, and only one of them actually needs it:
+
+| Component | Tool | Why | Kubernetes transport |
+|---|---|---|---|
+| Neo4j | `neo4j-admin` | manipulates files in the data directory | must run **in the pod**: exec it there, `CopyFrom` the artifact, emit via `NewStagedImporter` |
+| PostgreSQL | `pg_dump` | speaks the wire protocol | only needs **reachability**: a port-forward lets the tool run the real connector in-process |
+
+So neither component needs `main`'s streaming importer, and **neither produces a second
+snapshot layout**:
+
+- Neo4j goes through `importer.NewStagedImporter` (shipped in the integration at
+  **v0.2.0**), which runs the same `manifest.Emit` + `emitDir` as the in-place connector.
+- PostgreSQL goes through the *real* `integration-postgresql` importer, in-process. Its
+  emission (`/00000-globals.sql`, `/0000N-<db>.dump`, plus a logical manifest) is
+  therefore identical by construction, with **no upstream change required** — which
+  matters, because that repository is not ours and exposes no staged entry point.
+
+This is strictly better than reinstating the stream helpers: alignment stops being
+something to maintain and becomes something that cannot break, for both components.
+
+The one new capability needed is a **port-forward** for the PostgreSQL component on
+Kubernetes. Verified absent today: `KubernetesBackend` has `Exec`, `ExecStreamPipe`,
+`ExecWritePipe`, `CopyTo`, `CopyFrom`, `Start`, `Stop`, `ServiceReplicas` — and nothing
+that forwards a port.
+
+### Restore needs the symmetric seam
+
+The exporter also runs `neo4j-admin` itself, and its `load()` carries knowledge worth not
+duplicating: exactly-one-artifact validation, the verified rule that `database restore`
+wants the artifact **file** while `database load` wants the **directory**, and the
+`--` separator guarding a `-`-prefixed database name.
+
+So do not reimplement it tool-side. Add the mirror of `NewStagedImporter`: let the
+integration stage records to a caller-provided directory and report the `neo4j-admin`
+argv to run, and let the tool decide *where* to run it. The integration keeps owning what
+to run and what the layout is; the tool owns only where. That split is what keeps the two
+transports honest.
+
 ## Work breakdown
 
 1. **Align the snapshot layout** per the decision above — raw artifact, database-derived name, manifest emitted, emission code shared with the integration rather than duplicated. Everything else depends on it.
