@@ -54,6 +54,18 @@ if [ "$ENCRYPT" = "1" ]; then
   KREPO="${TMPDIR:-/tmp}/e2e-${EDITION}-enc-repo"
 fi
 
+# REPO_SPELLING=uri runs the same round-trip against `fs://<path>` instead of a bare
+# path. Both are documented forms and they took different code paths in the runner:
+# the URI spelling was classified as remote, so the repository directory was never
+# bind-mounted and the worker was handed a host path that does not exist in the
+# container. Every recipe here used the bare form, which is exactly why that went
+# unnoticed — so the URI form is worth running deliberately.
+case "${REPO_SPELLING:-path}" in
+  path) REPO_ARG="$KREPO" ;;
+  uri)  REPO_ARG="fs://$KREPO" ;;
+  *) echo "REPO_SPELLING must be 'path' or 'uri' (got '${REPO_SPELLING}')" >&2; exit 2 ;;
+esac
+
 DC=(docker compose -p "$PROJ" -f "$COMPOSE")
 
 say() { printf '\n=== %s ===\n' "$*"; }
@@ -96,18 +108,18 @@ echo "  neo4j E2E nodes=$N0  postgres e2e_marker rows=$P0"
 [ "$N0" = "25" ] && [ "$P0" = "12" ] || { echo "  seed failed" >&2; exit 1; }
 
 say "backup"
-"$BACKUP" create --backend plakar --repo "$KREPO" --project "$PROJ" \
+"$BACKUP" create --backend plakar --repo "$REPO_ARG" --project "$PROJ" \
   "${CREATE_EXTRA[@]+"${CREATE_EXTRA[@]}"}" --force 2>&1 | tail -20
 BRC="${PIPESTATUS[0]}"
 [ "$BRC" = "0" ] || { echo "  backup failed (exit $BRC)" >&2; exit 1; }
 
 say "snapshots"
-"$BACKUP" --backend plakar --repo "$KREPO" snapshots list 2>&1 | tail -6
+"$BACKUP" --backend plakar --repo "$REPO_ARG" snapshots list 2>&1 | tail -6
 
 if [ "$ENCRYPT" = "1" ]; then
   say "negative: listing an encrypted repo without the passphrase must fail"
   ( unset INFRAHUB_BACKUP_PASSPHRASE
-    "$BACKUP" --backend plakar --repo "$KREPO" snapshots list 2>&1 | tail -1 )
+    "$BACKUP" --backend plakar --repo "$REPO_ARG" snapshots list 2>&1 | tail -1 )
 fi
 
 say "wipe"
@@ -124,7 +136,7 @@ if [ "$NW" != "0" ] || [ "$PW" != "0" ]; then
 fi
 
 say "restore"
-"$BACKUP" restore --backend plakar --repo "$KREPO" --project "$PROJ" --force 2>&1 | tail -20
+"$BACKUP" restore --backend plakar --repo "$REPO_ARG" --project "$PROJ" --force 2>&1 | tail -20
 RRC="${PIPESTATUS[0]}"
 [ "$RRC" = "0" ] || { echo "  restore failed (exit $RRC)" >&2; exit 1; }
 
