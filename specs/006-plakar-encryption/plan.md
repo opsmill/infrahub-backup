@@ -1,7 +1,7 @@
 # Implementation Plan: Encrypt the Plakar backend at rest, and extract the Neo4j integration
 
-**Branch**: `004-plakar-encryption` | **Date**: 2026-08-07 | **Spec**: [spec.md](./spec.md)
-**Input**: Feature specification from `specs/004-plakar-encryption/spec.md`
+**Branch**: `004-plakar-encryption` (directory renumbered to `006-`; see spec.md) | **Date**: 2026-08-07 | **Spec**: [spec.md](./spec.md)
+**Input**: Feature specification from `specs/006-plakar-encryption/spec.md`
 
 This branch carries **two independent workstreams**. Workstream A (encryption) is implemented and E2E-validated. Workstream B (integration extraction) is planned here and not yet started.
 
@@ -49,7 +49,7 @@ This branch carries **two independent workstreams**. Workstream A (encryption) i
 ### Documentation (this feature)
 
 ```text
-specs/004-plakar-encryption/
+specs/006-plakar-encryption/
 ├── plan.md · research.md · data-model.md · quickstart.md
 ├── contracts/encryption-and-keys.md      # workstream A
 ├── contracts/neo4j-integration-repo.md   # workstream B (this plan)

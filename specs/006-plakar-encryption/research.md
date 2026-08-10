@@ -1,6 +1,6 @@
 # Phase 0 Research: Encrypt the Plakar backend at rest, and extract the Neo4j integration
 
-**Feature**: `004-plakar-encryption` · **Date**: 2026-06-30, extended 2026-08-07
+**Feature**: `006-plakar-encryption` · **Date**: 2026-06-30, extended 2026-08-07
 
 Resolves the spec's open items across both workstreams. For **A (encryption)** the gating spike (key-management feasibility) is **done** and changed the design from keypair to passphrase — R1–R5. For **B (extraction)** the findings are R6–R10, all verified against the live repositories rather than inferred.
 

@@ -1,6 +1,6 @@
 # Data Model: Encrypt the Plakar backend at rest, and extract the Neo4j integration
 
-**Feature**: `004-plakar-encryption` · **Date**: 2026-06-30, extended 2026-08-07
+**Feature**: `006-plakar-encryption` · **Date**: 2026-06-30, extended 2026-08-07
 
 No application schema is introduced by either workstream. For **A (encryption)** the entities are the repository's encryption configuration and the runtime key material. For **B (extraction)** they are packaging and distribution artefacts — the integration's manifest, its connectors, and the dependency edge into this repository.
 

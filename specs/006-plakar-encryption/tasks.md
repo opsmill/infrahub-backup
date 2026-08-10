@@ -1,6 +1,6 @@
 # Tasks: Encrypt the Plakar backend at rest, and extract the Neo4j integration
 
-**Feature**: `004-plakar-encryption` | **Branch**: `004-plakar-encryption`
+**Feature**: `006-plakar-encryption` | **Branch**: `004-plakar-encryption`
 **Input**: plan.md, spec.md, research.md, data-model.md, contracts/encryption-and-keys.md, contracts/neo4j-integration-repo.md, quickstart.md
 
 Two independent workstreams on one branch:
@@ -93,7 +93,7 @@ Two independent workstreams on one branch:
 
 ## Phase 6: Polish & Cross-Cutting
 
-- [X] T020 [P] No-leak verification (SC-004, G3): grep the tool's logs/stderr from an encrypted backup for the passphrase → absent; `docker inspect` the runner container's `Args` + `Env` during a backup → passphrase absent. Record the recipe in `specs/004-plakar-encryption/quickstart.md` (extend the validation checklist).
+- [X] T020 [P] No-leak verification (SC-004, G3): grep the tool's logs/stderr from an encrypted backup for the passphrase → absent; `docker inspect` the runner container's `Args` + `Env` during a backup → passphrase absent. Record the recipe in `specs/006-plakar-encryption/quickstart.md` (extend the validation checklist).
 - [X] T021 E2E encrypted round-trip against a throwaway Infrahub (per quickstart "Test recipe"): cross-compile `GOOS=linux GOARCH=arm64 CGO_ENABLED=0`; encrypted backup → wipe → restore with the passphrase for Neo4j **Enterprise online**, Neo4j **Community offline**, and **Postgres**; assert node/row counts match source (SC-002). Then a wrong-passphrase restore → fail, no changes (SC-003/SC-006). **Backend scope**: encryption lives in the repo CONFIG and is storage-agnostic, so the `fs://` round-trip validates the encryption path for `s3://` too; if an S3 endpoint (e.g. MinIO) is readily available, add a create+list smoke check against an encrypted `s3://` repo to confirm the backend wiring carries the encrypted CONFIG (otherwise note s3 as covered-by-design, not E2E-exercised — C1).
 - [X] T022 [P] Plaintext regression (SC-005, G4): a no-`--encrypt` backup→restore still round-trips unchanged, and opening an existing 003 plaintext repo (no passphrase) is unaffected; add/extend a test in `src/internal/app/plakar_test.go`. **Also assert VR-3** (C2): opening a **plaintext** repo **with** a passphrase supplied warns and continues (`secret=nil`, no error, repo usable) — the warn-and-ignore path, not an error.
 - [X] T023 [P] Update `README.md` + `src/cmd/infrahub-backup/main.go` flag help: document `--encrypt`, `INFRAHUB_BACKUP_PASSPHRASE`, `--passphrase-file`, the 12-char minimum, the lost-passphrase warning (no escrow), and that `--encrypt-key` is tarball-only.
@@ -174,9 +174,9 @@ Two independent workstreams on one branch:
 
 ## Phase 10: Polish & Cross-Cutting — workstream B
 
-- [X] T050 [P] Record the supersession of 003's upstreaming plan: new `specs/003-upstream-plakar-integrations/SUPERSEDED-BY-004.md`, banners on the six affected 003 documents, and 003's own T040 struck through as DROPPED (FR-022, SC-011). **Done 2026-08-07.**
+- [X] T050 [P] Record the supersession of 003's upstreaming plan: new `specs/003-upstream-plakar-integrations/SUPERSEDED-BY-006.md`, banners on the six affected 003 documents, and 003's own T040 struck through as DROPPED (FR-022, SC-011). **Done 2026-08-07.**
 - [X] T051 [P] Update `CLAUDE.md`: drop the stale `integration-neo4j (new, fork build)` entry, remove the duplicated storage line, and add the "being extracted" section covering the wrong vendored manifest and the no-upstreaming guidance (FR-022). **Done 2026-08-07.**
-- [X] T052 [P] Correct `specs/004-plakar-encryption/checklists/requirements.md`, which still recorded the key model as keypair/asymmetric — contradicting the spec's own passphrase decision — and extend it with workstream-B coverage. **Done 2026-08-07.**
+- [X] T052 [P] Correct `specs/006-plakar-encryption/checklists/requirements.md`, which still recorded the key model as keypair/asymmetric — contradicting the spec's own passphrase decision — and extend it with workstream-B coverage. **Done 2026-08-07.**
 - [X] T053 [P] Final stale-reference sweep, only meaningful **after** T043–T045: confirm no `PlakarKorp/integration-neo4j` or fork reference survives in code, specs, or docs outside deliberately-recorded history (FR-022, SC-011). **Done** — `git grep` finds zero occurrences outside `specs/` (where they are deliberate history). The sweep caught one live staleness: the `CLAUDE.md` section written mid-migration still described the vendored tree as "the state on disk today"; rewritten to describe the integration's real home, the in-process consumption model, the engine-coupling rule, and two pre-existing host gotchas.
 - [X] T054 [P] Author the hub recipe at `community/v1.1.0/neo4j/recipe.yaml` — three fields: `name: neo4j`, `version: v0.1.0`, `repository: https://github.com/opsmill/plakar-integration-neo4j`. **Author only; do not open the PR** (FR-020). **Done** — content staged in the session scratchpad at `hub-recipe/community/v1.1.0/neo4j/recipe.yaml`; no fork created and no PR opened, pending your go-ahead.
 - [ ] T055 Gated submission: open the `PlakarKorp/hub` PR carrying `community/v1.1.0/neo4j/recipe.yaml` (from T054) **only after** T038 (package verified), T041 (repo public) and T042 (tag resolvable) all pass. This PR is where it gets confirmed whether the builder accepts an out-of-organisation `repository` — no existing recipe has one; the fallback is the proxmox arrangement (R8, FR-020).

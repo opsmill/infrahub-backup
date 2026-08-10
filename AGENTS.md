@@ -285,8 +285,8 @@ The codebase uses explicit error wrapping with `fmt.Errorf` for context. All com
 - Local filesystem bundle output under `--output-dir` (default `./infrahub_bundles`); no network egress beyond the target deployment (003-collect-tool)
 - Go 1.25.0 + `github.com/PlakarKorp/kloset` (target stable v1.1.0), `go-kloset-sdk` v1.1.0 (fallback path), `integration-postgresql` v1.1.0-beta.7, `integration-fs`/`integration-s3`, `cobra`, `viper`, `logrus`, `pgx/v5` (retained for the separate task-manager tool); `testcontainers-go` for integration tests (003-upstream-plakar-integrations)
 - kloset repository — `fs://` (local dir) or `s3://` (object store); plaintext by default (unchanged) (003-upstream-plakar-integrations)
-- Go 1.25.0 + `github.com/PlakarKorp/kloset` v1.1.0 — `encryption` (symmetric: `NewDefaultConfiguration`, `DeriveKey`, `DeriveCanary`, `VerifyCanary`), `connectors/storage` (`Configuration.Encryption`, `NewConfigurationFromBytes`), `repository.New(secret, …)`; builds on the 003 runner (`runner.go`, `run_connector.go`) (004-plakar-encryption)
-- kloset repository (`fs://` / `s3://`), optionally symmetric-encrypted (KDF + cipher params + canary in the repo CONFIG) (004-plakar-encryption)
+- Go 1.25.0 + `github.com/PlakarKorp/kloset` v1.1.0 — `encryption` (symmetric: `NewDefaultConfiguration`, `DeriveKey`, `DeriveCanary`, `VerifyCanary`), `connectors/storage` (`Configuration.Encryption`, `NewConfigurationFromBytes`), `repository.New(secret, …)`; builds on the 003 runner (`runner.go`, `run_connector.go`) (006-plakar-encryption)
+- kloset repository (`fs://` / `s3://`), optionally symmetric-encrypted (KDF + cipher params + canary in the repo CONFIG) (006-plakar-encryption)
 
 ### Neo4j integration — lives in its own repository
 
@@ -295,7 +295,7 @@ The Neo4j integration is **not** in this repo. It lives at **[opsmill/plakar-int
 - **Fixes to the connector belong in that repository**, released as a new tag, then picked up here with a version bump plus `scripts/update-vendor-hash.sh`. Do not vendor it back or add a `replace` to a local checkout in anything you merge — a temporary `replace` is fine while developing, but must be gone before merge.
 - **Consumption is in-process**: `src/internal/app/connectors.go` blank-imports its `importer`/`exporter` packages, whose `init()` registers the `neo4j://` and `neo4j+offline://` schemes. The integration's SDK plugin binaries exist for external `plakar pkg add` users and play no part in this repo's build. Its `go-kloset-sdk` and `testcontainers-go` dependencies serve only those plugins and its own tests, and are verified absent from this repo's build closure.
 - **Engine coupling**: do not adopt a new kloset version here until a compatible integration release exists — Go's minimal-version selection compiles the integration against whichever kloset wins, and it can no longer be patched in place.
-- Plakar have advised that community integrations are **not** upstreamed into `PlakarKorp/integrations`; distribution is via a recipe in `PlakarKorp/hub`. Statements to the contrary in `specs/003-upstream-plakar-integrations/` are superseded — see `specs/003-upstream-plakar-integrations/SUPERSEDED-BY-004.md`.
+- Plakar have advised that community integrations are **not** upstreamed into `PlakarKorp/integrations`; distribution is via a recipe in `PlakarKorp/hub`. Statements to the contrary in `specs/003-upstream-plakar-integrations/` are superseded — see `specs/003-upstream-plakar-integrations/SUPERSEDED-BY-006.md`.
 
 Two pre-existing gotchas worth knowing, neither introduced by the extraction:
 

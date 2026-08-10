@@ -1,6 +1,6 @@
 # Contract: `opsmill/plakar-integration-neo4j`
 
-**Feature**: `004-plakar-encryption` (workstream B) · **Date**: 2026-08-07
+**Feature**: `006-plakar-encryption` (workstream B) · **Date**: 2026-08-07
 
 Supersedes `specs/003-upstream-plakar-integrations/contracts/neo4j-integration.md`, which specified the module as `github.com/PlakarKorp/integration-neo4j` destined for their monorepo. Plakar have since advised that community integrations need not be upstreamed, so the module is OpsMill-owned and distributed through a hub recipe instead.
 

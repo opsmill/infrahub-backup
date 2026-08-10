@@ -4,7 +4,7 @@ description: "Task list for feature 003 — rework Plakar backend onto upstream 
 
 # Tasks: Rework Plakar backend onto upstream database integrations
 
-> **⚠️ Partly superseded (2026-08-07).** The Neo4j integration is no longer being contributed into `PlakarKorp/integrations`; it moves to its own repository `opsmill/plakar-integration-neo4j` and is distributed via a `PlakarKorp/hub` recipe. **T040 will not be done as written.** See [SUPERSEDED-BY-004.md](./SUPERSEDED-BY-004.md). Everything about the runner, Postgres, and the tool rework still stands.
+> **⚠️ Partly superseded (2026-08-07).** The Neo4j integration is no longer being contributed into `PlakarKorp/integrations`; it moves to its own repository `opsmill/plakar-integration-neo4j` and is distributed via a `PlakarKorp/hub` recipe. **T040 will not be done as written.** See [SUPERSEDED-BY-006.md](./SUPERSEDED-BY-006.md). Everything about the runner, Postgres, and the tool rework still stands.
 
 **Input**: Design documents from `/specs/003-upstream-plakar-integrations/`
 **Prerequisites**: plan.md, spec.md, research.md, data-model.md, contracts/
@@ -124,7 +124,7 @@ description: "Task list for feature 003 — rework Plakar backend onto upstream 
 - [ ] T037 [P] Add the beta-`integration-postgresql` backup→restore round-trip validation as a CI release gate (critique E7).
 - [ ] T038 [P] Provision CI test infra: kind/k3d for K8s E2E parity (SC-008) and Docker for testcontainers; gate heaviest E2E as nightly if needed (critique E5).
 - [ ] T039 [P] Tag the last pre-rework tool release (for legacy-snapshot restore) and reference it in the clean-break rejection message (FR-016, critique P4); update `README.md` + quickstart.
-- [~] ~~T040 Open the upstream PR for `integration-neo4j` against base branch `integration/neo4j` in `PlakarKorp/integrations` (FR-017, FR-021).~~ **DROPPED 2026-08-07** — Plakar advised that community integrations are not upstreamed into their monorepo. Replaced by: extract to `opsmill/plakar-integration-neo4j` and author a `PlakarKorp/hub` recipe (004 workstream B, FR-014/FR-020). See [SUPERSEDED-BY-004.md](./SUPERSEDED-BY-004.md).
+- [~] ~~T040 Open the upstream PR for `integration-neo4j` against base branch `integration/neo4j` in `PlakarKorp/integrations` (FR-017, FR-021).~~ **DROPPED 2026-08-07** — Plakar advised that community integrations are not upstreamed into their monorepo. Replaced by: extract to `opsmill/plakar-integration-neo4j` and author a `PlakarKorp/hub` recipe (006 workstream B, FR-014/FR-020). See [SUPERSEDED-BY-006.md](./SUPERSEDED-BY-006.md).
 - [ ] T041 Run `scripts/update-vendor-hash.sh` after final `go.mod` changes; `make fmt lint vet test` all green; remove dead references to the deleted importer/watchdog.
 - [ ] T042 Verify SC-001…SC-008 across BOTH Compose and Kubernetes; confirm SC-004 (custom dump/restore removed) and SC-007 (legacy rejection message).
 - [ ] T045 Retain & regression-test the orchestration behaviors that survive the rework: task drain `waitForRunningTasks` (FR-008), `--redact` (FR-011), and group complete/incomplete status (FR-014) — add/keep targeted tests so the rework does not silently drop them.

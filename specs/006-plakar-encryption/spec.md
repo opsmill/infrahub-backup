@@ -1,6 +1,6 @@
 # Feature Specification: Encrypt the Plakar backup backend at rest
 
-**Feature Branch**: `004-plakar-encryption`
+**Feature Branch**: `004-plakar-encryption` — the feature directory was renumbered to `006-` because `004-` and `005-` were taken by features that landed on `main` first; the branch keeps its original name because PRs are open against it.
 **Created**: 2026-06-30
 **Status**: Draft
 **Input**: User description: "Add at-rest encryption to the Plakar (kloset) backup backend, which is currently plaintext."

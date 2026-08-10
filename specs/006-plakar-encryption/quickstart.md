@@ -1,6 +1,6 @@
 # Quickstart: encrypted Plakar backups, and the extracted Neo4j integration
 
-**Feature**: `004-plakar-encryption` (builds on 003)
+**Feature**: `006-plakar-encryption` (builds on 003)
 
 Workstream A (encryption) is operator-facing and **done**. Workstream B (integration extraction) is maintainer-facing and **planned** — its commands below are the intended sequence, not a record of completed runs.
 
