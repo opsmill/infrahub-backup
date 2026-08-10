@@ -116,12 +116,14 @@ func initPlakarContext(cfg *PlakarConfig) (*kcontext.KContext, error) {
 //   - INFRAHUB_S3_ENDPOINT starts with http://
 func storeConfig(repoPath string) map[string]string {
 	location := repoPath
-	if !strings.Contains(repoPath, "://") {
-		absPath, err := filepath.Abs(repoPath)
-		if err == nil {
-			location = absPath
+	// Both spellings of a local repo — /path and fs:///path — must resolve to the
+	// same storage location, absolute in each case, so that the two cannot disagree
+	// about which directory the repository lives in.
+	if local, path := parseRepoLocation(repoPath); local {
+		if absPath, err := filepath.Abs(path); err == nil {
+			path = absPath
 		}
-		location = "fs://" + location
+		location = "fs://" + path
 	}
 
 	cfg := map[string]string{"location": location}

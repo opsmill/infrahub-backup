@@ -185,14 +185,15 @@ func dbURI(scheme, user, pass, host, port, database string) string {
 }
 
 // runnerRepoPath returns the repository path to hand to the runner: an absolute
-// host path for a local fs:// repo (bind-mounted into the runner), or the URI
-// unchanged for s3:// and other schemes.
+// host path for a local repo (bind-mounted into the runner), whether it was spelled
+// as a bare path or as fs:///path, or the URI unchanged for s3:// and other schemes.
 func (iops *InfrahubOps) runnerRepoPath() (string, error) {
 	rp := iops.config.Plakar.RepoPath
-	if strings.Contains(rp, "://") {
+	local, path := parseRepoLocation(rp)
+	if !local {
 		return rp, nil
 	}
-	abs, err := filepath.Abs(rp)
+	abs, err := filepath.Abs(path)
 	if err != nil {
 		return "", fmt.Errorf("resolving repo path %q: %w", rp, err)
 	}

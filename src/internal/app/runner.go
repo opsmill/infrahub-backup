@@ -100,9 +100,10 @@ func composeRunnerArgs(project, dbService, repoPath string, mountDBVolumes, with
 		"-w", "/tmp", // kloset writes a relative "<ver>/store" cache under CWD — keep it writable
 		"-v", bin+":/usr/local/bin/infrahub-backup:ro",
 	)
-	if !strings.Contains(repoPath, "://") {
-		// Local fs:// repo — bind-mount the host directory into the runner.
-		args = append(args, "-v", repoPath+":/repo")
+	if local, hostPath := parseRepoLocation(repoPath); local {
+		// Local repo, spelled either /path or fs:///path — bind-mount the host
+		// directory into the runner, where repoArgFor points the worker at /repo.
+		args = append(args, "-v", hostPath+":/repo")
 	} else if strings.HasPrefix(repoPath, "s3://") {
 		for _, e := range []string{"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "INFRAHUB_S3_ENDPOINT"} {
 			if v := os.Getenv(e); v != "" {
@@ -118,13 +119,34 @@ func composeRunnerArgs(project, dbService, repoPath string, mountDBVolumes, with
 	return args, nil
 }
 
-// repoArgFor maps the configured repo to the path the in-container worker uses:
-// a local fs:// repo is bind-mounted at /repo; an s3:// URI is passed through.
-func repoArgFor(repoPath string) string {
-	if strings.Contains(repoPath, "://") {
-		return repoPath
+// parseRepoLocation classifies a --repo value and, for a local repository, returns
+// its filesystem path with any fs:// scheme stripped.
+//
+// A local repository has two spellings — a bare path (/backups/infra) and the fs://
+// URI the documentation and README use (fs:///backups/infra) — and every decision
+// that turns on "is this local" has to treat them as the same thing. Testing only
+// for "://" does not: fs:// contains it, so the documented spelling was classified
+// as remote. The runner then neither bind-mounted the directory nor rewrote the
+// path, and the in-container worker looked for the repository at a host path that
+// does not exist inside the container, failing with a missing CONFIG. Only the bare
+// spelling worked, which is why the local test recipes never caught it.
+func parseRepoLocation(repoPath string) (local bool, path string) {
+	if rest, ok := strings.CutPrefix(repoPath, "fs://"); ok {
+		return true, rest
 	}
-	return "/repo"
+	if strings.Contains(repoPath, "://") {
+		return false, repoPath
+	}
+	return true, repoPath
+}
+
+// repoArgFor maps the configured repo to the path the in-container worker uses:
+// a local repo is bind-mounted at /repo; a remote URI is passed through.
+func repoArgFor(repoPath string) string {
+	if local, _ := parseRepoLocation(repoPath); local {
+		return "/repo"
+	}
+	return repoPath
 }
 
 func composeContainerID(project, service string) (string, error) {
