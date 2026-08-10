@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The two spellings of a local repository must be indistinguishable to every
@@ -101,6 +102,84 @@ func TestPreserveOwnershipWalksATreeGrownDuringRestore(t *testing.T) {
 
 	if err := apply(); err != nil {
 		t.Errorf("applying preserved ownership over a grown tree errored: %v", err)
+	}
+}
+
+// The orchestrator stops the `database` service before launching a runner and
+// restarts it in a defer, so a launch that never returns leaves Infrahub down.
+// These cases pin the timeout that makes that impossible, and the diagnostics a
+// failed launch has to surface.
+func TestRunCapture(t *testing.T) {
+	t.Run("a wedged runner is killed rather than waited on forever", func(t *testing.T) {
+		start := time.Now()
+		_, err := runCapture(50*time.Millisecond, "sleep", []string{"30"}, "")
+		if err == nil {
+			t.Fatal("a command exceeding the timeout returned no error")
+		}
+		if !strings.Contains(err.Error(), "did not finish within") {
+			t.Fatalf("err = %v, want the timeout named in the message", err)
+		}
+		if !strings.Contains(err.Error(), runnerTimeoutEnvVar) {
+			t.Fatalf("err = %v, want the override env var named so an operator can raise it", err)
+		}
+		if elapsed := time.Since(start); elapsed > 10*time.Second {
+			t.Fatalf("waited %v for a 50ms timeout", elapsed)
+		}
+	})
+
+	t.Run("the snapshot id is the last stdout token", func(t *testing.T) {
+		got, err := runCapture(time.Minute, "echo", []string{"noise", "deadbeef"}, "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "deadbeef" {
+			t.Fatalf("got %q, want %q", got, "deadbeef")
+		}
+	})
+
+	t.Run("a failed launch surfaces stdout as well as stderr", func(t *testing.T) {
+		_, err := runCapture(time.Minute, "sh", []string{"-c", "echo out-detail; echo err-detail >&2; exit 3"}, "")
+		if err == nil {
+			t.Fatal("a non-zero exit returned no error")
+		}
+		for _, want := range []string{"out-detail", "err-detail"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("err = %v, want it to contain %q", err, want)
+			}
+		}
+	})
+
+	t.Run("stdin reaches the command", func(t *testing.T) {
+		got, err := runCapture(time.Minute, "cat", nil, "a-passphrase")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "a-passphrase" {
+			t.Fatalf("got %q, want the piped value back", got)
+		}
+	})
+}
+
+// The timeout is configurable because some deployments legitimately take longer
+// than 30 minutes to dump or load, but a malformed value must not disable the
+// guard — "no timeout" is the failure mode the guard exists for.
+func TestRunnerTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name, env string
+		want      time.Duration
+	}{
+		{"unset falls back to the default", "", defaultRunnerTimeout},
+		{"a valid duration is honoured", "90m", 90 * time.Minute},
+		{"an unparseable value falls back", "later", defaultRunnerTimeout},
+		{"zero falls back rather than disabling the guard", "0", defaultRunnerTimeout},
+		{"a negative value falls back", "-5m", defaultRunnerTimeout},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(runnerTimeoutEnvVar, tc.env)
+			if got := runnerTimeout(); got != tc.want {
+				t.Errorf("runnerTimeout() with %s=%q = %v, want %v", runnerTimeoutEnvVar, tc.env, got, tc.want)
+			}
+		})
 	}
 }
 

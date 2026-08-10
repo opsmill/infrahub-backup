@@ -2,11 +2,16 @@ package app
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
 // runnerBinary returns the path to the tool binary to mount into the runner
@@ -270,19 +275,82 @@ func firstNetwork(cid string) (string, error) {
 // stdin is non-empty it is written to the container (one line) and stdin closed,
 // used to pipe the repository passphrase without exposing it on argv/env.
 func runDockerCapture(args []string, stdin string) (string, error) {
+	return runCapture(runnerTimeout(), "docker", args, stdin)
+}
+
+const (
+	// defaultRunnerTimeout bounds one runner launch. The orchestrator stops the
+	// `database` service before launching the runner and restarts it in a defer, so
+	// a call that never returns leaves Infrahub down until a human intervenes — a
+	// wedged neo4j-admin on a corrupt store, or a stalled docker daemon, is exactly
+	// that. The streaming path this replaced carried the same 30-minute guard
+	// (defaultStreamIdleTimeout).
+	defaultRunnerTimeout = 30 * time.Minute
+	// runnerTimeoutEnvVar raises (or lowers) defaultRunnerTimeout for deployments
+	// whose databases legitimately take longer than 30 minutes to dump or load.
+	runnerTimeoutEnvVar = "INFRAHUB_RUNNER_TIMEOUT"
+)
+
+// runnerTimeout returns the per-launch timeout, honouring INFRAHUB_RUNNER_TIMEOUT
+// (any time.ParseDuration value). An unparseable or non-positive value falls back
+// to the default with a warning rather than disabling the guard, because "no
+// timeout" is the failure mode the guard exists for.
+func runnerTimeout() time.Duration {
+	raw := os.Getenv(runnerTimeoutEnvVar)
+	if raw == "" {
+		return defaultRunnerTimeout
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		logrus.Warnf("Ignoring %s=%q (want a positive duration such as 45m); using %v", runnerTimeoutEnvVar, raw, defaultRunnerTimeout)
+		return defaultRunnerTimeout
+	}
+	return d
+}
+
+// runCapture runs one command under a timeout and returns the last stdout token.
+// Both streams are buffered: stdout because its last token is the snapshot id, and
+// stderr because it is the only diagnostic a failed runner leaves. On failure both
+// are surfaced — dropping the buffered stdout hid the connector's own error
+// message, which is often the one that says what went wrong.
+func runCapture(timeout time.Duration, name string, args []string, stdin string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
 	var out, errb bytes.Buffer
-	cmd := exec.Command("docker", args...)
+	cmd := exec.CommandContext(ctx, name, args...)
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin + "\n")
 	}
 	cmd.Stdout = &out
 	cmd.Stderr = &errb
+
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("runner launch failed: %w: %s", err, strings.TrimSpace(errb.String()))
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return "", fmt.Errorf("runner did not finish within %v and was killed (raise %s if this deployment needs longer): %s",
+				timeout, runnerTimeoutEnvVar, runnerOutput(&out, &errb))
+		}
+		return "", fmt.Errorf("runner launch failed: %w: %s", err, runnerOutput(&out, &errb))
 	}
+
 	fields := strings.Fields(strings.TrimSpace(out.String()))
 	if len(fields) == 0 {
 		return "", nil
 	}
 	return fields[len(fields)-1], nil // snapshot id is the last stdout token
+}
+
+// runnerOutput joins whatever the runner said, for a failure message.
+func runnerOutput(out, errb *bytes.Buffer) string {
+	parts := make([]string, 0, 2)
+	if s := strings.TrimSpace(errb.String()); s != "" {
+		parts = append(parts, s)
+	}
+	if s := strings.TrimSpace(out.String()); s != "" {
+		parts = append(parts, s)
+	}
+	if len(parts) == 0 {
+		return "(no output)"
+	}
+	return strings.Join(parts, "\n")
 }
