@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -19,6 +20,33 @@ import (
 // componentBackup holds the result of a single component snapshot creation.
 type componentBackup struct {
 	component string
+}
+
+// errRedactRequiresForce is returned when --redact is used without --force.
+var errRedactRequiresForce = errors.New(
+	"--redact is a destructive operation that replaces all attribute values in the database with random UUIDs; use --force to confirm")
+
+// prepareRepoBeforeRedact runs the repository preparation and, when asked for, the
+// redaction — in that order, and only in that order.
+//
+// Redaction rewrites every attribute value in the LIVE database and is
+// irreversible: the pre-redaction data only survives in the backup this run is
+// about to take. So the repository has to be proven usable first — for an
+// encrypted repository that means the passphrase passing the canary check inside
+// newRepository. Redacting before opening the repository is how a mistyped or
+// unset INFRAHUB_BACKUP_PASSPHRASE destroyed the data and then failed to write
+// any backup of it.
+func prepareRepoBeforeRedact(redact, force bool, prepareRepo, redactDatabase func() error) error {
+	if !redact {
+		return prepareRepo()
+	}
+	if !force {
+		return errRedactRequiresForce
+	}
+	if err := prepareRepo(); err != nil {
+		return err
+	}
+	return redactDatabase()
 }
 
 // CreatePlakarBackup creates an Infrahub backup as multiple Plakar snapshots
@@ -41,13 +69,17 @@ func (iops *InfrahubOps) CreatePlakarBackup(force bool, neo4jMetadata string, ex
 
 	editionInfo := iops.detectNeo4jEditionInfo("backup")
 
-	if redact {
-		if !force {
-			return fmt.Errorf("--redact is a destructive operation that replaces all attribute values in the database with random UUIDs; use --force to confirm")
+	// The repository is prepared here rather than just before the first snapshot so
+	// that a redaction — which destroys the live data — cannot run against a
+	// repository that turns out to be unopenable.
+	prepareRepo := func() error {
+		if err := iops.ensurePlakarRepo(); err != nil {
+			return fmt.Errorf("failed to prepare plakar repository: %w", err)
 		}
-		if err := iops.redactDatabase(); err != nil {
-			return err
-		}
+		return nil
+	}
+	if err := prepareRepoBeforeRedact(redact, force, prepareRepo, iops.redactDatabase); err != nil {
+		return err
 	}
 
 	version := iops.getInfrahubVersion()
@@ -91,12 +123,6 @@ func (iops *InfrahubOps) CreatePlakarBackup(force bool, neo4jMetadata string, ex
 		metadataObj.Redacted = true
 	}
 	metadataObj.Components = components
-
-	// Create the repository up front so it exists and is owned by the host user
-	// before the runners (which open it via the bind mount) write into it.
-	if err := iops.ensurePlakarRepo(); err != nil {
-		return fmt.Errorf("failed to prepare plakar repository: %w", err)
-	}
 
 	var completed []componentBackup
 	for _, component := range components {
