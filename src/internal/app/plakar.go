@@ -5,11 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/minio/minio-go/v7"
 
 	"github.com/PlakarKorp/kloset/caching"
 	"github.com/PlakarKorp/kloset/caching/pebble"
@@ -263,24 +266,67 @@ func openRepo(kctx *kcontext.KContext, cfg *PlakarConfig) (*repository.Repositor
 	return repo, nil
 }
 
-// openOrCreateRepo opens an existing Plakar repository, or creates a new one if it doesn't exist.
+// repoMissing reports whether an error from storage.Open means "there is no
+// repository at this location", as opposed to "the repository is there but could
+// not be read".
+//
+// The distinction decides whether a new repository may be created, so getting it
+// wrong is a data-integrity problem rather than a cosmetic one: treating every
+// open failure as "absent" turns an unmounted backup volume, an unreadable
+// CONFIG, or an S3 503 into a brand-new — and, unless --encrypt was passed,
+// PLAINTEXT — repository on whatever path happened to be writable, while the run
+// logs success and the real repository gains no backup.
+//
+// The signals are the ones the two storage backends actually emit:
+//   - integration-fs returns the bare *os.PathError from opening CONFIG, so a
+//     missing repository is fs.ErrNotExist and a permission or ENOTDIR failure is
+//     distinguishable from it.
+//   - integration-s3 wraps minio's error, so a missing CONFIG object surfaces as
+//     a minio.ErrorResponse with code NoSuchKey (NoSuchBucket for a missing
+//     bucket), and its own "bucket does not exist" is an untyped sentinel string.
+func repoMissing(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		return true
+	}
+	var resp minio.ErrorResponse
+	if errors.As(err, &resp) {
+		switch resp.Code {
+		case "NoSuchKey", "NoSuchBucket":
+			return true
+		}
+	}
+	// integration-s3's Open reports an absent bucket with an untyped error; matched
+	// on its message because there is nothing else to match on.
+	return strings.Contains(err.Error(), "bucket does not exist")
+}
+
+// openOrCreateRepo opens an existing Plakar repository, or creates a new one if it
+// doesn't exist. Any other open failure is reported as-is: see repoMissing.
 func openOrCreateRepo(kctx *kcontext.KContext, cfg *PlakarConfig) (*repository.Repository, error) {
 	sc := storeConfig(cfg.RepoPath)
 
 	// Try to open existing repository. When --encrypt was requested, refuse to
 	// open a pre-existing plaintext repo rather than silently appending plaintext.
 	store, configBytes, err := storage.Open(kctx, sc)
-	if err == nil {
+	switch {
+	case err == nil:
 		repo, oerr := newRepository(kctx, store, configBytes, cfg.Passphrase, cfg.Encrypt)
 		if oerr != nil {
 			return nil, oerr
 		}
 		logrus.Debugf("Opened existing Plakar repository: %s", cfg.RepoPath)
 		return repo, nil
-	}
 
-	// Repository doesn't exist — create a new one.
-	return createRepo(kctx, cfg, sc)
+	case repoMissing(err):
+		// Nothing there — create a new one.
+		return createRepo(kctx, cfg, sc)
+
+	default:
+		return nil, fmt.Errorf("failed to open plakar repository %s: %w", cfg.RepoPath, err)
+	}
 }
 
 // createRepo creates a new Plakar repository, encrypted when cfg.Encrypt is set.
