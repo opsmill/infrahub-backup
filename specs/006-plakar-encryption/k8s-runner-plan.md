@@ -66,7 +66,7 @@ Keep the co-located runner for Docker; restore the streaming path for Kubernetes
   `s3://` works because the tool can reach S3 too.
 - Reuses a design already proven green on `main`.
 - No pod creation, no RBAC, no PVC access-mode problems, no image-pull concerns in-cluster.
-- **Cost**: two code paths, and the snapshot-shape question below must be settled.
+- **Cost**: two code paths, and the snapshot layout has to be aligned (see below) or a backup taken on one backend will not restore on the other.
 
 ### Option 2 — pod-based runner, Kubernetes restricted to `s3://`
 
@@ -84,27 +84,49 @@ Mirror the Docker runner with a Job built from the database pod's image, mountin
 Rejected. It only works if the connector can read a staged dump from the tool's disk, and
 constraint 1 says it cannot: the importer runs `neo4j-admin` against a live data directory.
 
-## The question to settle first: are snapshots interchangeable?
+## Snapshot layout: align the two paths — decided
 
-This decides how much of Option 1 is acceptable, so resolve it before writing code.
+**Decision: the streaming path adopts the connector's output.** Not for tidiness — without it a
+Docker-taken backup cannot be restored to a Kubernetes deployment.
 
-| Path | What lands in the snapshot |
-|---|---|
-| Docker, via the connector | one record per file from `emitDir`, **plus** `manifest.Emit(...)` |
-| Kubernetes, streaming | a single entry, `/neo4j.dump` (and `/prefect.dump`) |
+The structure is not the problem. The exporter **skips** `manifest.json` when staging
+(`exporter.go:93`) and requires exactly one non-manifest data artifact, choosing offline-load
+versus online-restore from the destination URI rather than from the manifest. A snapshot without
+a manifest still stages correctly.
 
-A backup taken on Docker must restore on Kubernetes and vice versa — operators move backups
-between environments, and the whole point of a backup is that it restores somewhere else. Two
-shapes means either the exporter tolerates both, or a Docker backup cannot be restored to a
-Kubernetes deployment.
+What actually breaks is the artifact itself:
 
-**Do this first**: take a Docker (connector) backup and restore it through the streaming path,
-and the reverse. If they are incompatible, the streaming path must emit the connector's layout
-(same pathnames, same manifest record) rather than its own.
+| Component | Connector emits | `main`'s streaming emitted | Interchangeable? |
+|---|---|---|---|
+| Neo4j Community | `<db>.dump` | hardcoded `/neo4j.dump` | only when the database is named `neo4j` — `database load` looks for `<targetdb>.dump` in `--from-path` |
+| Neo4j Enterprise | one `.backup` artifact file | **a tar of the backup directory** | **no** — a tar is not a valid artifact for `database restore --from-path` |
 
-## Work breakdown, once the shape question is answered
+`main` was self-consistent rather than compatible: it streamed in both directions, so its own tar
+came back out through its own untar. A two-transport design is what turns that into a real
+cross-path incompatibility.
 
-1. **Decide and record** the snapshot-shape contract (above). Everything else depends on it.
+So the streaming path must:
+
+1. Stream the **raw artifact**, not a tar. 003 verified the online backup produces a single
+   `<db>-<ts>.backup` file, so there is nothing to tar.
+2. Name the entry from the **target database**, not the literal `neo4j.dump`. This is the same
+   cross-name restore trap already fixed once in `a17434a`.
+3. Emit `/manifest.json` for parity, so both paths carry the same metadata.
+
+**Share the emission code rather than reimplementing it.** Two implementations obliged to
+produce byte-identical output is exactly the failure mode this branch has already hit twice: the
+`fs://` spelling classified three different ways in three places, and `--user root` honoured by
+one image and silently defeated by another. `manifest.Emit` is already exported from the
+integration; `emitDir` is not. Exporting an emission helper there, used by both the in-pod
+connector and the tool-side streaming path, makes the layouts identical by construction instead
+of by vigilance.
+
+Do this while it is still free: nothing has shipped, so there is no migration burden. Once
+backups exist in the wild, changing the layout means supporting both forever.
+
+## Work breakdown
+
+1. **Align the snapshot layout** per the decision above — raw artifact, database-derived name, manifest emitted, emission code shared with the integration rather than duplicated. Everything else depends on it.
 2. Reinstate the stream helpers from `dcb15f7^`, keeping them backend-agnostic — they call
    `iops.Exec`/`ExecStreamPipe`, so they must not acquire Docker-specific assumptions.
 3. Route by backend in `plakar_backup.go` / `plakar_restore.go`: Docker → runner, Kubernetes →
