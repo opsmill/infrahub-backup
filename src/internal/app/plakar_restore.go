@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/PlakarKorp/kloset/objects"
+	"github.com/PlakarKorp/kloset/repository"
 	"github.com/PlakarKorp/kloset/snapshot"
 	"github.com/sirupsen/logrus"
 )
@@ -33,8 +34,6 @@ func (iops *InfrahubOps) RestorePlakarBackup(excludeTaskManager bool, restoreMig
 	if project == "" {
 		return fmt.Errorf("the plakar runner restore currently supports Docker Compose only; Kubernetes support is pending")
 	}
-
-	editionInfo := iops.detectNeo4jEditionInfo("restore")
 
 	if restoreMigrateFormat {
 		logrus.Warn("--migrate-format is not yet supported by the runner restore; ignoring")
@@ -64,42 +63,120 @@ func (iops *InfrahubOps) RestorePlakarBackup(excludeTaskManager bool, restoreMig
 
 	cfg := iops.config.Plakar
 
-	// Single-snapshot restore (--snapshot)
+	var plan restorePlan
 	if cfg.SnapshotID != "" {
-		mac, err := resolveSnapshotID(repo, cfg.SnapshotID)
-		if err != nil {
-			return err
-		}
-		snap, err := snapshot.Load(repo, mac)
-		if err != nil {
-			return fmt.Errorf("failed to load snapshot: %w", err)
-		}
-		component := parseSnapshotTags(snap.Header.Tags)[TagComponent]
-		snap.Close()
-		logrus.Infof("Restoring single component: %s", component)
-		if err := iops.restoreComponentViaRunner(project, repoPath, component, fmt.Sprintf("%x", mac[:]), editionInfo.IsCommunity, excludeTaskManager); err != nil {
-			return err
-		}
-		logrus.Info("Restore from Plakar snapshot completed successfully")
-		return nil
+		plan, err = singleSnapshotPlan(repo, cfg.SnapshotID)
+	} else {
+		plan, err = backupGroupPlan(repo, cfg.BackupID, force)
+	}
+	if err != nil {
+		return err
+	}
+	if err := plan.validate(); err != nil {
+		return err
 	}
 
-	// Group restore (--backup-id or latest complete)
+	// The edition the backup was taken with decides which Neo4j artifact shape and
+	// connector this restore has to use, so it is reconciled with the target rather
+	// than assumed from live detection alone.
+	community, err := iops.resolveRestoreCommunity(plan.backupEdition)
+	if err != nil {
+		return err
+	}
+
+	restoreComponent := func(snapInfo SnapshotInfo) error {
+		return iops.restoreComponentViaRunner(project, repoPath, snapInfo.Component,
+			fmt.Sprintf("%x", snapInfo.MAC[:]), community, excludeTaskManager)
+	}
+	if err := iops.restoreComponents(plan, restoreComponent); err != nil {
+		return err
+	}
+
+	logrus.Infof("Restore from Plakar %s completed successfully", plan.describe())
+	logrus.Info("Infrahub should be available shortly")
+	return nil
+}
+
+// restorePlan is what one restore invocation resolved to: the component snapshots
+// to apply and the Neo4j edition recorded in the backup.
+type restorePlan struct {
+	// backupID is set for a group restore, snapshotID for a single-snapshot one.
+	backupID   string
+	snapshotID string
+	// backupEdition is the Neo4j edition tag recorded when the backup was taken.
+	// Empty when the snapshot predates the tag.
+	backupEdition string
+	snapshots     []SnapshotInfo
+}
+
+func (p restorePlan) describe() string {
+	if p.backupID != "" {
+		return "backup group " + p.backupID
+	}
+	return "snapshot " + p.snapshotID
+}
+
+// validate refuses a plan naming a component this tool cannot restore. It matters
+// because restoreComponents dispatches by component in a fixed order: an unknown
+// name would otherwise be silently skipped rather than reported.
+func (p restorePlan) validate() error {
+	for _, snapInfo := range p.snapshots {
+		switch snapInfo.Component {
+		case ComponentNeo4j, ComponentPostgres, ComponentMetadata:
+		default:
+			return fmt.Errorf("unknown component type in snapshot: %s", snapInfo.Component)
+		}
+	}
+	if len(p.snapshots) == 0 {
+		return fmt.Errorf("nothing to restore: %s contains no component snapshots", p.describe())
+	}
+	return nil
+}
+
+// singleSnapshotPlan resolves --snapshot to a one-component plan.
+func singleSnapshotPlan(repo *repository.Repository, snapshotID string) (restorePlan, error) {
+	mac, err := resolveSnapshotID(repo, snapshotID)
+	if err != nil {
+		return restorePlan{}, err
+	}
+	snap, err := snapshot.Load(repo, mac)
+	if err != nil {
+		return restorePlan{}, fmt.Errorf("failed to load snapshot: %w", err)
+	}
+	tags := parseSnapshotTags(snap.Header.Tags)
+	snap.Close()
+
+	plan := restorePlan{
+		snapshotID:    fmt.Sprintf("%x", mac[:8]),
+		backupEdition: tags[TagNeo4jEdition],
+		snapshots: []SnapshotInfo{{
+			SnapshotID: fmt.Sprintf("%x", mac[:8]),
+			Component:  tags[TagComponent],
+			MAC:        mac,
+		}},
+	}
+	logrus.Infof("Restoring single component: %s", plan.snapshots[0].Component)
+	return plan, nil
+}
+
+// backupGroupPlan resolves --backup-id (or the latest complete group) to a plan.
+func backupGroupPlan(repo *repository.Repository, backupID string, force bool) (restorePlan, error) {
 	var group *BackupGroupInfo
-	if cfg.BackupID != "" {
-		group, err = findBackupGroup(repo, cfg.BackupID)
+	var err error
+	if backupID != "" {
+		group, err = findBackupGroup(repo, backupID)
 	} else {
 		group, err = findLatestCompleteGroup(repo)
 	}
 	if err != nil {
-		return err
+		return restorePlan{}, err
 	}
 
 	if group.Status == StatusIncomplete {
 		missing := missingComponents(group)
 		logrus.Warnf("Backup group %s is incomplete (missing: %s)", group.BackupID, strings.Join(missing, ", "))
 		if !force {
-			return fmt.Errorf("backup group %s is incomplete (missing: %s); use --force to restore available components",
+			return restorePlan{}, fmt.Errorf("backup group %s is incomplete (missing: %s); use --force to restore available components",
 				group.BackupID, strings.Join(missing, ", "))
 		}
 	}
@@ -110,14 +187,101 @@ func (iops *InfrahubOps) RestorePlakarBackup(excludeTaskManager bool, restoreMig
 		"components": len(group.Snapshots),
 	}).Info("Restoring from backup group")
 
-	for _, snapInfo := range group.Snapshots {
-		if err := iops.restoreComponentViaRunner(project, repoPath, snapInfo.Component, fmt.Sprintf("%x", snapInfo.MAC[:]), editionInfo.IsCommunity, excludeTaskManager); err != nil {
-			return err
+	return restorePlan{
+		backupID:      group.BackupID,
+		backupEdition: group.Neo4jEdition,
+		snapshots:     group.Snapshots,
+	}, nil
+}
+
+// resolveRestoreCommunity decides which Neo4j restore path to take, by reconciling
+// the edition recorded in the backup with the edition detected on the target.
+//
+// Live detection alone is not safe to route on: when detectNeo4jEdition fails for
+// any reason — cypher-shell missing, an auth hiccup, the database mid-restart —
+// NewNeo4jEditionInfo defaults to Community after only an Infof. An Enterprise
+// restore would then drive neo4j+offline:///data against an Enterprise `.backup`
+// artifact: wrong connector, wrong artifact shape. ResolveRestoreEdition (which
+// main used here) instead turns that combination into a refusal, and keeps the one
+// cross-edition restore that does work — a Community backup onto Enterprise.
+func (iops *InfrahubOps) resolveRestoreCommunity(backupEdition string) (bool, error) {
+	info := iops.detectNeo4jEditionInfo("restore")
+	if backupEdition == "" {
+		// Snapshots predating the edition tag carry nothing to reconcile against;
+		// detection is all there is.
+		logrus.Warn("Backup records no Neo4j edition; using the detected edition")
+		return info.IsCommunity, nil
+	}
+	edition, err := info.ResolveRestoreEdition(backupEdition)
+	if err != nil {
+		return false, err
+	}
+	return strings.EqualFold(edition, neo4jEditionCommunity), nil
+}
+
+// appServices are the Infrahub services stopped for the duration of a restore, in
+// the wording stopAppContainers uses.
+var appServices = []string{
+	"infrahub-server", "task-worker", "task-manager",
+	"task-manager-background-svc", "cache", "message-queue",
+}
+
+// restoreComponents applies a plan with the deployment lifecycle a restore needs:
+// quiesce the application tier, replace the databases, then bring it back.
+//
+// Without this the plakar restore replaced the databases underneath a running
+// deployment: pg_restore's DROPs contended with the task manager's open sessions
+// on `prefect`, Redis and RabbitMQ kept state describing the database that had
+// just been replaced, and infrahub-server / task-worker spent the restore talking
+// to a stopped Neo4j and were never restarted. main did all four steps; only
+// StopServices("database") survived the move to the runner.
+//
+// The order is main's: transient state is wiped through the containers that hold
+// it (so before they are stopped), the task-manager database is restored while
+// nothing is connected to it, its dependencies come back, and Neo4j is replaced
+// last. restoreComponent applies one component snapshot; it is a parameter so the
+// lifecycle can be exercised without launching runners.
+func (iops *InfrahubOps) restoreComponents(plan restorePlan, restoreComponent func(SnapshotInfo) error) error {
+	if err := iops.wipeTransientData(); err != nil {
+		return err
+	}
+	if _, err := iops.stopAppContainers(); err != nil {
+		return err
+	}
+
+	appsRestarted := false
+	defer func() {
+		if !appsRestarted {
+			logrus.Warnf("Infrahub application services were left stopped by the failed restore (%s); "+
+				"start them once the state of the deployment is understood", strings.Join(appServices, ", "))
+		}
+	}()
+
+	// ComponentMetadata restores nothing to the containers, but it is dispatched
+	// like the others so an unexpected component cannot be silently skipped.
+	for _, phase := range []string{ComponentPostgres, ComponentNeo4j, ComponentMetadata} {
+		for _, snapInfo := range plan.snapshots {
+			if snapInfo.Component != phase {
+				continue
+			}
+			if err := restoreComponent(snapInfo); err != nil {
+				return err
+			}
+		}
+		if phase == ComponentPostgres {
+			// cache, message-queue and the task manager come back on the wiped state
+			// before Neo4j is replaced, as they did on main.
+			if err := iops.restartDependencies(); err != nil {
+				return err
+			}
 		}
 	}
 
-	logrus.Info("Restore from Plakar backup group completed successfully")
-	logrus.Info("Infrahub should be available shortly")
+	logrus.Info("Restarting Infrahub services...")
+	if err := iops.StartServices("infrahub-server", "task-worker"); err != nil {
+		return fmt.Errorf("failed to restart infrahub services: %w", err)
+	}
+	appsRestarted = true
 	return nil
 }
 
