@@ -332,8 +332,7 @@ func (iops *InfrahubOps) restoreComponentViaRunner(project, repoPath, component,
 			return nil
 		}
 		uri := dbURI("postgres", iops.config.PostgresUsername, iops.config.PostgresPassword, "task-manager-db", "5432", iops.config.PostgresDatabase)
-		opts := map[string]string{"clean": "true"}
-		if err := LaunchComposeRestore(project, "task-manager-db", repoPath, uri, snapHex, iops.config.Plakar.Passphrase, opts, false); err != nil {
+		if err := LaunchComposeRestore(project, "task-manager-db", repoPath, uri, snapHex, iops.config.Plakar.Passphrase, postgresRestoreOpts(), false); err != nil {
 			return fmt.Errorf("postgres restore failed: %w", err)
 		}
 		logrus.Info("Postgres restore completed")
@@ -346,6 +345,27 @@ func (iops *InfrahubOps) restoreComponentViaRunner(project, repoPath, component,
 	default:
 		return fmt.Errorf("unknown component type in snapshot: %s", component)
 	}
+}
+
+// postgresRestoreOpts are the connector options for restoring the task-manager
+// database, chosen to reproduce what main ran: `pg_restore --clean --create`.
+//
+//   - recreate maps to `-C --clean --if-exists`, i.e. drop and recreate the
+//     database from the archive's own metadata. The weaker `clean` (which is only
+//     `--clean --if-exists`) drops just the objects the dump contains, so rolling
+//     back to an older Prefect schema left every table, column and enum value
+//     added since the backup in place — nothing in the dump names them — and
+//     Prefect then ran against a hybrid schema. It also never reapplied the
+//     database-level properties (owner, encoding, collation, per-database SET
+//     options) that `--create` carries.
+//   - no_globals skips feeding the archive's 00000-globals.sql to psql. Replaying
+//     it would run CREATE/ALTER ROLE against the whole cluster — a side effect
+//     main never had, and one that reaches beyond the database being restored.
+//
+// clean and recreate are mutually exclusive in the connector, so only recreate is
+// set.
+func postgresRestoreOpts() map[string]string {
+	return map[string]string{"recreate": "true", "no_globals": "true"}
 }
 
 // snapshotLister is an interface for listing snapshots in a repository.

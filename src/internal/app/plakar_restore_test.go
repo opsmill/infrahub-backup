@@ -2,9 +2,11 @@ package app
 
 import (
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/PlakarKorp/kloset/connectors/exporter"
 	"github.com/PlakarKorp/kloset/objects"
 )
 
@@ -213,6 +215,45 @@ func TestResolveRestoreCommunityReconcilesWithTheBackup(t *testing.T) {
 			}
 		})
 	}
+}
+
+// main restored the task-manager database with `pg_restore --clean --create`. The
+// runner path passed only `clean`, which drops just the objects the dump names —
+// so a rollback to an older Prefect schema left everything added since in place —
+// and left the archive's globals being replayed CREATE/ALTER ROLE into the whole
+// cluster. These are the option names the pinned connector accepts, so the test
+// builds a real exporter from them rather than comparing strings to strings.
+func TestPostgresRestoreOptsReproduceCleanCreate(t *testing.T) {
+	opts := postgresRestoreOpts()
+
+	if opts["recreate"] != "true" {
+		t.Errorf("recreate = %q, want \"true\" — `clean` alone does not drop and recreate the database", opts["recreate"])
+	}
+	if opts["no_globals"] != "true" {
+		t.Errorf("no_globals = %q, want \"true\" — replaying globals.sql alters roles cluster-wide", opts["no_globals"])
+	}
+	if _, ok := opts["clean"]; ok {
+		t.Error("clean is set alongside recreate; the connector rejects the pair as mutually exclusive")
+	}
+
+	// Prove the connector accepts them: NewExporter parses the whole option set
+	// (and its mutual exclusions) without connecting to a database.
+	cfg := &PlakarConfig{RepoPath: filepath.Join(t.TempDir(), "repo"), CacheDir: t.TempDir()}
+	kctx, err := initPlakarContext(cfg)
+	if err != nil {
+		t.Fatalf("initPlakarContext: %v", err)
+	}
+	defer closePlakarContext(kctx)
+
+	config := map[string]string{"location": "postgres://prefect:pass@task-manager-db:5432/prefect"}
+	for k, v := range opts {
+		config[k] = v
+	}
+	exp, err := exporter.NewExporter(kctx, connectorOptions(kctx), config)
+	if err != nil {
+		t.Fatalf("the pinned integration-postgresql exporter rejected the restore options: %v", err)
+	}
+	_ = exp.Close(kctx.Context)
 }
 
 // editionBackend answers the edition query detectNeo4jEdition makes.
