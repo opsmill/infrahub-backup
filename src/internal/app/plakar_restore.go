@@ -143,8 +143,16 @@ func (iops *InfrahubOps) restoreComponentViaRunner(project, repoPath, component,
 		}
 		defer func() {
 			logrus.Info("Restarting Neo4j...")
-			if err := iops.StartServices("database"); err != nil && retErr == nil {
-				retErr = fmt.Errorf("failed to restart neo4j: %w", err)
+			if err := iops.StartServices("database"); err != nil {
+				if retErr == nil {
+					retErr = fmt.Errorf("failed to restart neo4j: %w", err)
+				}
+				return
+			}
+			// "Infrahub should be available shortly" is only true once the database is
+			// answering again; wait for that rather than asserting it.
+			if err := iops.waitForNeo4jBolt(neo4jBoltReadyTimeout); err != nil {
+				logrus.Warnf("Restore completed, but %v", err)
 			}
 		}()
 		opts := map[string]string{"neo4j_bin_dir": "/var/lib/neo4j/bin", "overwrite": "true"}

@@ -16,6 +16,11 @@ const (
 	neo4jWatchdogInitTimeout = 5 * time.Second
 	neo4jProcessStopTimeout  = 120 * time.Second
 	neo4jMetadataScriptPath  = "/data/scripts/neo4j/restore_metadata.cypher"
+	// How long to wait for Neo4j to answer again after the container is restarted, and
+	// how often to retry. A cold start on a large store is slow, so the ceiling is
+	// generous; the poll is short because the common case is a few seconds.
+	neo4jBoltReadyTimeout = 180 * time.Second
+	neo4jBoltPollInterval = 2 * time.Second
 )
 
 func (iops *InfrahubOps) backupDatabase(backupDir string, backupMetadata string, neo4jEdition string) error {
@@ -512,4 +517,44 @@ func (iops *InfrahubOps) isNeo4jCluster() bool {
 		return count > 1
 	}
 	return false
+}
+
+// waitForNeo4jBolt blocks until Neo4j accepts a query again, or the timeout elapses.
+//
+// The plakar offline paths stop and start the whole `database` container rather than
+// suspending the process, so every client connection to it dies. Returning as soon as
+// `docker compose start` returns means the caller — and anything watching the
+// deployment — sees a container that is up but a database that is not yet answering.
+// Infrahub then serves /api/config (which does not touch the database) while
+// /api/schema fails, which is exactly the shape of the failure in the e2e suite.
+//
+// This is the same lesson the round-trip harness learned: a count taken before Bolt is
+// answering silently returns empty, so it grew a wait_bolt of its own. The tool should
+// not make its callers rediscover that.
+//
+// A timeout is reported to the caller rather than raised as a failure of the operation
+// that just completed: by the time this runs the backup or restore has already
+// succeeded, and a database that is slow to come back is worth flagging, not a reason
+// to discard good work.
+func (iops *InfrahubOps) waitForNeo4jBolt(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	logrus.Info("Waiting for Neo4j to accept connections...")
+
+	for attempt := 0; ; attempt++ {
+		if _, err := iops.Exec("database", []string{
+			"cypher-shell",
+			"-u", iops.config.Neo4jUsername,
+			"-p" + iops.config.Neo4jPassword,
+			"--non-interactive",
+			"RETURN 1;",
+		}, nil); err == nil {
+			logrus.Info("Neo4j is accepting connections")
+			return nil
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("neo4j did not accept connections within %s of being restarted", timeout)
+		}
+		time.Sleep(neo4jBoltPollInterval)
+	}
 }
