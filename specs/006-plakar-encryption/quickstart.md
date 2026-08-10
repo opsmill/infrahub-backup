@@ -34,6 +34,29 @@ Verified 2026-06-30 — unit tests (`plakar_encryption_test.go`) + live/throwawa
 - [x] **SC-004**: passphrase absent from the create log and from the repo bytes; it is never on the runner's argv/`-e` env (only `--passphrase-stdin`), so `docker inspect` of the runner cannot reveal it.
 - [x] **SC-005**: plaintext repos open unchanged; a passphrase supplied for a plaintext repo warns and continues (unit test).
 
+### Re-verified 2026-08-10, after the `main` merge and the runner fixes
+
+The runner changed materially since the June run (T060/T061: `fs://` classification, and the
+image entrypoint that was silently dropping `--user root`), so the encrypted round-trip was
+re-run rather than assumed to still hold:
+
+```bash
+ENCRYPT=1 REPO_SPELLING=uri ./test/e2e/run-e2e.sh community      # → RESULT: PASS
+```
+
+- **SC-002 re-confirmed** against a real Neo4j 2025.10.1 Community and a real PostgreSQL 18:
+  encrypted repository created, three component snapshots (neo4j, postgres, metadata), wipe
+  **gated at 0/0**, restore recovered 25 neo4j nodes and 12 postgres rows.
+- **SC-003 re-confirmed**: listing without the passphrase → `repository is encrypted; a
+  passphrase is required`.
+- Run over the **`fs://` spelling** on purpose. Every earlier recipe used a bare path, and
+  that is exactly why T060 went unnoticed — the URI form the README recommends was broken.
+
+**What this run does not cover**: the harness replaces `infrahub-server`, `task-manager` and
+`task-worker` with `alpine sleep infinity`, so it exercises the data plane only. It cannot
+show whether the *Infrahub server* recovers its Bolt connections after the offline backup
+suspends Neo4j — which is the open failure in `main`'s own e2e suite (T064).
+
 ### Leak-scan recipe (SC-004)
 
 ```bash
