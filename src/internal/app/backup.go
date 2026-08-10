@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"crypto/ecdh"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,64 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// retentionLegsForCreate returns the storage locations a successful `create` run
+// prunes, and is the gate that decides whether retention runs at all.
+//
+// An inactive policy yields no legs, so a run without retention options behaves
+// exactly as it did before this feature existed (FR-004). When the policy is
+// active the local backup directory is always a leg, and S3 is a leg exactly when
+// this run uploaded there — the mere presence of S3 configuration never causes an
+// object to be deleted (FR-007).
+func retentionLegsForCreate(cfg *Configuration, s3UploadedThisRun bool) ([]storageLocation, error) {
+	if !cfg.Retention.Policy().Active() {
+		return nil, nil
+	}
+
+	legs := []storageLocation{newLocalLocation(cfg.BackupDir)}
+	if !s3UploadedThisRun {
+		return legs, nil
+	}
+
+	client, err := NewS3Client(cfg.S3)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create S3 client for retention: %w", err)
+	}
+
+	return append(legs, newS3Location(client)), nil
+}
+
+// warnRetentionUnsupportedBackend reports that an active retention policy will not
+// be applied because the selected backend has no retention implementation yet.
+// Warning instead of failing keeps the backup itself working, and warning at all
+// keeps the combination from being a silent no-op (FR-012).
+func warnRetentionUnsupportedBackend(cfg *Configuration) {
+	if !cfg.Retention.Policy().Active() {
+		return
+	}
+
+	logrus.Warnf("retention not yet supported for the %s backend; skipping retention (no backups will be pruned)", cfg.Backend)
+}
+
+// applyCreateRetention applies the configured retention policy after a backup has
+// fully succeeded. It reports the joined per-leg failures; every leg is attempted
+// before it returns (FR-008).
+func (iops *InfrahubOps) applyCreateRetention(s3UploadedThisRun bool) error {
+	legs, err := retentionLegsForCreate(iops.config, s3UploadedThisRun)
+	if err != nil {
+		return err
+	}
+	if len(legs) == 0 {
+		return nil
+	}
+
+	policy := iops.config.Retention.Policy()
+	logrus.Infof("Applying retention policy (days: %d, count: %d) to %d location(s)", policy.Days, policy.Count, len(legs))
+
+	_, err = applyRetention(context.Background(), legs, policy, retentionExecute)
+
+	return err
+}
+
 // loadEncryptionKey loads the public key for encryption.
 // If keyPath is empty, returns the default hardcoded key.
 func loadEncryptionKey(keyPath string) (*ecdh.PublicKey, error) {
@@ -26,6 +85,10 @@ func loadEncryptionKey(keyPath string) (*ecdh.PublicKey, error) {
 // CreateBackup creates a full backup of the Infrahub deployment
 func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeTaskManager bool, s3Upload bool, s3KeepLocal bool, sleepDuration time.Duration, redact bool, encrypt bool, encryptKey string) (retErr error) {
 	if iops.config.Backend == BackendPlakar {
+		// The Plakar backend has no retention implementation yet. Warn up front so
+		// the operator cannot mistake the run for one that pruned, then run the
+		// backup normally and prune nothing (FR-012).
+		warnRetentionUnsupportedBackend(iops.config)
 		return iops.CreatePlakarBackup(force, neo4jMetadata, excludeTaskManager, sleepDuration, redact)
 	}
 
@@ -211,6 +274,18 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 		}
 	}
 
+	// Apply retention only now: the archive is written, checksummed, and — when an
+	// upload was requested — safely in S3, so a failed backup can never trigger a
+	// deletion. Each leg's keep-newest floor protects that location's newest
+	// archive, which is this run's at every location still holding it; with
+	// --s3-upload and without --s3-keep-local the local copy was removed just
+	// above, so the local leg's newest is the previous archive instead. The prune
+	// runs before the transfer sleep so an operator who interrupts the sleep does
+	// not skip it.
+	if err := iops.applyCreateRetention(s3Upload); err != nil {
+		return fmt.Errorf("backup succeeded (%s); retention failed: %w", backupFilename, err)
+	}
+
 	// Sleep if requested (for K8s users to transfer backup file)
 	if sleepDuration > 0 {
 		logrus.Infof("Sleeping for %v to allow backup file transfer...", sleepDuration)
@@ -229,14 +304,17 @@ func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager boo
 
 	actualBackupFile := backupFile
 
-	// Check if backup file is an S3 URI
+	// An `s3://bucket/key` argument names an object that has to be on this host before it
+	// can be restored. It is downloaded under a reserved temporary name rather than its own
+	// — so it cannot land on a local archive of the same name — and removed again whatever
+	// the restore's outcome. See restore_inputs.go.
 	if IsS3URI(backupFile) {
 		downloadedPath, err := iops.downloadBackupFromS3(backupFile)
 		if err != nil {
 			return err
 		}
 		actualBackupFile = downloadedPath
-		defer os.Remove(actualBackupFile) // Clean up downloaded file after restore
+		defer removeRestoreTempPath(downloadedPath)
 	}
 
 	// Sleep if requested (for K8s users to transfer backup file into pod)
@@ -266,23 +344,33 @@ func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager boo
 			return fmt.Errorf("failed to load decryption key: %w", err)
 		}
 
-		decryptedPath := strings.TrimSuffix(actualBackupFile, ".enc")
-		if decryptedPath == actualBackupFile {
-			decryptedPath = actualBackupFile + ".decrypted.tar.gz"
+		// Decrypt through a reserved temporary name beside the archive, never to the
+		// archive's own name minus ".enc": that name is a valid archive name in the same
+		// pool, so a plain archive of the same timestamp sitting next to the encrypted one
+		// was overwritten by the plaintext and then deleted with it when the restore
+		// finished — two archives in, one out, and a run that reported success. The
+		// `--latest` tiebreak deliberately prefers the .enc member of such a pair, so an
+		// operator could reach this without ever naming the encrypted archive.
+		// See restore_inputs.go for the convention this follows.
+		decryptedPath, err := reserveRestoreTempPath(filepath.Dir(actualBackupFile), decryptRestoreTempPattern)
+		if err != nil {
+			return fmt.Errorf("failed to prepare the decryption of %s: %w", actualBackupFile, err)
 		}
+		defer removeRestoreTempPath(decryptedPath)
 
 		logrus.Info("Decrypting backup archive...")
 		if err := DecryptFile(actualBackupFile, decryptedPath, privKey); err != nil {
 			return fmt.Errorf("failed to decrypt backup: %w", err)
 		}
 
-		// If the encrypted file was downloaded from S3 (temporary), remove it
+		// A downloaded encrypted archive has no further use once its plaintext exists, so it
+		// goes now rather than at the end of the run: holding both is twice the archive's
+		// size on a disk that only ever had to hold one.
 		if IsS3URI(backupFile) {
-			os.Remove(actualBackupFile)
+			removeRestoreTempPath(actualBackupFile)
 		}
 
 		actualBackupFile = decryptedPath
-		defer os.Remove(actualBackupFile)
 	} else if decryptKey != "" {
 		return fmt.Errorf("--decrypt-key provided but backup file is not encrypted")
 	}

@@ -24,7 +24,7 @@
           inherit version;
           src = ./.;
 
-          vendorHash = "sha256-X5Jeefld13F8gPyL9SSi0sgeGYAznGiKqYTV0kCCcTs=";
+          vendorHash = "sha256-YiT7U2UPPYSe85bRxNNsP3SRF/EnMpXjzsWgDTQI/hw=";
 
           # Don't run preBuild (watchdog compilation) in the go-modules
           # derivation — it only needs to fetch/vendor dependencies.
@@ -76,11 +76,21 @@
             };
           });
 
+          infrahub-collect = pkgs.buildGoModule (commonAttrs // {
+            pname = "infrahub-collect";
+            subPackages = [ "src/cmd/infrahub-collect" ];
+            meta = commonAttrs.meta // {
+              description = "Troubleshooting bundle collection tool for Infrahub instances";
+              mainProgram = "infrahub-collect";
+            };
+          });
+
           default = pkgs.symlinkJoin {
             name = "infrahub-ops-cli-${version}";
             paths = [
               self.packages.${system}.infrahub-backup
               self.packages.${system}.infrahub-taskmanager
+              self.packages.${system}.infrahub-collect
             ];
           };
         };

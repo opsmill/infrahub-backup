@@ -109,11 +109,14 @@ exceptions:
   - include_in_menu & menu_placement
   - Incremental Validation
   - Infrahub
+  - Infrahub Backup
+  - Infrahub Collect
   - Infrahub Enterprise
   - Infrahub Server Version
   - Infrahub Servers Tree View
   - Infrahub YAML Tree View
   - infrahub-backup
+  - infrahub-collect
   - infrahubctl
   - Integration with Other Tools
   - Intelligent Yaml editing

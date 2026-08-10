@@ -5,22 +5,35 @@ const sidebars: SidebarsConfig = {
     'readme',
     {
       type: 'category',
-      label: 'Tutorials',
+      label: 'Get started',
       items: [
         'tutorials/getting-started',
       ],
     },
     {
       type: 'category',
-      label: 'How-to Guides',
+      label: 'Infrahub Backup',
+      link: {type: 'doc', id: 'backup/index'},
       items: [
-        'guides/install',
-        'guides/backup-instance',
-        'guides/restore-backup',
-        'guides/kubernetes-backup',
-        'guides/kubernetes-restore',
+        'backup/install',
+        'backup/create',
+        'backup/restore',
+        'backup/retention',
+        'backup/kubernetes-backup',
+        'backup/kubernetes-restore',
+        'backup/kubernetes-scheduled-restore',
       ],
     },
+    {
+      type: 'category',
+      label: 'Infrahub Collect',
+      link: {type: 'doc', id: 'collect/index'},
+      items: [
+        'collect/install',
+        'collect/create',
+      ],
+    },
+    'self-update',
     {
       type: 'category',
       label: 'Reference',

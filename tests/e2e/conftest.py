@@ -5,12 +5,9 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncGenerator
 
-import yaml
-
-import boto3
-import httpx
 import kr8s.asyncio
 import pytest
+import yaml
 from kr8s.asyncio.objects import Pod as AsyncPod
 from kr8s.asyncio.objects import Service as AsyncService
 from testcontainers.core.container import DockerContainer
@@ -58,16 +55,8 @@ def _dump_logs_on_failure(request):
     if rep_call is None or not rep_call.failed:
         return
 
-    vcluster = (
-        request.getfixturevalue("vcluster")
-        if "vcluster" in request.fixturenames
-        else None
-    )
-    infrahub_k8s = (
-        request.getfixturevalue("infrahub_k8s")
-        if "infrahub_k8s" in request.fixturenames
-        else None
-    )
+    vcluster = request.getfixturevalue("vcluster") if "vcluster" in request.fixturenames else None
+    infrahub_k8s = request.getfixturevalue("infrahub_k8s") if "infrahub_k8s" in request.fixturenames else None
     if vcluster and infrahub_k8s:
         _dump_namespace_logs(vcluster["kubeconfig_path"], infrahub_k8s["namespace"])
 
@@ -85,6 +74,18 @@ def backup_binary() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Fixture: collect_binary
+# ---------------------------------------------------------------------------
+@pytest.fixture(scope="session")
+def collect_binary() -> str:
+    """Build infrahub-collect and return the binary path."""
+    subprocess.run(["make", "build"], cwd=str(PROJECT_ROOT), check=True)
+    binary = PROJECT_ROOT / "bin" / "infrahub-collect"
+    assert binary.exists(), f"Binary not found at {binary}"
+    return str(binary)
+
+
+# ---------------------------------------------------------------------------
 # Fixture: minio_docker (testcontainers)
 # ---------------------------------------------------------------------------
 @pytest.fixture(scope="session")
@@ -96,9 +97,7 @@ def minio_docker(request: pytest.FixtureRequest) -> dict:
         .with_env("MINIO_ROOT_USER", "minioadmin")
         .with_env("MINIO_ROOT_PASSWORD", "minioadmin")
         .with_kwargs(entrypoint="sh")
-        .with_command(
-            "-c 'mkdir -p /data/backups && minio server /data --console-address :9001'"
-        )
+        .with_command("-c 'mkdir -p /data/backups && minio server /data --console-address :9001'")
     )
 
     container.start()
@@ -143,9 +142,7 @@ async def portforward_infrahub(kubeconfig_path: str, namespace: str):
     long-lived port-forward.  Call this each time you need to talk to Infrahub.
     """
     kr8s_api = await kr8s.asyncio.api(kubeconfig=kubeconfig_path)
-    service = await AsyncService.get(
-        "infrahub-infrahub-server", namespace=namespace, api=kr8s_api
-    )
+    service = await AsyncService.get("infrahub-infrahub-server", namespace=namespace, api=kr8s_api)
     async with service.portforward(remote_port=8000, local_port="auto") as local_port:
         url = f"http://localhost:{local_port}"
         await wait_for_http(f"{url}/api/config", timeout=300.0, interval=5.0)
@@ -155,9 +152,7 @@ async def portforward_infrahub(kubeconfig_path: str, namespace: str):
 # ---------------------------------------------------------------------------
 # Helper: delete database pod to reset CrashLoopBackOff
 # ---------------------------------------------------------------------------
-async def _delete_and_wait_for_database_pod(
-    kubeconfig_path: str, namespace: str, timeout: float = 300.0
-) -> None:
+async def _delete_and_wait_for_database_pod(kubeconfig_path: str, namespace: str, timeout: float = 300.0) -> None:
     """Delete the database pod and wait for its replacement to be ready."""
     import asyncio
 

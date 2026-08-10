@@ -282,6 +282,7 @@ subchart
 subcommand
 subnet
 subnets
+subresources
 subtyping
 Subtyping
 sudo

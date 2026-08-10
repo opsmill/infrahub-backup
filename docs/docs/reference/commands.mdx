@@ -2,7 +2,7 @@
 title: CLI command reference
 ---
 
-Complete reference for Infrahub Backup commands, flags, and options.
+Complete reference for the Infrahub Ops CLI tools (`infrahub-backup`, `infrahub-collect`), their commands, flags, and options.
 
 ## infrahub-backup
 
@@ -50,6 +50,8 @@ infrahub-backup create [flags]
 | `--s3-upload` | Upload backup to S3 after creation | `false` | `INFRAHUB_S3_UPLOAD` |
 | `--s3-keep-local` | Keep local backup file after S3 upload | `false` | `INFRAHUB_S3_KEEP_LOCAL` |
 | `--sleep` | Sleep duration after backup for manual file transfer | `0` | `INFRAHUB_SLEEP` |
+| `--retention-days <n>` | After a successful backup, prune backups older than N days (N >= 1, omit to disable) | unset | `INFRAHUB_RETENTION_DAYS` |
+| `--retention-count <n>` | After a successful backup, keep only the N most recent backups (N >= 1, omit to disable) | unset | `INFRAHUB_RETENTION_COUNT` |
 
 **Neo4j metadata options:**
 
@@ -78,37 +80,61 @@ infrahub-backup create --s3-upload --s3-bucket my-backups --s3-keep-local
 
 # Create a redacted backup (replaces all attribute values with random UUIDs)
 infrahub-backup create --redact --force
+
+# Backup, then prune archives outside the retention policy
+infrahub-backup create --retention-days 30 --retention-count 60
 ```
+
+Retention runs only after the backup fully succeeds, and it never prompts. The local backup directory is always evaluated; the S3 prefix is evaluated when the same run uploaded to it. See [Manage backup retention](../backup/retention.mdx).
 
 #### restore
 
-Restores Infrahub from a backup file or S3 URI.
+Restores Infrahub from a backup file, an S3 URI, or the most recent backup in a location.
 
 **Syntax:**
 
 ```bash
 infrahub-backup restore <backup-file|s3-uri>
+infrahub-backup restore --latest [--s3]
 ```
 
 **Arguments:**
 
-- `<backup-file|s3-uri>` - Path to backup archive or S3 URI (required)
+- `<backup-file|s3-uri>` - Path to backup archive or S3 URI, required unless `--latest` is passed
   - Local file: `infrahub_backup_20250929_143022.tar.gz`
   - S3 URI: `s3://bucket/prefix/infrahub_backup_20250929_143022.tar.gz`
 
 **Flags:**
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--exclude-taskmanager` | Skip restoring the task manager database even if the dump is present | `false` |
-| `--migrate-format` | Run Neo4j database format migration after restore | `false` |
-| `--reset-deployment-id` | Generate a new Root node UUID after restore to detach this instance from the source deployment ID | `false` |
+| Flag | Description | Default | Environment Variable |
+|------|-------------|---------|---------------------|
+| `--latest` | Restore the most recent backup instead of naming an archive; mutually exclusive with the argument | `false` | - |
+| `--s3` | With `--latest`: choose from the configured S3 bucket and prefix instead of the local backup directory | `false` | - |
+| `--exclude-taskmanager` | Skip restoring the task manager database even if the dump is present | `false` | - |
+| `--migrate-format` | Run Neo4j database format migration after restore | `false` | - |
+| `--sleep <duration>` | Wait this long before the restore begins, for manual file transfer | `0` | - |
+| `--decrypt-key <path>` | Private key PEM file for decrypting an encrypted backup | - | `INFRAHUB_DECRYPT_KEY` |
+| `--reset-deployment-id` | Generate a new Root node UUID after restore to detach this instance from the source deployment ID | `false` | `INFRAHUB_RESET_DEPLOYMENT_ID` |
+
+`--decrypt-key` and `--reset-deployment-id` also read their variable, with the flag winning where both supply a value — which is what lets a scheduled restore configured entirely through the environment decrypt an archive. The remaining flags are command-line only: a persistent `--latest` would turn a mistyped `restore` into a data-overwriting default, a persistent `--s3` would silently move the location every restore reads, and `INFRAHUB_SLEEP` configures `create`'s `--sleep`, not this one.
+
+An encrypted archive is decrypted into a temporary file beside it, which is removed when the run ends. Both the archive and any other archive in the directory are left untouched, including a plain archive of the same timestamp.
+
+`--latest` ranks archives exactly as retention does — by the timestamp embedded in the name, newest first, ties broken by name descending — and only names matching `infrahub_backup_<YYYYMMDD_HHMMSS>.tar.gz[.enc]` take part. Exactly one location is consulted per run, and the two are never merged.
+
+The run exits non-zero without touching the deployment when the selected location holds no archives, when the newest archive is encrypted and no `--decrypt-key` was passed, when `--latest` is combined with an archive name, or when `--s3` is passed without `--latest`. `--latest` never falls back to an older archive. See [Restore from a backup](../backup/restore.mdx).
 
 **Examples:**
 
 ```bash
 # Restore from local file
 infrahub-backup restore infrahub_backup_20250929_143022.tar.gz
+
+# Restore the newest archive in the backup directory
+infrahub-backup restore --latest
+
+# Restore the newest archive in the configured bucket and prefix
+infrahub-backup restore --latest --s3 --s3-bucket my-backups --s3-prefix infrahub/prod
 
 # Restore from S3
 infrahub-backup restore s3://my-backups/infrahub/prod/infrahub_backup_20250929_143022.tar.gz
@@ -119,6 +145,64 @@ infrahub-backup restore --s3-endpoint http://minio.local:9000 s3://my-backups/in
 # Restore when the task manager database was excluded from the backup
 infrahub-backup restore infrahub_backup_20251022_120000.tar.gz --exclude-taskmanager
 ```
+
+#### prune
+
+Applies a retention policy to existing backups without creating a new one. At least one retention rule is required.
+
+**Syntax:**
+
+```bash
+infrahub-backup prune (--retention-days <n> | --retention-count <n>) [flags]
+```
+
+**Flags:**
+
+| Flag | Description | Default | Environment Variable |
+|------|-------------|---------|---------------------|
+| `--retention-days <n>` | Delete backups older than N days (N >= 1) | unset | `INFRAHUB_RETENTION_DAYS` |
+| `--retention-count <n>` | Keep only the N most recent backups (N >= 1) | unset | `INFRAHUB_RETENTION_COUNT` |
+| `--dry-run` | List exactly what a real run would delete, delete nothing, and never prompt | `false` | - |
+| `--force` | Skip the confirmation prompt (for non-interactive and scripted use) | `false` | - |
+| `--s3` | Also prune backups under the configured S3 bucket/prefix | `false` | - |
+
+Flags and environment variables are the only channels that configure retention; the flag wins where both supply a rule. Any value either channel supplies that is not a whole number of at least 1 — including an explicit `0` — is a validation error that aborts the run. A variable that is present but empty counts as unset.
+
+`--dry-run`, `--force`, and `--s3` are per-invocation switches with no environment variable behind them.
+
+**Examples:**
+
+```bash
+# Preview what a 7-day policy would delete
+infrahub-backup prune --retention-days 7 --dry-run
+
+# Keep the 30 most recent backups, asking for confirmation first
+infrahub-backup prune --retention-count 30
+
+# Non-interactive prune of both the local directory and the bucket
+infrahub-backup prune --retention-days 30 --s3 --force
+```
+
+**Behavior:**
+
+- The rules combine as a union: a backup survives if either rule claims it.
+- The most recent backup at each location always survives; there is no override.
+- The local directory and the S3 prefix are evaluated independently. S3 is never touched without `--s3`.
+- A backup's age comes from the timestamp in its filename, read in the local time of the host running the command, with a day measured as a fixed 24 hours.
+- The set previewed and confirmed is exactly the set deleted: candidates are selected once, and nothing is listed again after the confirmation. A candidate that had already vanished counts as satisfied, not as a failure.
+- Without `--force`, a run whose standard input is not a terminal refuses to delete anything.
+- Without `--force`, a run that cannot list one of its locations exits before the confirmation and deletes nothing at any location. With `--force`, every location that could be listed is still pruned.
+- `--dry-run` with `--force` is rejected as contradictory.
+
+**Exit codes:**
+
+| Outcome | Exit code |
+|---------|-----------|
+| Pruned successfully, dry run, nothing to prune, or prompt declined | `0` |
+| Validation error (no rule, value below 1, contradictory flags, `plakar` backend) | non-zero |
+| A location could not be listed, without `--force` — nothing deleted anywhere, no confirmation asked | non-zero |
+| A location failed, with `--force` — every other location is still pruned | non-zero |
+| A deletion failed after a complete preview — the remaining candidates are still attempted | non-zero |
 
 ### Environment commands
 
@@ -176,6 +260,119 @@ infrahub-backup version
 Version: 1.0.0
 ```
 
+#### update
+
+Updates the running binary to a newer release. Downloads the matching artifact
+from GitHub Releases, verifies its SHA-256 checksum, and replaces the binary
+atomically. Available on both `infrahub-backup` and `infrahub-collect`.
+
+**Syntax:**
+
+```bash
+infrahub-backup update [flags]
+```
+
+**Flags:**
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--check` | Report whether an update is available without installing it | `false` |
+| `--yes, -y` | Skip the confirmation prompt (required for non-interactive use) | `false` |
+| `--version <tag>` | Install a specific release (e.g. `v1.7.2`) instead of the latest | latest |
+
+**Environment variables:**
+
+| Variable | Description |
+|----------|-------------|
+| `GITHUB_TOKEN` / `GH_TOKEN` | Optional GitHub token to raise the API rate limit on CI/shared IPs. Never required for normal use. |
+
+Self-update is refused for binaries installed via Homebrew or running inside a
+container image, for development builds, and when the binary location is not
+writable. See [Update the CLI](../self-update.mdx).
+
+## infrahub-collect
+
+### Command structure
+
+```bash
+infrahub-collect [global-flags] <command> [flags]
+```
+
+### Global flags
+
+These flags apply to all infrahub-collect commands:
+
+| Flag | Description | Default | Environment Variable |
+|------|-------------|---------|---------------------|
+| `--project <name>` | Target specific Docker Compose project | Auto-detect | `INFRAHUB_PROJECT` |
+| `--k8s-namespace <name>` | Target specific Kubernetes namespace | Auto-detect | `INFRAHUB_K8S_NAMESPACE` |
+| `--output-dir <path>` | Directory for bundle files | `./infrahub_bundles` | `INFRAHUB_OUTPUT_DIR` |
+| `--log-format <text\|json>` | Output format for logs | `text` | `INFRAHUB_LOG_FORMAT` |
+| `--help, -h` | Show help for any command | - | - |
+
+### Collect commands
+
+#### create
+
+Collects a troubleshooting bundle from the Infrahub instance. Collection is read-only: no container or pod is stopped, restarted, or scaled. Individual collector failures are recorded in the bundle manifest and do not abort the run.
+
+**Syntax:**
+
+```bash
+infrahub-collect create [flags]
+```
+
+**Flags:**
+
+| Flag | Description | Default | Environment Variable |
+|------|-------------|---------|---------------------|
+| `--log-lines <n>` | Maximum log lines collected per container | `100000` | `INFRAHUB_LOG_LINES` |
+| `--include-backup` | Also create a backup using the standard backup behavior | `false` | `INFRAHUB_INCLUDE_BACKUP` |
+| `--include-queries` | Include database query logs (may contain customer data) | `false` | `INFRAHUB_INCLUDE_QUERIES` |
+| `--benchmark` | Run the OpsMill benchmark and include its results (requires image download; skipped with a warning if unavailable) | `false` | `INFRAHUB_BENCHMARK` |
+
+**Examples:**
+
+```bash
+# Basic collection
+infrahub-collect create
+
+# Target a specific Kubernetes namespace
+infrahub-collect create --k8s-namespace=infrahub-prod
+
+# Collect with more log history
+infrahub-collect create --log-lines=500000
+
+# Collect logs and a backup in one run
+infrahub-collect create --include-backup
+
+# Performance investigation with benchmark
+infrahub-collect create --benchmark
+```
+
+**Output:**
+
+A single archive named `support_bundle_<timestamp>.tar.gz` in the output directory. Inside the archive, all files live under a top-level `bundle/` directory, with a `bundle_information.json` manifest recording an explicit outcome for every collector.
+
+**Collectors:**
+
+| Collector | What it gathers |
+|-----------|-----------------|
+| Service logs | Container logs for every Infrahub service, all replicas, plus previous-container logs for restarted pods |
+| Database logs | Neo4j server logs (`neo4j.log`, `debug.log`); full log directory with `--include-queries` |
+| Message-queue status | RabbitMQ queues, exchanges, bindings, connections, channels, and status |
+| Cache status | Redis info, client list, configuration, slow log, and database size |
+| Task-worker state | Prefect worker status, one directory per replica |
+| Task-manager state | Work pools, work queues, recent flow runs, events, and automations |
+| Server info | Versions, installed packages, API information/configuration/schema, masked environment variables |
+| Container metrics | Resource usage via `docker compose stats` or `kubectl top` |
+| Backup (opt-in) | Backup produced by the standard backup behavior (`--include-backup`) |
+| Benchmark (opt-in) | OpsMill benchmark results (`--benchmark`) |
+
+### Environment and utility commands
+
+`infrahub-collect` provides the same `environment detect`, `environment list`, `version`, and `update` commands as `infrahub-backup`, with identical behavior. See [`update`](#update) for the self-update flags and refusal cases.
+
 ## Configuration precedence
 
 Configuration values are resolved in this order:
@@ -186,6 +383,6 @@ Configuration values are resolved in this order:
 
 ## Related documentation
 
-- [Getting started tutorial](../tutorials/getting-started.mdx)
+- [Get started tutorial](../tutorials/getting-started.mdx)
 - [Configuration reference](./configuration.mdx)
-- [How to backup your instance](../guides/backup-instance.mdx)
+- [Back up your Infrahub instance](../backup/create.mdx)

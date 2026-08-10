@@ -1,13 +1,71 @@
-*.pyc
+# Project artifacts
 bin/
 infrahub_backups/
 src/internal/app/embedded/neo4jwatchdog/*watchdog*
 
-# spec-kit extension catalog cache
-.specify/extensions/.cache/
+# neo4jwatchdog build output (cross-compiled by make build)
+tools/neo4jwatchdog/neo4jwatchdog
 
 # stray kloset/pebble relative cache (defensive)
 2.0.0/
 
-# neo4jwatchdog build output (cross-compiled by make build)
-tools/neo4jwatchdog/neo4jwatchdog
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+# Scoped to entries rather than the whole directory: build/runner/ is the tracked
+# Dockerfile context for the co-located Plakar runner, and a bare `build/` would stop
+# git descending into it, so new files there would be silently unstageable.
+build/*
+!build/runner/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# UV
+.uv/
+
+# Testing / type checking
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.html
+
+# IDE / editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Documentation build
+docs/node_modules/
+docs/.docusaurus/
+docs/build/
+
+# Secrets (never commit)
+.env
+.env.local
+*.local
+*.pem
+*.key
+credentials.json
+secrets.yaml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Spec-kit local state (records the active feature per checkout; not shared)
+.specify/feature.json
+
+# spec-kit extension catalog cache
+.specify/extensions/.cache/

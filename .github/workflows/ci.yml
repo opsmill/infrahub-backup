@@ -23,6 +23,7 @@ jobs:
       documentation: ${{ steps.changes.outputs.documentation_all }}
       go: ${{ steps.changes.outputs.go_all }}
       nix: ${{ steps.changes.outputs.nix_all }}
+      python: ${{ steps.changes.outputs.python_all }}
       yaml: ${{ steps.changes.outputs.yaml_all }}
       markdown: ${{ steps.changes.outputs.markdown_all }}
     steps:
@@ -80,7 +81,12 @@ jobs:
     needs: ["files-changed", "test"]
     runs-on:
       group: huge-runners
-    timeout-minutes: 30
+    # ~44s per create/restore cycle, which the database recovery inside the binary
+    # dominates, across four class-scoped Infrahub stacks in the community leg and
+    # five in the enterprise one — where the retention cases also run. Sharding this
+    # job by test area is the durable fix; until then the cap has to clear the real
+    # runtime rather than truncate it mid-suite.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -104,7 +110,7 @@ jobs:
       - name: Install tini
         run: apt-get update && apt-get install -y tini
 
-      - name: Build infrahub-backup binary
+      - name: Build binaries (infrahub-backup, infrahub-taskmanager, infrahub-collect)
         run: make build
 
       - name: Install Python dependencies
@@ -115,10 +121,14 @@ jobs:
           RUNNER_NAME=$(echo "${{ runner.name }}" | grep -o 'ghrunner[0-9]\+' | sed 's/ghrunner\([0-9]\+\)/ghrunner_\1/')
           echo "PYTEST_DEBUG_TEMPROOT=/var/lib/github/${RUNNER_NAME}/_temp" >> $GITHUB_ENV
 
+      # Cases marked `enterprise` run in the enterprise leg only: they do not depend on the
+      # Neo4j edition, and on Community every backup they take stops and restarts the whole
+      # deployment, which is most of what they cost. Enterprise backs up online.
       - name: Run e2e tests (Docker Compose)
         env:
           INFRAHUB_TESTING_ENTERPRISE: ${{ matrix.edition == 'enterprise' && 'true' || '' }}
-        run: exec tini -s -g -- uv run pytest -v -m docker tests/e2e
+          PYTEST_MARKERS: ${{ matrix.edition == 'enterprise' && 'docker' || 'docker and not enterprise' }}
+        run: exec tini -s -g -- uv run pytest -v -m "$PYTEST_MARKERS" tests/e2e
 
   e2e-tests-k8s:
     if: needs.files-changed.outputs.go == 'true'
@@ -160,7 +170,7 @@ jobs:
       - name: Install tini
         run: apt-get update && apt-get install -y tini
 
-      - name: Build infrahub-backup binary
+      - name: Build binaries (infrahub-backup, infrahub-taskmanager, infrahub-collect)
         run: make build
 
       - name: Install Python dependencies
@@ -186,6 +196,25 @@ jobs:
       - name: Verify if nix build succeeds
         run: nix build --no-link
 
+  python-lint:
+    if: needs.files-changed.outputs.python == 'true'
+    needs: ["files-changed"]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - run: uv sync --only-group dev
+      - name: Check code formatting
+        run: |
+          uv run --no-sync ruff format --check --diff
+          uv run --no-sync ruff check --select I .
+      - name: Run linters
+        run: uv run --no-sync ruff check
+      - name: Run type checks
+        run: uv run --no-sync mypy .
+
   yaml-lint:
     if: needs.files-changed.outputs.yaml == 'true'
     needs: ["files-changed"]
@@ -193,10 +222,11 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
-      - name: Install yamllint
-        run: pip install yamllint
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - run: uv sync --only-group dev
       - name: Run yamllint
-        run: yamllint -s .
+        run: uv run --no-sync yamllint -s .
 
   markdown-lint:
     if: needs.files-changed.outputs.markdown == 'true'
@@ -205,13 +235,11 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 20
-      - name: Install markdownlint-cli
-        run: npm install -g markdownlint-cli
-      - name: Run markdownlint
-        run: markdownlint "**/*.md" --ignore node_modules --ignore docs/node_modules --ignore specs
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - run: uv sync --only-group dev
+      - name: Run rumdl
+        run: uv run --no-sync rumdl check .
 
   validate-documentation-style:
     if: |
@@ -247,12 +275,16 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
       - uses: actions/setup-node@v6
         with:
           node-version: 20
-          cache: 'npm'
-          cache-dependency-path: docs/package-lock.json
+          cache: 'pnpm'
+          cache-dependency-path: docs/pnpm-lock.yaml
       - name: Install Node dependencies
-        run: npm install
+        run: pnpm install --frozen-lockfile
       - name: Build docs website
-        run: npm run build
+        run: pnpm run build

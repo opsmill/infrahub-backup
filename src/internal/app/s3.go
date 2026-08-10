@@ -6,12 +6,25 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/sirupsen/logrus"
+)
+
+// Retention list and delete calls are bounded so that an S3 endpoint which
+// accepts the connection but never answers cannot hang a scheduled backup run
+// forever. Both bounds are far below Upload's 30-minute allowance: listing walks
+// pages of metadata, and a delete is a single request.
+const (
+	// s3ListTimeout bounds a whole paginated listing pass over the prefix.
+	s3ListTimeout = 5 * time.Minute
+	// s3DeleteTimeout bounds the removal of a single object.
+	s3DeleteTimeout = 2 * time.Minute
 )
 
 // S3Config holds S3-related configuration
@@ -112,6 +125,86 @@ func (c *S3Client) buildS3Key(filename string) string {
 	}
 	// Use forward slashes for S3 keys
 	return strings.TrimSuffix(c.config.Prefix, "/") + "/" + filename
+}
+
+// locationName renders the configured bucket and prefix the way an operator wrote
+// them. It is how the S3 retention location labels itself in logs and errors.
+func (c *S3Client) locationName() string {
+	if prefix := strings.TrimSuffix(c.config.Prefix, "/"); prefix != "" {
+		return "s3://" + c.config.Bucket + "/" + prefix
+	}
+
+	return "s3://" + c.config.Bucket
+}
+
+// listPrefix is the key prefix that scopes a listing to where buildS3Key writes.
+// An empty configured prefix lists the bucket root; otherwise the prefix always
+// ends in a slash so that a prefix of "backups" cannot also match "backups-old/".
+func (c *S3Client) listPrefix() string {
+	if c.config.Prefix == "" {
+		return ""
+	}
+	return strings.TrimSuffix(c.config.Prefix, "/") + "/"
+}
+
+// backupRefForKey recognizes a retention candidate in a listed object key.
+//
+// The key's base name must match the backup naming pattern, and the key must be
+// exactly the one buildS3Key would produce for that base name. The second check
+// is what makes a ref safe to carry around as a base name only: it guarantees the
+// deletion key can be rebuilt, and it keeps objects that merely live below the
+// configured prefix (or outside it) invisible to retention.
+func (c *S3Client) backupRefForKey(key string) (backupRef, bool) {
+	ref, ok := parseBackupName(path.Base(key))
+	if !ok {
+		return backupRef{}, false
+	}
+	if c.buildS3Key(ref.Name) != key {
+		return backupRef{}, false
+	}
+	return ref, true
+}
+
+// List returns the backup archives stored under the configured bucket and prefix.
+// Listing is non-recursive, so only objects written where Upload writes them are
+// considered, and every key is filtered through the shared backup naming pattern
+// so unrelated objects stay invisible to retention.
+func (c *S3Client) List(ctx context.Context) ([]backupRef, error) {
+	ctx, cancel := context.WithTimeout(ctx, s3ListTimeout)
+	defer cancel()
+
+	prefix := c.listPrefix()
+	logrus.Debugf("Listing backups in s3://%s/%s", c.config.Bucket, prefix)
+
+	// minio paginates internally and feeds the results through this channel;
+	// cancelling the context (via the deferred cancel, including on early return)
+	// stops the producer.
+	refs := make([]backupRef, 0)
+	for object := range c.client.ListObjects(ctx, c.config.Bucket, minio.ListObjectsOptions{
+		Prefix:    prefix,
+		Recursive: false,
+	}) {
+		if object.Err != nil {
+			return nil, fmt.Errorf("failed to list backups in s3://%s/%s: %w", c.config.Bucket, prefix, object.Err)
+		}
+		if ref, ok := c.backupRefForKey(object.Key); ok {
+			refs = append(refs, ref)
+		}
+	}
+
+	return refs, nil
+}
+
+// Delete removes a single object by its full key.
+func (c *S3Client) Delete(ctx context.Context, key string) error {
+	ctx, cancel := context.WithTimeout(ctx, s3DeleteTimeout)
+	defer cancel()
+
+	if err := c.client.RemoveObject(ctx, c.config.Bucket, key, minio.RemoveObjectOptions{}); err != nil {
+		return fmt.Errorf("failed to delete s3://%s/%s: %w", c.config.Bucket, key, err)
+	}
+
+	return nil
 }
 
 // Upload uploads a local file to S3 and returns the S3 URI

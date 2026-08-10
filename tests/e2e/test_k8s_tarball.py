@@ -15,9 +15,7 @@ from tests.helpers.utils import (
 
 @pytest.mark.e2e
 @pytest.mark.k8s
-async def test_backup_restore_k8s_local_tarball(
-    reset_database_pod, infrahub_k8s, backup_binary, tmp_path
-):
+async def test_backup_restore_k8s_local_tarball(reset_database_pod, infrahub_k8s, backup_binary, tmp_path):
     """K8s: Create a local tarball backup, modify data, restore, and verify."""
     token = infrahub_k8s["token"]
     namespace = infrahub_k8s["namespace"]

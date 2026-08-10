@@ -4,20 +4,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`infrahub-ops-cli` is a Go-based toolset for managing and maintaining Infrahub instances. The project provides two specialized CLI binaries:
+`infrahub-ops-cli` is a Go-based toolset for managing and maintaining Infrahub instances. The project provides three specialized CLI binaries:
 
 - **infrahub-backup** - Backup/restore operations and environment detection
 - **infrahub-taskmanager** - Task manager (Prefect) maintenance operations
+- **infrahub-collect** - Troubleshooting-bundle collection (read-only diagnostics) for support
 
-Both tools share common internal application logic but expose different commands through their respective main entry points.
+All three tools share common internal application logic but expose different commands through their respective main entry points.
 
 ## Common Development Commands
 
 ### Building and Running
 
-- `make build` - Build both binaries to `bin/infrahub-backup` and `bin/infrahub-taskmanager`
-- `make build-all` - Cross-compile both binaries for Linux, Darwin, and Windows (amd64/arm64)
-- `make install` - Build and install both binaries to `$GOPATH/bin`
+- `make build` - Build all three binaries to `bin/infrahub-backup`, `bin/infrahub-taskmanager`, and `bin/infrahub-collect`
+- `make build-all` - Cross-compile all three binaries for Linux, Darwin, and Windows (amd64/arm64)
+- `make install` - Build and install all three binaries to `$GOPATH/bin`
 - `make clean` - Remove build artifacts
 
 ### Testing and Quality
@@ -40,7 +41,7 @@ Whenever Go modules change (any modification to `go.mod` or `go.sum` — adding,
 
 ## Architecture
 
-The codebase follows a command-pattern architecture using Cobra for CLI structure, with two separate binary entry points sharing common internal logic:
+The codebase follows a command-pattern architecture using Cobra for CLI structure, with three separate binary entry points sharing common internal logic:
 
 ### Core Components
 
@@ -54,50 +55,64 @@ The codebase follows a command-pattern architecture using Cobra for CLI structur
    - Commands: `flush flow-runs`, `flush stale-runs`, `environment detect`, `environment list`, `version`
    - Uses shared application logic from `src/internal/app`
 
-3. **src/internal/app/app.go** - Core application logic
+3. **src/cmd/infrahub-collect/main.go** - Troubleshooting-bundle tool entry point
+   - Defines root command with troubleshooting-bundle collection
+   - Commands: `create`, `environment detect`, `environment list`, `version`
+   - Uses shared application logic from `src/internal/app`
+
+4. **src/internal/app/app.go** - Core application logic
    - `InfrahubOps` struct - Main application controller
    - `CommandExecutor` - Handles Docker Compose and system command execution
    - Environment detection (Docker vs Kubernetes)
    - Docker project discovery and validation
-   - Shared by both CLI tools
+   - Shared by all three CLI tools
 
-4. **src/internal/app/backup.go** - Backup and restore operations
+5. **src/internal/app/backup.go** - Backup and restore operations
    - Creates tar.gz backups with metadata JSON
    - Backs up Neo4j database, PostgreSQL (task-manager), and artifacts
    - Implements safe backup with container stopping/starting
    - Restore validates metadata and handles version compatibility
 
-5. **src/internal/app/taskmanager.go** - Task management operations
+6. **src/internal/app/taskmanager.go** - Task management operations
    - PostgreSQL database connection management
    - Flow run cleanup operations (completed/failed/cancelled)
    - Stale run cancellation (stuck in running state)
    - Uses embedded Python scripts for Prefect API operations
 
-6. **src/internal/app/utils.go** - Utility functions
+7. **src/internal/app/collect*.go** - Troubleshooting-bundle collection
+   - `collect.go` - Orchestrator (`CollectBundle`), collector run plan, staging/archive lifecycle
+   - `collect_manifest.go` - `bundle_information.json` manifest and per-collector results
+   - `collect_logs.go` - Per-replica service log collector (backend-agnostic)
+   - `collect_diagnostics.go` - Database, message-queue, cache, task-worker, task-manager, and server collectors
+   - `collect_metrics.go` - Container resource metrics collector
+   - `collect_extras.go` - Opt-in `--include-backup` and `--benchmark` collectors
+   - `masking.go` - Key-name secret masking for env and config dumps
+
+8. **src/internal/app/utils.go** - Utility functions
    - File operations, checksum validation
    - Environment variable handling
    - Version detection and comparison
 
-7. **src/internal/app/cli.go** - Shared CLI configuration
+9. **src/internal/app/cli.go** - Shared CLI configuration
    - `ConfigureRootCommand()` - Sets up common flags and configuration
    - `AttachEnvironmentCommands()` - Adds environment detection commands
-   - Shared between both binaries
+   - Shared between all three binaries
 
 ### Key Design Patterns
 
-- **Split Binary Architecture**: Two specialized binaries sharing common internal logic for focused functionality
+- **Split Binary Architecture**: Three specialized binaries sharing common internal logic for focused functionality
 - **Embedded Scripts**: Python scripts are embedded using Go's embed package (src/internal/app/scripts directory)
 - **Docker Compose Integration**: All operations work through Docker Compose commands
 - **Project-based Operations**: Can target specific Docker Compose projects with `--project` flag
 - **Streaming Output**: Commands stream output in real-time for user feedback
-- **Shared Configuration**: Both binaries use the same configuration system and environment variables
+- **Shared Configuration**: All binaries use the same configuration system and environment variables
 
 ## Docker Compose Dependencies
 
-Both tools assume Infrahub is deployed using Docker Compose with these service names:
+All tools assume Infrahub is deployed using Docker Compose with these service names:
 
-- `database` (Neo4j) - Used by infrahub-backup
-- `task-manager-db` (PostgreSQL) - Used by both tools
+- `database` (Neo4j) - Used by infrahub-backup and infrahub-collect
+- `task-manager-db` (PostgreSQL) - Used by infrahub-backup and infrahub-taskmanager
 - `infrahub-server`, `task-worker`, `task-manager`, `task-manager-background-svc` - Application containers
 - `cache`, `message-queue` - Infrastructure services
 
@@ -152,7 +167,7 @@ The codebase uses explicit error wrapping with `fmt.Errorf` for context. All com
 
 - Documentation guidelines: `docs/docs/development/docs.mdx`
 - Vale styles: `.vale/styles/`
-- Markdown linting: `.markdownlint.yaml`
+- Markdown linting: `[tool.rumdl]` in `pyproject.toml`
 
 ### Document Structure Patterns (Following Diataxis)
 
@@ -266,7 +281,28 @@ The codebase uses explicit error wrapping with `fmt.Errorf` for context. All com
 
 - Go 1.25.0 + kloset v1.0.13 (Plakar core), integration-fs (storage), cobra, logrus, viper (002-plakar-integration)
 - Plakar repository (local filesystem or S3 via integration backends) (002-plakar-integration)
+- Go 1.25.0 + cobra, viper, logrus; Docker/Kubernetes via `docker`/`kubectl` CLI shell-out through `CommandExecutor` — no client-go or Docker SDK (003-collect-tool)
+- Local filesystem bundle output under `--output-dir` (default `./infrahub_bundles`); no network egress beyond the target deployment (003-collect-tool)
+- Go 1.25.0 + `github.com/PlakarKorp/kloset` (target stable v1.1.0), `go-kloset-sdk` v1.1.0 (fallback path), `integration-postgresql` v1.1.0-beta.7, `integration-fs`/`integration-s3`, `cobra`, `viper`, `logrus`, `pgx/v5` (retained for the separate task-manager tool); `testcontainers-go` for integration tests (003-upstream-plakar-integrations)
+- kloset repository — `fs://` (local dir) or `s3://` (object store); plaintext by default (unchanged) (003-upstream-plakar-integrations)
+- Go 1.25.0 + `github.com/PlakarKorp/kloset` v1.1.0 — `encryption` (symmetric: `NewDefaultConfiguration`, `DeriveKey`, `DeriveCanary`, `VerifyCanary`), `connectors/storage` (`Configuration.Encryption`, `NewConfigurationFromBytes`), `repository.New(secret, …)`; builds on the 003 runner (`runner.go`, `run_connector.go`) (004-plakar-encryption)
+- kloset repository (`fs://` / `s3://`), optionally symmetric-encrypted (KDF + cipher params + canary in the repo CONFIG) (004-plakar-encryption)
+
+### Neo4j integration — lives in its own repository
+
+The Neo4j integration is **not** in this repo. It lives at **[opsmill/plakar-integration-neo4j](https://github.com/opsmill/plakar-integration-neo4j)** (module `github.com/opsmill/plakar-integration-neo4j`, currently `v0.1.0`) and is consumed here as an ordinary tagged dependency — no `replace` directive, no vendored copy. The former `contrib/integration-neo4j/` tree has been deleted.
+
+- **Fixes to the connector belong in that repository**, released as a new tag, then picked up here with a version bump plus `scripts/update-vendor-hash.sh`. Do not vendor it back or add a `replace` to a local checkout in anything you merge — a temporary `replace` is fine while developing, but must be gone before merge.
+- **Consumption is in-process**: `src/internal/app/connectors.go` blank-imports its `importer`/`exporter` packages, whose `init()` registers the `neo4j://` and `neo4j+offline://` schemes. The integration's SDK plugin binaries exist for external `plakar pkg add` users and play no part in this repo's build. Its `go-kloset-sdk` and `testcontainers-go` dependencies serve only those plugins and its own tests, and are verified absent from this repo's build closure.
+- **Engine coupling**: do not adopt a new kloset version here until a compatible integration release exists — Go's minimal-version selection compiles the integration against whichever kloset wins, and it can no longer be patched in place.
+- Plakar have advised that community integrations are **not** upstreamed into `PlakarKorp/integrations`; distribution is via a recipe in `PlakarKorp/hub`. Statements to the contrary in `specs/003-upstream-plakar-integrations/` are superseded — see `specs/003-upstream-plakar-integrations/SUPERSEDED-BY-004.md`.
+
+Two pre-existing gotchas worth knowing, neither introduced by the extraction:
+
+- `scripts/update-vendor-hash.sh` **only runs on Linux with Nix installed** — it uses GNU `grep -oP` and GNU `sed -i`, both unavailable on macOS, and requires `nix build`. On macOS the vendor hash cannot be regenerated locally.
+- `tools/neo4jwatchdog` uses Linux-only inotify APIs with **no `//go:build linux` constraint**, so plain `go build ./...` and `go test ./tools/...` fail on macOS. Use `make build` (which cross-compiles it) and scope tests to `./src/...`.
 
 ## Recent Changes
 
+- 003-collect-tool: Added `infrahub-collect` troubleshooting-bundle binary (collector framework, log/metrics primitives on both backends, key-name secret masking, bundle manifest)
 - 002-plakar-integration: Added kloset (Plakar core library), integration-fs (filesystem storage/exporter), cobra, logrus

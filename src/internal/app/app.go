@@ -57,8 +57,11 @@ type Configuration struct {
 	PostgresPassword     string
 	PostgresDatabase     string
 	S3                   *S3Config
-	Backend              BackendType
-	Plakar               *PlakarConfig
+	// Retention holds the backup retention rules. Its zero value activates no
+	// rule, so retention is opt-in and never applied by default.
+	Retention RetentionConfig
+	Backend   BackendType
+	Plakar    *PlakarConfig
 }
 
 // InfrahubOps is the main application struct

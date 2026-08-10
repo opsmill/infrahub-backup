@@ -57,9 +57,7 @@ async def verify_infrahub_data(infrahub_url: str, token: str, expected: dict) ->
     client = InfrahubClient(config=config)
 
     tag = await client.get(kind="BuiltinTag", name__value=expected["tag_name"])
-    assert tag.name.value == expected["tag_name"], (
-        f"Expected tag '{expected['tag_name']}' but got '{tag.name.value}'"
-    )
+    assert tag.name.value == expected["tag_name"], f"Expected tag '{expected['tag_name']}' but got '{tag.name.value}'"
 
 
 async def modify_infrahub_data(infrahub_url: str, token: str, data: dict) -> None:
@@ -75,9 +73,7 @@ async def modify_infrahub_data(infrahub_url: str, token: str, data: dict) -> Non
 
     # Verify deletion
     tags = await client.all(kind="BuiltinTag")
-    assert all(t.name.value != data["tag_name"] for t in tags), (
-        f"Tag '{data['tag_name']}' still exists after deletion"
-    )
+    assert all(t.name.value != data["tag_name"] for t in tags), f"Tag '{data['tag_name']}' still exists after deletion"
 
 
 def run_backup(
@@ -91,9 +87,23 @@ def run_backup(
     result = subprocess.run(cmd, capture_output=True, text=True, env=run_env)
     if result.returncode != 0:
         raise RuntimeError(
-            f"Backup failed (exit {result.returncode}):\n"
-            f"stdout: {result.stdout}\n"
-            f"stderr: {result.stderr}"
+            f"Backup failed (exit {result.returncode}):\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+    return result
+
+
+def run_collect(
+    binary: str,
+    extra_args: list[str],
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
+    """Run infrahub-collect with the given arguments."""
+    cmd = [binary] + extra_args
+    run_env = {**os.environ, **(env or {})}
+    result = subprocess.run(cmd, capture_output=True, text=True, env=run_env)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Collect failed (exit {result.returncode}):\nstdout: {result.stdout}\nstderr: {result.stderr}"
         )
     return result
 
@@ -109,11 +119,55 @@ def run_restore(
     result = subprocess.run(cmd, capture_output=True, text=True, env=run_env)
     if result.returncode != 0:
         raise RuntimeError(
-            f"Restore failed (exit {result.returncode}):\n"
-            f"stdout: {result.stdout}\n"
-            f"stderr: {result.stderr}"
+            f"Restore failed (exit {result.returncode}):\nstdout: {result.stdout}\nstderr: {result.stderr}"
         )
     return result
+
+
+def run_cli(
+    binary: str,
+    args: list[str],
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
+    """Run one of the CLI binaries and return the result without raising on failure.
+
+    The counterpart to run_backup/run_restore, for invocations whose non-zero exit is
+    itself what the test asserts.
+    """
+    run_env = {**os.environ, **(env or {})}
+    return subprocess.run([binary, *args], capture_output=True, text=True, stdin=subprocess.DEVNULL, env=run_env)
+
+
+def compose_container_runtimes(project: str) -> dict[str, str]:
+    """Status and start time of every container in a compose project, keyed by name.
+
+    Stopping or restarting a container moves its StartedAt, so a snapshot that is
+    unchanged across an invocation is what shows the invocation never touched the
+    deployment — the "nothing was restored" half of the fail-fast contract.
+    """
+    ids = subprocess.run(
+        ["docker", "ps", "-aq", "--filter", f"label=com.docker.compose.project={project}"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    if not ids:
+        raise AssertionError(f"no containers found for compose project {project}")
+
+    inspected = subprocess.run(
+        ["docker", "inspect", "--format", "{{.Name}}\t{{.State.Status}}\t{{.State.StartedAt}}", *ids],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+    runtimes = {}
+    for line in inspected.splitlines():
+        if not line.strip():
+            continue
+        name, status, started_at = line.split("\t")
+        runtimes[name] = f"{status} {started_at}"
+    return runtimes
 
 
 def find_latest_backup(backup_dir: str | Path) -> Path:

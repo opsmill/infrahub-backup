@@ -2,11 +2,15 @@ package app
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/sirupsen/logrus"
 )
@@ -58,6 +62,161 @@ func (ce *CommandExecutor) runCommand(name string, args ...string) (string, erro
 	cmd := exec.Command(name, args...)
 	output, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(output)), err
+}
+
+// timeoutError marks a command that exceeded its allotted execution time. Its
+// message is exactly "timed out after <duration>" so orchestrators can surface
+// it verbatim (e.g. as a bundle manifest failure reason).
+type timeoutError struct {
+	timeout time.Duration
+}
+
+func (e *timeoutError) Error() string {
+	return "timed out after " + formatCommandTimeout(e.timeout)
+}
+
+// formatCommandTimeout renders whole-second durations as plain seconds
+// ("60s", "300s") to match the documented reason format; sub-second
+// durations fall back to Go's default formatting.
+func formatCommandTimeout(d time.Duration) string {
+	if d == d.Truncate(time.Second) {
+		return fmt.Sprintf("%ds", int64(d/time.Second))
+	}
+	return d.String()
+}
+
+// runCommandContext is the timeout-bounded variant of runCommand: the command
+// is killed once timeout elapses (or ctx is cancelled) and the returned error
+// is a *timeoutError when the timeout expired.
+func (ce *CommandExecutor) runCommandContext(ctx context.Context, timeout time.Duration, name string, args ...string) (string, error) {
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(cctx, name, args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil && errors.Is(cctx.Err(), context.DeadlineExceeded) {
+		return strings.TrimSpace(string(output)), &timeoutError{timeout: timeout}
+	}
+	return strings.TrimSpace(string(output)), err
+}
+
+// runCommandSeparateContext is the timeout-bounded variant of runCommand that
+// keeps the command's output streams apart: stdout is returned first, stderr
+// second. Callers that write a command's stdout to a file need this — merged
+// output (runCommandContext) lets any stderr line the tool or the container
+// runtime emits land inside the payload, which corrupts structured dumps
+// (e.g. kubectl's `Defaulted container "x" out of: …` notice prepended to a
+// JSON document). The returned error is a *timeoutError when the timeout
+// expired.
+func (ce *CommandExecutor) runCommandSeparateContext(ctx context.Context, timeout time.Duration, name string, args ...string) (string, string, error) {
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	var stdout, stderr bytes.Buffer
+	cmd := exec.CommandContext(cctx, name, args...)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	out, errOut := strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String())
+	if err != nil && errors.Is(cctx.Err(), context.DeadlineExceeded) {
+		return out, errOut, &timeoutError{timeout: timeout}
+	}
+	return out, errOut, err
+}
+
+// runCommandPipeContext is the timeout-bounded variant of runCommandPipe. The
+// caller must read from stdout and then call wait() to get the exit status;
+// wait() returns a *timeoutError when the timeout expired before the command
+// finished. The internal context is released when wait() is called.
+func (ce *CommandExecutor) runCommandPipeContext(ctx context.Context, timeout time.Duration, name string, args ...string) (io.ReadCloser, func() error, error) {
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+
+	cmd := exec.CommandContext(cctx, name, args...)
+	logrus.Debugf("exec pipe (timeout %s): %s %s", timeout, name, strings.Join(args, " "))
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		return nil, nil, err
+	}
+
+	// Capture stderr for error reporting
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return nil, nil, err
+	}
+
+	wait := func() error {
+		defer cancel()
+		if err := cmd.Wait(); err != nil {
+			if errors.Is(cctx.Err(), context.DeadlineExceeded) {
+				return &timeoutError{timeout: timeout}
+			}
+			stderrStr := strings.TrimSpace(stderrBuf.String())
+			if stderrStr != "" {
+				return fmt.Errorf("%w: %s", err, stderrStr)
+			}
+			return err
+		}
+		return nil
+	}
+
+	return stdout, wait, nil
+}
+
+// runCommandCombinedPipeContext is runCommandPipeContext with the command's
+// stderr merged into the returned stream. `docker logs` demuxes a container's
+// output onto the matching process streams and Infrahub services log to
+// stderr, so capturing stdout alone would drop most of the log content. The
+// caller must drain the reader and then call wait(); wait() returns a
+// *timeoutError when the timeout expired before the command finished.
+func (ce *CommandExecutor) runCommandCombinedPipeContext(ctx context.Context, timeout time.Duration, name string, args ...string) (io.ReadCloser, func() error, error) {
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+
+	cmd := exec.CommandContext(cctx, name, args...)
+	logrus.Debugf("exec combined pipe (timeout %s): %s %s", timeout, name, strings.Join(args, " "))
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		cancel()
+		return nil, nil, err
+	}
+	cmd.Stdout = writer
+	cmd.Stderr = writer
+
+	if err := cmd.Start(); err != nil {
+		cancel()
+		if closeErr := reader.Close(); closeErr != nil {
+			logrus.Debugf("Failed to close pipe reader: %v", closeErr)
+		}
+		if closeErr := writer.Close(); closeErr != nil {
+			logrus.Debugf("Failed to close pipe writer: %v", closeErr)
+		}
+		return nil, nil, err
+	}
+
+	// The child process holds its own descriptor; closing the parent's copy
+	// lets the reader observe EOF as soon as the command exits.
+	if closeErr := writer.Close(); closeErr != nil {
+		logrus.Debugf("Failed to close pipe writer: %v", closeErr)
+	}
+
+	wait := func() error {
+		defer cancel()
+		if err := cmd.Wait(); err != nil {
+			if errors.Is(cctx.Err(), context.DeadlineExceeded) {
+				return &timeoutError{timeout: timeout}
+			}
+			return err
+		}
+		return nil
+	}
+
+	return reader, wait, nil
 }
 
 func (ce *CommandExecutor) runCommandQuiet(name string, args ...string) error {

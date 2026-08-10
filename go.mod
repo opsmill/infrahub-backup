@@ -4,21 +4,27 @@ go 1.25.0
 
 require (
 	github.com/PlakarKorp/integration-fs v1.1.0-beta.5
-	github.com/PlakarKorp/integration-postgresql v1.1.0-beta.7
 	github.com/PlakarKorp/integration-s3 v1.1.0-beta.5
 	github.com/PlakarKorp/kloset v1.1.0
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.9.1
 	github.com/minio/minio-go/v7 v7.0.95
+	github.com/minio/selfupdate v0.6.0
 	github.com/sirupsen/logrus v1.9.4
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
-	golang.org/x/sys v0.45.0
+	golang.org/x/mod v0.37.0
+	golang.org/x/sys v0.46.0
+	golang.org/x/term v0.44.0
 )
 
+require github.com/jackc/puddle/v2 v2.2.2 // indirect
+
 require (
+	aead.dev/minisign v0.2.0 // indirect
 	github.com/DataDog/zstd v1.5.7 // indirect
 	github.com/PlakarKorp/go-cdc-chunkers v1.0.3 // indirect
+	github.com/PlakarKorp/integration-postgresql v1.1.0-beta.7
 	github.com/RaduBerinde/axisds v0.1.0 // indirect
 	github.com/RaduBerinde/btreemap v0.0.0-20250419174037-3d62b7205d54 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
@@ -45,7 +51,6 @@ require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
-	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99 // indirect
 	github.com/klauspost/compress v1.18.5 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
@@ -86,7 +91,6 @@ require (
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/crypto v0.52.0 // indirect
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f // indirect
-	golang.org/x/mod v0.36.0 // indirect
 	golang.org/x/net v0.54.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
