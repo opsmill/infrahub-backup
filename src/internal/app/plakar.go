@@ -237,38 +237,41 @@ func inspectEncryption(configBytes []byte) (*encryption.Configuration, error) {
 // silently downgraded on an existing plaintext repo (FR-008).
 //
 // No read or write of repository contents happens before the canary check (FR-012).
-func newRepository(kctx *kcontext.KContext, store storage.Store, configBytes []byte, passphrase string, requireEncrypted bool) (*repository.Repository, error) {
+func newRepository(kctx *kcontext.KContext, store storage.Store, configBytes []byte, passphrase string, requireEncrypted bool) (repo *repository.Repository, err error) {
+	// The caller only owns the store once this returns a repository, so every
+	// failure below closes it — including the ones that never reach repository.New,
+	// such as a wrong passphrase or --encrypt on a plaintext repo.
+	defer func() {
+		if err != nil {
+			store.Close(kctx.Context)
+		}
+	}()
+
 	enc, err := inspectEncryption(configBytes)
 	if err != nil {
-		store.Close(kctx.Context)
 		return nil, err
 	}
 
 	var secret []byte
 	switch {
 	case enc == nil && requireEncrypted:
-		store.Close(kctx.Context)
 		return nil, errEncryptExistingPlaintextRepo
 	case enc == nil && passphrase != "":
 		logrus.Warn("repository is not encrypted; the supplied passphrase is ignored")
 	case enc != nil && passphrase == "":
-		store.Close(kctx.Context)
 		return nil, errEncryptedRepoNeedsPassphrase
 	case enc != nil:
 		secret, err = encryption.DeriveKey(enc.KDFParams, []byte(passphrase))
 		if err != nil {
-			store.Close(kctx.Context)
 			return nil, fmt.Errorf("deriving repository key: %w", err)
 		}
 		if !encryption.VerifyCanary(enc, secret) {
-			store.Close(kctx.Context)
 			return nil, errWrongPassphrase
 		}
 	}
 
-	repo, err := repository.New(kctx, secret, store, configBytes)
+	repo, err = repository.New(kctx, secret, store, configBytes)
 	if err != nil {
-		store.Close(kctx.Context)
 		return nil, fmt.Errorf("failed to open plakar repository: %w", err)
 	}
 	return repo, nil
