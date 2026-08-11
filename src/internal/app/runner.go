@@ -298,6 +298,37 @@ func parseRepoLocation(repoPath string) (local bool, path string) {
 	return true, repoPath
 }
 
+// liftS3Credentials resolves the credentials for an s3:// location — any embedded
+// in the URI win, then the values passed in, then the host's AWS_* environment —
+// and returns the location with the userinfo removed, so that a caller may put it
+// somewhere a credential must not appear.
+//
+// embedded reports that the URI carried userinfo, which both callers read as "a
+// local S3-compatible store, reached over plain HTTP": lifting the credentials out
+// of the URI must not silently flip such a repository to TLS.
+//
+// The two callers sit on either side of the runner boundary — storeConfig hands the
+// keys to the storage backend as separate config entries, repoAccessFor sends them
+// over the runner's stdin — and had grown the same resolution twice.
+func liftS3Credentials(location, accessKey, secretKey string) (cleaned, resolvedAccessKey, resolvedSecretKey string, embedded bool) {
+	cleaned = location
+	if u, err := url.Parse(location); err == nil && u.User != nil {
+		accessKey = u.User.Username()
+		if secret, ok := u.User.Password(); ok {
+			secretKey = secret
+		}
+		u.User = nil
+		cleaned, embedded = u.String(), true
+	}
+	if accessKey == "" {
+		accessKey = os.Getenv("AWS_ACCESS_KEY_ID")
+	}
+	if secretKey == "" {
+		secretKey = os.Getenv("AWS_SECRET_ACCESS_KEY")
+	}
+	return cleaned, accessKey, secretKey, embedded
+}
+
 // runnerRepoAccess is how the runner is told to reach the repository, split into
 // the part that is safe to put on a command line and the part that is not.
 type runnerRepoAccess struct {
@@ -338,21 +369,7 @@ func repoAccessFor(repoPath string) runnerRepoAccess {
 	if !strings.HasPrefix(repoPath, "s3://") {
 		return access
 	}
-	if u, err := url.Parse(access.Location); err == nil && u.User != nil {
-		access.AccessKey = u.User.Username()
-		if secret, ok := u.User.Password(); ok {
-			access.SecretKey = secret
-		}
-		u.User = nil
-		access.Location = u.String()
-		access.Insecure = true
-	}
-	if access.AccessKey == "" {
-		access.AccessKey = os.Getenv("AWS_ACCESS_KEY_ID")
-	}
-	if access.SecretKey == "" {
-		access.SecretKey = os.Getenv("AWS_SECRET_ACCESS_KEY")
-	}
+	access.Location, access.AccessKey, access.SecretKey, access.Insecure = liftS3Credentials(access.Location, "", "")
 	return access
 }
 

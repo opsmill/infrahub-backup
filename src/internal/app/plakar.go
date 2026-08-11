@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -161,23 +160,12 @@ func storeConfig(cfg *PlakarConfig) map[string]string {
 		useTLS = false
 	}
 
-	accessKey, secretKey := cfg.S3AccessKey, cfg.S3SecretKey
-	if u, err := url.Parse(location); err == nil && u.User != nil {
-		// Credentials from URL userinfo (highest priority)
-		accessKey = u.User.Username()
-		if secret, ok := u.User.Password(); ok {
-			secretKey = secret
-		}
-		// Strip userinfo from the location so the S3 backend only sees host/path
-		u.User = nil
-		sc["location"] = u.String()
+	// The location handed to the backend carries no userinfo: the credentials are
+	// passed separately below.
+	location, accessKey, secretKey, embedded := liftS3Credentials(location, cfg.S3AccessKey, cfg.S3SecretKey)
+	sc["location"] = location
+	if embedded {
 		useTLS = false // embedded creds = local S3, backward compat
-	}
-	if accessKey == "" {
-		accessKey = os.Getenv("AWS_ACCESS_KEY_ID")
-	}
-	if secretKey == "" {
-		secretKey = os.Getenv("AWS_SECRET_ACCESS_KEY")
 	}
 	if accessKey != "" {
 		sc["access_key"] = accessKey
