@@ -75,6 +75,56 @@ func TestPrepareRepoBeforeRedactOrdering(t *testing.T) {
 	})
 }
 
+// The ordering cases above use stub closures. This one runs the REAL preparation
+// step — iops.ensurePlakarRepo, i.e. the whole openOrCreateRepo → newRepository →
+// VerifyCanary chain — against an encrypted repository, so the claim being pinned
+// is the production one: a wrong or absent passphrase fails before redactDatabase
+// is reached, not merely before some test double is.
+func TestWrongPassphraseFailsBeforeRedaction(t *testing.T) {
+	// An encrypted repository to point the backup at.
+	encrypted := newTestPlakarConfig(t)
+	encrypted.Encrypt = true
+	encrypted.Passphrase = "the-right-passphrase"
+	writeTestSnapshot(t, encrypted, "seed", randomMarker(t, 128), nil)
+
+	for _, tc := range []struct {
+		name       string
+		passphrase string
+		wantErr    error
+	}{
+		{"wrong passphrase", "the-wrong-passphrase", errWrongPassphrase},
+		{"absent passphrase", "", errEncryptedRepoNeedsPassphrase},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			iops := NewInfrahubOps()
+			iops.backend = newLifecycleBackend() // records any exec the redaction would make
+			iops.config.Plakar = &PlakarConfig{
+				RepoPath:   encrypted.RepoPath,
+				CacheDir:   t.TempDir(),
+				Passphrase: tc.passphrase,
+			}
+
+			redacted := false
+			err := prepareRepoBeforeRedact(true, true,
+				func() error { return iops.ensurePlakarRepo() },
+				func() error { redacted = true; return iops.redactDatabase() },
+			)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("err = %v, want %v", err, tc.wantErr)
+			}
+			if redacted {
+				t.Fatal("the database was redacted despite the repository being unopenable")
+			}
+			// And nothing reached the database at all.
+			for _, call := range iops.backend.(*lifecycleBackend).calls {
+				if strings.HasPrefix(call, "exec") {
+					t.Errorf("the database was contacted before the repository was proven openable: %q", call)
+				}
+			}
+		})
+	}
+}
+
 // The Community offline dump takes the database away, so the application tier has
 // to be stopped for it — main did, and the runner rewrite kept only
 // StopServices("database"). Order matters both ways: the applications go down
