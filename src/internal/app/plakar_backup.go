@@ -17,11 +17,6 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// componentBackup holds the result of a single component snapshot creation.
-type componentBackup struct {
-	component string
-}
-
 // errRedactRequiresForce is returned when --redact is used without --force.
 var errRedactRequiresForce = errors.New(
 	"--redact is a destructive operation that replaces all attribute values in the database with random UUIDs; use --force to confirm")
@@ -124,7 +119,7 @@ func (iops *InfrahubOps) CreatePlakarBackup(force bool, neo4jMetadata string, ex
 	}
 	metadataObj.Components = components
 
-	var completed []componentBackup
+	var completed []string
 	for _, component := range components {
 		logrus.Infof("Creating snapshot for component: %s", component)
 		tags := buildSnapshotTags(metadataObj, component, backupID, StatusComplete)
@@ -149,7 +144,7 @@ func (iops *InfrahubOps) CreatePlakarBackup(force bool, neo4jMetadata string, ex
 			return fmt.Errorf("backup failed for %s: %w", component, cerr)
 		}
 
-		completed = append(completed, componentBackup{component: component})
+		completed = append(completed, component)
 		logrus.WithFields(logrus.Fields{
 			"component":   component,
 			"snapshot_id": snapHex,
@@ -353,16 +348,12 @@ func (iops *InfrahubOps) writeMetadataSnapshot(metadataObj *BackupMetadata, tags
 // logIncompleteBackup warns about a partial backup failure. kloset doesn't
 // support modifying tags after snapshot creation, so a group's incomplete status
 // is derived at query time from missing components.
-func logIncompleteBackup(completed []componentBackup, totalExpected int, backupID string) {
+func logIncompleteBackup(completed []string, totalExpected int, backupID string) {
 	if len(completed) == 0 {
 		return
 	}
-	names := make([]string, len(completed))
-	for i, c := range completed {
-		names[i] = c.component
-	}
 	logrus.Warnf("Backup group %s is incomplete (%d/%d components created: %s)",
-		backupID, len(completed), totalExpected, strings.Join(names, ", "))
+		backupID, len(completed), totalExpected, strings.Join(completed, ", "))
 }
 
 // buildSnapshotTags creates Plakar snapshot tags for a component snapshot.
