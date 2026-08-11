@@ -110,6 +110,14 @@ func initPlakarContext(cfg *PlakarConfig) (*kcontext.KContext, error) {
 		return nil, fmt.Errorf("failed to create cache directory %s: %w", cacheDir, err)
 	}
 
+	// kloset resolves its own per-snapshot scratch state as
+	// path.Join(CacheDir, CACHE_VERSION, …) (snapshot/backup.go tmpCacheDir). Left
+	// empty, that join is relative, so every backup wrote a "<cache-version>/store"
+	// tree under whatever the working directory happened to be — 28 MB across 132
+	// directories accumulated under src/internal/app/ from this branch's tests alone.
+	// Setting it puts that state next to the pebble cache, where it belongs.
+	kctx.CacheDir = cacheDir
+
 	cacheMgr := caching.NewManager(pebble.Constructor(cacheDir))
 	kctx.SetCache(cacheMgr)
 

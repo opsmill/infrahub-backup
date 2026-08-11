@@ -6,9 +6,6 @@ src/internal/app/embedded/neo4jwatchdog/*watchdog*
 # neo4jwatchdog build output (cross-compiled by make build)
 tools/neo4jwatchdog/neo4jwatchdog
 
-# stray kloset/pebble relative cache (defensive)
-2.0.0/
-
 # Python
 __pycache__/
 *.py[cod]

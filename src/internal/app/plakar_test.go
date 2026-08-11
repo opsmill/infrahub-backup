@@ -44,6 +44,27 @@ func TestRepoMissingClassification(t *testing.T) {
 	}
 }
 
+// kloset resolves its per-snapshot scratch state under kctx.CacheDir. Left unset,
+// the join is relative and every backup litters the working directory with a
+// "<cache-version>/store" tree — 28 MB across 132 directories had accumulated under
+// src/internal/app/ from this branch's tests. The state must land under the
+// configured cache directory instead.
+func TestPlakarContextUsesTheConfiguredCacheDir(t *testing.T) {
+	cacheDir := t.TempDir()
+	kctx, err := initPlakarContext(&PlakarConfig{RepoPath: filepath.Join(t.TempDir(), "repo"), CacheDir: cacheDir})
+	if err != nil {
+		t.Fatalf("initPlakarContext: %v", err)
+	}
+	defer closePlakarContext(kctx)
+
+	if kctx.CacheDir != cacheDir {
+		t.Errorf("kctx.CacheDir = %q, want %q — an empty value makes kloset's scratch path relative to the CWD", kctx.CacheDir, cacheDir)
+	}
+	if !filepath.IsAbs(kctx.CacheDir) {
+		t.Errorf("kctx.CacheDir = %q, want an absolute path", kctx.CacheDir)
+	}
+}
+
 // An unreadable repository location must fail on the OPEN, not silently fall
 // through to creating a fresh repository there. The path here has a regular file
 // where a directory is needed, so opening CONFIG fails with ENOTDIR rather than
