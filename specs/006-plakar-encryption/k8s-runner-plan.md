@@ -241,3 +241,30 @@ locally → `CopyTo` the container → `Exec` the argv from `RestoreArgs(remoteS
 Postgres has a Kubernetes route. Acceptance stays as stated above: `test_k8s_plakar.py` and
 `test_k8s_plakar_s3.py` green, the Docker suites unbroken, and a backup taken on one backend
 restoring on the other.
+
+### Local Kubernetes testing IS possible — do not assume CI-only
+
+Earlier notes in this session said k8s verification was CI-only at ~28 minutes a run. That was
+wrong, and wrong the same way the Enterprise listener was: concluded without checking.
+
+Available on this machine: `kubectl`, `helm v4.2.1`, `minikube v1.38.1` with a minikube context
+already configured (the cluster itself needs `minikube start` — its container was gone).
+`vcluster` is absent, but that is a CI convenience; the tool needs an API server, not vcluster.
+
+Confirmed from `helm show values oci://registry.opsmill.io/opsmill/chart/infrahub`:
+
+- The Neo4j subchart sets **`nameOverride: database`**, so the service is named `database` —
+  exactly what `iops.Exec("database", …)` and `CopyFrom("database", …)` already target. No
+  service-name plumbing needed.
+- **`edition: "community"`** by default, `acceptLicenseAgreement: "no"`, password `admin`. So the
+  default deployment exercises the **offline dump** path — the one that genuinely requires
+  co-location with the data directory, i.e. precisely what the in-place fix is for. The T071
+  Enterprise listener trap is not in play by default, which also means a Community-only test
+  cannot catch a regression in the online path.
+
+What will **not** run here: `tests/e2e/test_k8s_plakar.py`, because `infrahub-testcontainers`
+calls `psutil.cpu_freq()` unguarded in `pytest_sessionstart` and that raises on Apple Silicon,
+crashing the session before collection. A one-line `try/except` upstream in
+`infrahub_testcontainers/host.py` would fix it for every M-series machine. Until then, verify the
+layer that matters by deploying the chart with helm and running `infrahub-backup --backend plakar`
+against it by hand, as was done against the live Docker instance.
