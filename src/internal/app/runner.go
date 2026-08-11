@@ -53,14 +53,19 @@ func LaunchComposeBackup(project, dbService, repoPath, uri, passphrase string, o
 	return runDockerCapture(args, passphrase)
 }
 
-// LaunchComposeRestore runs ONE restore connector op in a co-located runner.
-func LaunchComposeRestore(project, dbService, repoPath, destURI, snapshot, passphrase string, opts map[string]string, mountDBVolumes bool) error {
+// LaunchComposeRestore runs ONE restore connector op in a co-located runner. A
+// requested Neo4j format migration runs inside the same runner, in the same offline
+// window as the load (see Neo4jMigration).
+func LaunchComposeRestore(project, dbService, repoPath, destURI, snapshot, passphrase string, opts map[string]string, mountDBVolumes bool, migrate Neo4jMigration) error {
 	args, err := composeRunnerArgs(project, dbService, repoPath, mountDBVolumes, passphrase != "")
 	if err != nil {
 		return err
 	}
 	repoArg := repoArgFor(repoPath)
 	args = append(args, "__run-connector", "restore", repoArg, destURI, snapshot)
+	if migrate.Requested() {
+		args = append(args, "--migrate-format", migrate.Format, "--migrate-database", migrate.Database)
+	}
 	if mountDBVolumes {
 		// The runner writes into the database's own data volume, and now does so as
 		// real root (see the entrypoint note in composeRunnerArgs). A data directory

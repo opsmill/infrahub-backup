@@ -266,6 +266,33 @@ func TestEncryptKeyRejectedOnPlakar(t *testing.T) {
 	}
 }
 
+// The restore-side mirror of VR-7: --decrypt-key names a private-key PEM for the
+// tarball backend's ECIES archives and means nothing to a passphrase-derived
+// symmetric repository. It was accepted and dropped in silence — main.go passed it
+// into RestoreBackup, which handed the plakar path nothing — so a restore
+// configured only with --decrypt-key ran as though no key had been given.
+func TestDecryptKeyRejectedOnPlakar(t *testing.T) {
+	t.Setenv(passphraseEnvVar, "a-long-enough-passphrase")
+
+	iops := NewInfrahubOps()
+	if err := iops.PreparePlakarRestore("/path/to/key.pem", ""); !errors.Is(err, errDecryptKeyOnPlakar) {
+		t.Fatalf("want errDecryptKeyOnPlakar, got %v", err)
+	}
+	// The passphrase must not have been consumed by the rejected invocation.
+	if iops.Config().Plakar.Passphrase != "" {
+		t.Error("the refusal still resolved the passphrase")
+	}
+
+	// Without it, the passphrase resolves as before.
+	iops = NewInfrahubOps()
+	if err := iops.PreparePlakarRestore("", ""); err != nil {
+		t.Fatalf("PreparePlakarRestore without --decrypt-key: %v", err)
+	}
+	if iops.Config().Plakar.Passphrase != "a-long-enough-passphrase" {
+		t.Errorf("passphrase = %q, want it resolved from the environment", iops.Config().Plakar.Passphrase)
+	}
+}
+
 // PreparePlakarEncryption must refuse --encrypt without a passphrase and reject a
 // too-short one, before any repository work (FR-006, FR-013).
 func TestPreparePlakarEncryptionValidation(t *testing.T) {

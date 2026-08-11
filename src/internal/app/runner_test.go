@@ -199,10 +199,11 @@ func TestExportWithOwnershipRestored(t *testing.T) {
 	t.Run("a failed export still closes and restores ownership", func(t *testing.T) {
 		calls, step := steps()
 		exportErr := errors.New("neo4j-admin exited 1")
-		err := exportWithOwnershipRestored(step("export", exportErr), step("close", nil), step("chown", nil))
+		err := exportWithOwnershipRestored(step("export", exportErr), step("close", nil), step("migrate", nil), step("chown", nil))
 		if !errors.Is(err, exportErr) {
 			t.Fatalf("err = %v, want the export error", err)
 		}
+		// The migration is skipped: there is no restored store to migrate.
 		if got := strings.Join(*calls, ","); got != "export,close,chown" {
 			t.Fatalf("call order = %q, want \"export,close,chown\"", got)
 		}
@@ -211,7 +212,7 @@ func TestExportWithOwnershipRestored(t *testing.T) {
 	t.Run("a failing close still restores ownership", func(t *testing.T) {
 		calls, step := steps()
 		closeErr := errors.New("closing exporter")
-		err := exportWithOwnershipRestored(step("export", nil), step("close", closeErr), step("chown", nil))
+		err := exportWithOwnershipRestored(step("export", nil), step("close", closeErr), step("migrate", nil), step("chown", nil))
 		if !errors.Is(err, closeErr) {
 			t.Fatalf("err = %v, want the close error", err)
 		}
@@ -226,6 +227,7 @@ func TestExportWithOwnershipRestored(t *testing.T) {
 		err := exportWithOwnershipRestored(
 			step("export", exportErr),
 			step("close", errors.New("close also failed")),
+			step("migrate", errors.New("migrate also failed")),
 			step("chown", errors.New("chown also failed")),
 		)
 		if !errors.Is(err, exportErr) {
@@ -233,10 +235,29 @@ func TestExportWithOwnershipRestored(t *testing.T) {
 		}
 	})
 
+	t.Run("a requested migration runs after the close and before the chown", func(t *testing.T) {
+		calls, step := steps()
+		if err := exportWithOwnershipRestored(step("export", nil), step("close", nil), step("migrate", nil), step("chown", nil)); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := strings.Join(*calls, ","); got != "export,close,migrate,chown" {
+			t.Fatalf("call order = %q, want \"export,close,migrate,chown\" — a migration must be inside the offline window and behind the chown", got)
+		}
+	})
+
+	t.Run("a failing migration is reported", func(t *testing.T) {
+		_, step := steps()
+		migrateErr := errors.New("migrating neo4j to format block")
+		err := exportWithOwnershipRestored(step("export", nil), step("close", nil), step("migrate", migrateErr), step("chown", nil))
+		if !errors.Is(err, migrateErr) {
+			t.Fatalf("err = %v, want the migration error", err)
+		}
+	})
+
 	t.Run("a chown failure on an otherwise clean restore is reported", func(t *testing.T) {
 		_, step := steps()
 		chownErr := errors.New("restoring ownership of /data")
-		err := exportWithOwnershipRestored(step("export", nil), step("close", nil), step("chown", chownErr))
+		err := exportWithOwnershipRestored(step("export", nil), step("close", nil), step("migrate", nil), step("chown", chownErr))
 		if !errors.Is(err, chownErr) {
 			t.Fatalf("err = %v, want the chown error", err)
 		}

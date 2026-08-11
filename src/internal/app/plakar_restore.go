@@ -35,13 +35,6 @@ func (iops *InfrahubOps) RestorePlakarBackup(excludeTaskManager bool, restoreMig
 		return fmt.Errorf("the plakar runner restore currently supports Docker Compose only; Kubernetes support is pending")
 	}
 
-	if restoreMigrateFormat {
-		logrus.Warn("--migrate-format is not yet supported by the runner restore; ignoring")
-	}
-	if resetDeploymentID {
-		logrus.Warn("--reset-deployment-id is not yet supported by the runner restore; ignoring")
-	}
-
 	kctx, err := initPlakarContext(iops.config.Plakar)
 	if err != nil {
 		return fmt.Errorf("failed to initialize plakar context: %w", err)
@@ -84,11 +77,18 @@ func (iops *InfrahubOps) RestorePlakarBackup(excludeTaskManager bool, restoreMig
 		return err
 	}
 
+	// A format migration has to run in the same offline window as the load, so it
+	// travels to the runner rather than being run from here.
+	var migrate Neo4jMigration
+	if restoreMigrateFormat {
+		migrate = Neo4jMigration{Format: "block", Database: iops.config.Neo4jDatabase}
+	}
+
 	restoreComponent := func(snapInfo SnapshotInfo) error {
 		return iops.restoreComponentViaRunner(project, repoPath, snapInfo.Component,
-			fmt.Sprintf("%x", snapInfo.MAC[:]), community, excludeTaskManager)
+			fmt.Sprintf("%x", snapInfo.MAC[:]), community, excludeTaskManager, migrate)
 	}
-	if err := iops.restoreComponents(plan, restoreComponent); err != nil {
+	if err := iops.restoreComponents(plan, restoreComponent, resetDeploymentID); err != nil {
 		return err
 	}
 
@@ -241,7 +241,7 @@ var appServices = []string{
 // nothing is connected to it, its dependencies come back, and Neo4j is replaced
 // last. restoreComponent applies one component snapshot; it is a parameter so the
 // lifecycle can be exercised without launching runners.
-func (iops *InfrahubOps) restoreComponents(plan restorePlan, restoreComponent func(SnapshotInfo) error) error {
+func (iops *InfrahubOps) restoreComponents(plan restorePlan, restoreComponent func(SnapshotInfo) error, resetDeploymentID bool) error {
 	if err := iops.wipeTransientData(); err != nil {
 		return err
 	}
@@ -259,6 +259,7 @@ func (iops *InfrahubOps) restoreComponents(plan restorePlan, restoreComponent fu
 
 	// ComponentMetadata restores nothing to the containers, but it is dispatched
 	// like the others so an unexpected component cannot be silently skipped.
+	restoredNeo4j := false
 	for _, phase := range []string{ComponentPostgres, ComponentNeo4j, ComponentMetadata} {
 		for _, snapInfo := range plan.snapshots {
 			if snapInfo.Component != phase {
@@ -267,11 +268,29 @@ func (iops *InfrahubOps) restoreComponents(plan restorePlan, restoreComponent fu
 			if err := restoreComponent(snapInfo); err != nil {
 				return err
 			}
+			if phase == ComponentNeo4j {
+				restoredNeo4j = true
+			}
 		}
 		if phase == ComponentPostgres {
 			// cache, message-queue and the task manager come back on the wiped state
 			// before Neo4j is replaced, as they did on main.
 			if err := iops.restartDependencies(); err != nil {
+				return err
+			}
+		}
+	}
+
+	// The new Root UUID is written before the application containers restart,
+	// because they read and cache the old one on startup. The Neo4j restore has
+	// already restarted the database and waited for Bolt by this point, which is
+	// what resetDeploymentID needs.
+	if resetDeploymentID {
+		switch {
+		case !restoredNeo4j:
+			logrus.Warn("--reset-deployment-id ignored: no Neo4j component was restored")
+		default:
+			if err := iops.resetDeploymentID(); err != nil {
 				return err
 			}
 		}
@@ -287,7 +306,7 @@ func (iops *InfrahubOps) restoreComponents(plan restorePlan, restoreComponent fu
 
 // restoreComponentViaRunner restores one component by driving its connector
 // exporter in a co-located runner, with the lifecycle each engine needs.
-func (iops *InfrahubOps) restoreComponentViaRunner(project, repoPath, component, snapHex string, community, excludeTaskManager bool) (retErr error) {
+func (iops *InfrahubOps) restoreComponentViaRunner(project, repoPath, component, snapHex string, community, excludeTaskManager bool, migrate Neo4jMigration) (retErr error) {
 	switch component {
 	case ComponentNeo4j:
 		// Stop the writer so neo4j-admin can replace the store, run the exporter in
@@ -320,7 +339,7 @@ func (iops *InfrahubOps) restoreComponentViaRunner(project, repoPath, component,
 			}
 		}()
 		opts := map[string]string{"neo4j_bin_dir": neo4jRunnerBinDir, "overwrite": "true"}
-		if err := LaunchComposeRestore(project, "database", repoPath, uri, snapHex, iops.config.Plakar.Passphrase, opts, true); err != nil {
+		if err := LaunchComposeRestore(project, "database", repoPath, uri, snapHex, iops.config.Plakar.Passphrase, opts, true, migrate); err != nil {
 			return fmt.Errorf("neo4j restore failed: %w", err)
 		}
 		logrus.Info("Neo4j restore completed")
@@ -332,7 +351,7 @@ func (iops *InfrahubOps) restoreComponentViaRunner(project, repoPath, component,
 			return nil
 		}
 		uri := dbURI("postgres", iops.config.PostgresUsername, iops.config.PostgresPassword, "task-manager-db", "5432", iops.config.PostgresDatabase)
-		if err := LaunchComposeRestore(project, "task-manager-db", repoPath, uri, snapHex, iops.config.Plakar.Passphrase, postgresRestoreOpts(), false); err != nil {
+		if err := LaunchComposeRestore(project, "task-manager-db", repoPath, uri, snapHex, iops.config.Plakar.Passphrase, postgresRestoreOpts(), false, Neo4jMigration{}); err != nil {
 			return fmt.Errorf("postgres restore failed: %w", err)
 		}
 		logrus.Info("Postgres restore completed")

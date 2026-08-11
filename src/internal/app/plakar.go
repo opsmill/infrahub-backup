@@ -53,6 +53,15 @@ var (
 	// is used with the plakar backend, which uses passphrase-derived symmetric keys.
 	errEncryptKeyOnPlakar = errors.New(
 		"--encrypt-key is only valid for the tarball backend; for --backend plakar use --encrypt with a passphrase (INFRAHUB_BACKUP_PASSPHRASE or --passphrase-file)")
+	// errDecryptKeyOnPlakar is the restore-side counterpart of
+	// errEncryptKeyOnPlakar: --decrypt-key names a private-key PEM for the tarball
+	// backend's ECIES archives, which has no meaning for a passphrase-derived
+	// symmetric repository. It used to be accepted and dropped in silence, so a
+	// restore configured only with --decrypt-key ran as if no key had been given —
+	// and then failed, or succeeded against a plaintext repo, for reasons that named
+	// neither flag.
+	errDecryptKeyOnPlakar = errors.New(
+		"--decrypt-key is only valid for the tarball backend; for --backend plakar the repository passphrase is supplied via INFRAHUB_BACKUP_PASSPHRASE or --passphrase-file")
 	// errEncryptExistingPlaintextRepo is returned when --encrypt targets a
 	// repository that already exists as plaintext. Encryption is fixed at
 	// creation (FR-008); refusing loudly avoids silently appending plaintext to a
@@ -442,6 +451,18 @@ func (iops *InfrahubOps) PreparePlakarEncryption(encrypt bool, encryptKey, passp
 		}
 	}
 	return nil
+}
+
+// PreparePlakarRestore validates the encryption inputs for a plakar restore and
+// resolves the passphrase. It is the restore-side mirror of
+// PreparePlakarEncryption: the tarball backend's --decrypt-key is rejected rather
+// than silently ignored, and the refusal happens before anything is stopped or
+// overwritten.
+func (iops *InfrahubOps) PreparePlakarRestore(decryptKey, passphraseFile string) error {
+	if decryptKey != "" {
+		return errDecryptKeyOnPlakar
+	}
+	return iops.LoadPlakarPassphrase(passphraseFile)
 }
 
 // LoadPlakarPassphrase resolves the passphrase (env/file) for opening an

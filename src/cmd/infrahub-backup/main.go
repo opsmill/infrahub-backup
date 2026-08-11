@@ -315,19 +315,21 @@ func main() {
 			if err != nil {
 				return err
 			}
+			forceRestore, _ := cmd.Flags().GetBool("force")
+			options := resolveRestoreOptions()
+
 			// An encrypted repository cannot be opened without the passphrase, so it is
 			// resolved once the invocation is known to be valid and before either restore
-			// route runs — the repository is opened inside both. For this backend
-			// resolveRestoreInvocation always reports an empty Archive, so the named-archive
-			// route below is the one plakar takes, and its own latest-group resolution
-			// handles choosing the snapshot.
+			// route runs — the repository is opened inside both. The same step rejects
+			// --decrypt-key, which belongs to the tarball backend and was previously
+			// accepted and dropped. For this backend resolveRestoreInvocation always
+			// reports an empty Archive, so the named-archive route below is the one plakar
+			// takes, and its own latest-group resolution handles choosing the snapshot.
 			if iops.Config().Backend == app.BackendPlakar {
-				if err := iops.LoadPlakarPassphrase(viper.GetString("passphrase-file")); err != nil {
+				if err := iops.PreparePlakarRestore(options.DecryptKey, viper.GetString("passphrase-file")); err != nil {
 					return err
 				}
 			}
-			forceRestore, _ := cmd.Flags().GetBool("force")
-			options := resolveRestoreOptions()
 
 			if request.Latest {
 				return iops.RestoreLatestBackup(request.S3, restoreExcludeTaskManagerDB, restoreMigrateFormat, restoreSleepDuration, options.DecryptKey, forceRestore, options.ResetDeploymentID)

@@ -27,6 +27,12 @@ func newLifecycleBackend() *lifecycleBackend {
 }
 
 func (b *lifecycleBackend) Exec(service string, command []string, opts *ExecOptions) (string, error) {
+	// cypher-shell invocations are recorded with their query, which is how the
+	// deployment-ID reset is told apart from the transient-data wipe.
+	if len(command) > 0 && command[0] == "cypher-shell" {
+		b.calls = append(b.calls, "exec-cypher:"+command[len(command)-1])
+		return "", nil
+	}
 	b.calls = append(b.calls, "exec:"+service)
 	return "", nil
 }
@@ -80,7 +86,7 @@ func TestRestoreComponentsRunsTheDeploymentLifecycle(t *testing.T) {
 		restored = append(restored, s.Component)
 		backend.calls = append(backend.calls, "restore:"+s.Component)
 		return nil
-	}); err != nil {
+	}, false); err != nil {
 		t.Fatalf("restoreComponents: %v", err)
 	}
 
@@ -138,6 +144,66 @@ func TestRestoreComponentsRunsTheDeploymentLifecycle(t *testing.T) {
 	}
 }
 
+// --reset-deployment-id was accepted and warned away. main honoured it, and a
+// restored clone that keeps the source deployment's Root UUID reports telemetry as
+// the production instance. It has to run after the database is back (the Neo4j
+// restore waits for Bolt) and before the application containers restart, because
+// they cache the UUID on startup.
+func TestRestoreComponentsHonoursResetDeploymentID(t *testing.T) {
+	t.Run("a Neo4j restore resets the deployment ID before the apps come back", func(t *testing.T) {
+		backend := newLifecycleBackend()
+		iops := newLifecycleTestOps(backend)
+
+		plan := restorePlan{backupID: "x", snapshots: snapshotsFor(ComponentNeo4j)}
+		if err := iops.restoreComponents(plan, func(SnapshotInfo) error {
+			backend.calls = append(backend.calls, "restore:"+ComponentNeo4j)
+			return nil
+		}, true); err != nil {
+			t.Fatalf("restoreComponents: %v", err)
+		}
+
+		joined := strings.Join(backend.calls, " | ")
+		reset := indexOf(backend.calls, "exec-cypher:MATCH (n:Root)")
+		if reset == -1 {
+			t.Fatalf("the deployment ID was never reset; calls: %s", joined)
+		}
+		restarted := indexOf(backend.calls, "start:infrahub-server,task-worker")
+		if restarted == -1 || reset > restarted {
+			t.Fatalf("the reset must precede the application restart; calls: %s", joined)
+		}
+	})
+
+	t.Run("a restore with no Neo4j component does not pretend to reset it", func(t *testing.T) {
+		backend := newLifecycleBackend()
+		iops := newLifecycleTestOps(backend)
+
+		plan := restorePlan{backupID: "x", snapshots: snapshotsFor(ComponentPostgres)}
+		if err := iops.restoreComponents(plan, func(SnapshotInfo) error { return nil }, true); err != nil {
+			t.Fatalf("restoreComponents: %v", err)
+		}
+		if indexOf(backend.calls, "exec-cypher:MATCH (n:Root)") != -1 {
+			t.Errorf("the deployment ID was reset without a Neo4j restore; calls: %s", strings.Join(backend.calls, " | "))
+		}
+	})
+}
+
+// A format migration has to travel to the runner: neo4j-admin cannot migrate a
+// store the server has opened, and by the time the orchestrator restarts the
+// database the offline window is gone.
+func TestRestoreMigrationTargetsTheRunner(t *testing.T) {
+	migrate := Neo4jMigration{Format: "block", Database: "neo4j"}
+	if !migrate.Requested() {
+		t.Fatal("a migration with a format set does not report itself as requested")
+	}
+	if (Neo4jMigration{}).Requested() {
+		t.Fatal("an empty migration reports itself as requested")
+	}
+	// A format without a database is a programming error, not a silent no-op.
+	if err := (Neo4jMigration{Format: "block"}).run(""); err == nil {
+		t.Fatal("a migration without a database was accepted")
+	}
+}
+
 // A component the tool cannot restore must be reported, not skipped: the fixed
 // dispatch order would otherwise pass over it silently.
 func TestRestorePlanRejectsUnknownComponents(t *testing.T) {
@@ -162,7 +228,7 @@ func TestRestoreComponentsReportsAFailedComponent(t *testing.T) {
 
 	componentErr := errors.New("neo4j restore failed")
 	plan := restorePlan{backupID: "x", snapshots: snapshotsFor(ComponentNeo4j)}
-	err := iops.restoreComponents(plan, func(SnapshotInfo) error { return componentErr })
+	err := iops.restoreComponents(plan, func(SnapshotInfo) error { return componentErr }, false)
 	if !errors.Is(err, componentErr) {
 		t.Fatalf("err = %v, want the component error", err)
 	}

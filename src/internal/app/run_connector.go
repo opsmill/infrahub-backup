@@ -61,6 +61,7 @@ func RunConnectorCommand() *cobra.Command {
 	var restoreOpts []string
 	var restorePassphraseStdin bool
 	var restorePreserveOwner string
+	var migrate Neo4jMigration
 	restoreCmd := &cobra.Command{
 		Use:          "restore <repo> <dest-uri> <snapshot-hex>",
 		Args:         cobra.ExactArgs(3),
@@ -70,12 +71,16 @@ func RunConnectorCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runConnectorRestore(args[0], args[1], args[2], passphrase, restorePreserveOwner, parseKV(restoreOpts))
+			return runConnectorRestore(args[0], args[1], args[2], passphrase, restorePreserveOwner, parseKV(restoreOpts), migrate)
 		},
 	}
 	restoreCmd.Flags().StringArrayVar(&restoreOpts, "opt", nil, "connector option key=value (repeatable)")
 	restoreCmd.Flags().StringVar(&restorePreserveOwner, "preserve-owner", "",
 		"directory whose ownership must survive the restore (the DB data dir, written as root)")
+	restoreCmd.Flags().StringVar(&migrate.Format, "migrate-format", "",
+		"run `neo4j-admin database migrate --to-format=<format>` after the restore, in the same offline window")
+	restoreCmd.Flags().StringVar(&migrate.Database, "migrate-database", "",
+		"database to migrate (required with --migrate-format)")
 	addPassphraseStdinFlag(restoreCmd, &restorePassphraseStdin)
 
 	// launch: exercise the co-located runner launcher through the tool (testing the
@@ -268,8 +273,48 @@ func preserveOwnership(dir string) (func() error, error) {
 	}, nil
 }
 
+// Neo4jMigration asks for `neo4j-admin database migrate --to-format=<Format>` to
+// run against Database once the restore has written the store.
+//
+// It exists because a format migration has to happen inside the same offline
+// window as the load: neo4j-admin will not migrate a store the server has opened,
+// and by the time the orchestrator's deferred StartServices("database") has run,
+// the window is gone. main could run it through `docker compose exec` because its
+// Community path only SIGSTOPped the neo4j process and left the container up; the
+// runner path stops the container, so the migration belongs here, next to the
+// load, in the container that has both the data volume and neo4j-admin.
+type Neo4jMigration struct {
+	// Format is the --to-format value ("block"); empty means no migration.
+	Format string
+	// Database is the database to migrate.
+	Database string
+}
+
+// Requested reports whether a migration was asked for.
+func (m Neo4jMigration) Requested() bool { return m.Format != "" }
+
+// run executes the migration with neo4j-admin from binDir (or $PATH when empty).
+func (m Neo4jMigration) run(binDir string) error {
+	if !m.Requested() {
+		return nil
+	}
+	if m.Database == "" {
+		return fmt.Errorf("--migrate-format=%s requires --migrate-database", m.Format)
+	}
+	bin := "neo4j-admin"
+	if binDir != "" {
+		bin = filepath.Join(binDir, bin)
+	}
+	logrus.Infof("Migrating %s to --to-format=%s...", m.Database, m.Format)
+	if _, err := runCapture(runnerTimeout(), bin, []string{"database", "migrate", "--to-format=" + m.Format, m.Database}, ""); err != nil {
+		return fmt.Errorf("migrating %s to format %s: %w", m.Database, m.Format, err)
+	}
+	logrus.Infof("Migrated %s to format %s", m.Database, m.Format)
+	return nil
+}
+
 // runConnectorRestore loads the snapshot and drives the registered exporter for destURI.
-func runConnectorRestore(repoPath, destURI, snapHex, passphrase, preserveOwnerDir string, opts map[string]string) error {
+func runConnectorRestore(repoPath, destURI, snapHex, passphrase, preserveOwnerDir string, opts map[string]string, migrate Neo4jMigration) error {
 	// Captured before the export so it reflects the ownership the database had, not
 	// whatever the restore leaves behind.
 	restoreOwnership, err := preserveOwnership(preserveOwnerDir)
@@ -322,13 +367,14 @@ func runConnectorRestore(repoPath, destURI, snapHex, passphrase, preserveOwnerDi
 			}
 			return nil
 		},
+		func() error { return migrate.run(opts["neo4j_bin_dir"]) },
 		restoreOwnership,
 	)
 }
 
-// exportWithOwnershipRestored drives a snapshot export, then closes the exporter,
-// then restores the data directory's ownership — the last two on EVERY exit path,
-// including a failed export.
+// exportWithOwnershipRestored drives a snapshot export, closes the exporter, runs
+// afterRestore, and restores the data directory's ownership. The close and the
+// chown happen on EVERY exit path, including a failed export.
 //
 // A failed restore needs the chown at least as much as a successful one does. The
 // runner bypasses the database image's entrypoint so --user root takes effect, so
@@ -338,10 +384,13 @@ func runConnectorRestore(repoPath, destURI, snapHex, passphrase, preserveOwnerDi
 // 7474 on a directory it cannot read: a failed restore became a dead deployment.
 //
 // Order matters as much as coverage. The exporter is what drives neo4j-admin, so
-// anything it writes while closing has to be chowned too — hence close first,
-// ownership last (the deferred calls run in reverse registration order). The first
-// error wins, so a genuine restore failure is never masked by a clean-up error.
-func exportWithOwnershipRestored(export, closeExporter, restoreOwnership func() error) (retErr error) {
+// anything it writes while closing has to be chowned too, as does anything
+// afterRestore (a format migration) writes — hence close, then afterRestore, then
+// ownership last (the deferred calls run in reverse registration order).
+// afterRestore is the remainder of the offline window, so it is skipped when the
+// restore itself failed. The first error wins, so a genuine restore failure is
+// never masked by a clean-up error.
+func exportWithOwnershipRestored(export, closeExporter, afterRestore, restoreOwnership func() error) (retErr error) {
 	defer func() {
 		if err := restoreOwnership(); err != nil && retErr == nil {
 			retErr = err
@@ -349,6 +398,12 @@ func exportWithOwnershipRestored(export, closeExporter, restoreOwnership func() 
 	}()
 	defer func() {
 		if err := closeExporter(); err != nil && retErr == nil {
+			retErr = err
+		}
+		if retErr != nil {
+			return // nothing was restored; there is nothing to migrate
+		}
+		if err := afterRestore(); err != nil {
 			retErr = err
 		}
 	}()
