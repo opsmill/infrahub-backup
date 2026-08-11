@@ -265,8 +265,21 @@ func (iops *InfrahubOps) restoreComponents(plan restorePlan, restoreComponent fu
 	if err := iops.wipeTransientData(); err != nil {
 		return err
 	}
-	if _, err := iops.stopAppContainers(); err != nil {
-		return err
+	// stopAppContainers stops six services in a loop and returns early on the first
+	// failure, reporting what it did stop alongside the error. Discarding that list left
+	// a partial stop — say the fourth of six — with those services down, no restart, and
+	// no warning, because the defer below is not registered yet. Put back what was
+	// stopped, exactly as withDeploymentQuiesced does on the backup side.
+	stopped, err := iops.stopAppContainers()
+	if err != nil {
+		if len(stopped) > 0 {
+			if startErr := iops.startAppContainers(stopped); startErr != nil {
+				logrus.Warnf("Failed to restart %s after a partial stop: %v; "+
+					"start them once the state of the deployment is understood",
+					strings.Join(stopped, ", "), startErr)
+			}
+		}
+		return fmt.Errorf("failed to stop application services before the restore: %w", err)
 	}
 
 	appsRestarted := false

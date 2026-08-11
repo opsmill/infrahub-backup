@@ -262,6 +262,20 @@ fixed on that branch.
   FR-007/FR-011, SC-004 — SC-004's checklist entry in `quickstart.md` now covers all three secrets
   rather than the passphrase alone).
 
+- [ ] T069 **A restore starts all six application services regardless of what was running before.**
+  `restoreComponents` discards `stopAppContainers`' `stopped` list, so `restartDependencies` plus the
+  final `StartServices("infrahub-server", "task-worker")` bring everything up, whereas the backup
+  path (`withDeploymentQuiesced`) restarts only what it stopped. A deployment with `task-worker`
+  intentionally down comes back up after a restore. This reproduces `main`'s behaviour, so it is
+  left alone rather than changed silently — but the asymmetry between the two paths is worth a
+  decision. Found by the 2026-08-11 simplification pass.
+- [ ] T070 **Delete the dead `__run-connector launch` subcommand.** Nothing invokes it: the create
+  flow calls `LaunchComposeBackup` directly, as its own comment anticipated, and
+  `build/runner/Dockerfile` references only `backup`/`restore`. It also bypasses
+  `runnerRepoPath()`, so it would not honour the `fs://` handling fixed in T060. Roughly 28 lines
+  across two hunks. Held back only because removing a subcommand is a CLI-surface change and it may
+  still be useful as a manual seam while the Kubernetes transport (T062) is built.
+
 ---
 
 ## Dependencies & Execution Order

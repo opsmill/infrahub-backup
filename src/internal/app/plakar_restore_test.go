@@ -347,3 +347,49 @@ func (b *editionBackend) Exec(service string, command []string, opts *ExecOption
 }
 
 var _ EnvironmentBackend = (*editionBackend)(nil)
+
+// A restore that cannot quiesce the whole application tier must put back whatever it did
+// stop, and say so.
+//
+// stopAppContainers stops six services in a loop and returns early on the first failure,
+// handing back the partial list alongside the error. That list used to be discarded and
+// the error returned before the "left stopped" defer was registered, so a failure part
+// way through left those services down with no restart and no warning — while the backup
+// side, withDeploymentQuiesced, restarted them.
+func TestRestoreRestartsServicesItStoppedWhenQuiescingFails(t *testing.T) {
+	backend := newLifecycleBackend()
+	// task-manager is third in stopAppContainers' order, so infrahub-server and
+	// task-worker are already stopped when this fails.
+	backend.stopErr["task-manager"] = errors.New("container will not quiesce")
+
+	iops := newLifecycleTestOps(backend)
+	err := iops.restoreComponents(
+		restorePlan{snapshots: snapshotsFor(ComponentNeo4j)},
+		func(SnapshotInfo) error {
+			t.Error("no component should be restored once quiescing failed")
+			return nil
+		},
+		false,
+	)
+
+	if err == nil {
+		t.Fatal("expected an error when the application tier could not be stopped")
+	}
+	if !strings.Contains(err.Error(), "stop application services") {
+		t.Errorf("error should name the failure to stop, got %v", err)
+	}
+
+	joined := strings.Join(backend.calls, " | ")
+	// The two that were stopped before the failure have to come back.
+	for _, svc := range []string{"infrahub-server", "task-worker"} {
+		if !strings.Contains(joined, "start:"+svc) {
+			t.Errorf("%s was stopped before the failure but never restarted; calls: %s", svc, joined)
+		}
+	}
+	// And nothing beyond the failure should have been stopped at all.
+	for _, svc := range []string{"cache", "message-queue"} {
+		if strings.Contains(joined, "stop:"+svc) {
+			t.Errorf("%s was stopped after the loop should have aborted; calls: %s", svc, joined)
+		}
+	}
+}
