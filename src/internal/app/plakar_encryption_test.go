@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/PlakarKorp/kloset/connectors/exporter"
+	"github.com/PlakarKorp/kloset/kcontext"
 	"github.com/PlakarKorp/kloset/objects"
 	"github.com/PlakarKorp/kloset/repository"
 	"github.com/PlakarKorp/kloset/snapshot"
@@ -24,6 +25,30 @@ func newTestPlakarConfig(t *testing.T) *PlakarConfig {
 		RepoPath: filepath.Join(t.TempDir(), "repo"),
 		CacheDir: t.TempDir(),
 	}
+}
+
+// newTestContext builds the Plakar context for cfg and closes it when the test
+// ends, so a failing assertion does not have to unwind the handles by hand first.
+func newTestContext(t *testing.T, cfg *PlakarConfig) *kcontext.KContext {
+	t.Helper()
+	kctx, err := initPlakarContext(cfg)
+	if err != nil {
+		t.Fatalf("initPlakarContext: %v", err)
+	}
+	t.Cleanup(func() { closePlakarContext(kctx) })
+	return kctx
+}
+
+// openTestRepo opens cfg's existing repository through kctx, closing it before the
+// context (cleanups run in reverse registration order).
+func openTestRepo(t *testing.T, kctx *kcontext.KContext, cfg *PlakarConfig) *repository.Repository {
+	t.Helper()
+	repo, err := openRepo(kctx, cfg)
+	if err != nil {
+		t.Fatalf("openRepo: %v", err)
+	}
+	t.Cleanup(func() { closeRepo(repo) })
+	return repo
 }
 
 // writeTestSnapshot opens (creating if needed) the repo described by cfg and
@@ -128,16 +153,8 @@ func TestEncryptedRoundTripInProcess(t *testing.T) {
 	writeTestSnapshot(t, cfg, "rt", payload, nil)
 
 	// Open with the key, load the (only) snapshot, export it to a temp dir.
-	kctx, err := initPlakarContext(cfg)
-	if err != nil {
-		t.Fatalf("initPlakarContext: %v", err)
-	}
-	defer closePlakarContext(kctx)
-	repo, err := openRepo(kctx, cfg)
-	if err != nil {
-		t.Fatalf("openRepo with key: %v", err)
-	}
-	defer closeRepo(repo)
+	kctx := newTestContext(t, cfg)
+	repo := openTestRepo(t, kctx, cfg)
 
 	var mac objects.MAC
 	found := false
@@ -185,12 +202,7 @@ func TestEncryptExistingPlaintextRepoRefused(t *testing.T) {
 
 	// Re-target the same repo with --encrypt + a valid passphrase.
 	enc := &PlakarConfig{RepoPath: cfg.RepoPath, CacheDir: t.TempDir(), Encrypt: true, Passphrase: "a-valid-passphrase-1"}
-	kctx, err := initPlakarContext(enc)
-	if err != nil {
-		t.Fatalf("initPlakarContext: %v", err)
-	}
-	defer closePlakarContext(kctx)
-	if _, err := openOrCreateRepo(kctx, enc); !errors.Is(err, errEncryptExistingPlaintextRepo) {
+	if _, err := openOrCreateRepo(newTestContext(t, enc), enc); !errors.Is(err, errEncryptExistingPlaintextRepo) {
 		t.Fatalf("want errEncryptExistingPlaintextRepo, got %v", err)
 	}
 }
@@ -201,14 +213,7 @@ func TestEncryptWithoutPassphraseRefused(t *testing.T) {
 	cfg := newTestPlakarConfig(t)
 	cfg.Encrypt = true // no passphrase
 
-	kctx, err := initPlakarContext(cfg)
-	if err != nil {
-		t.Fatalf("initPlakarContext: %v", err)
-	}
-	defer closePlakarContext(kctx)
-
-	_, err = openOrCreateRepo(kctx, cfg)
-	if !errors.Is(err, errEncryptWithoutPassphrase) {
+	if _, err := openOrCreateRepo(newTestContext(t, cfg), cfg); !errors.Is(err, errEncryptWithoutPassphrase) {
 		t.Fatalf("want errEncryptWithoutPassphrase, got %v", err)
 	}
 	// And nothing was created.
@@ -330,24 +335,13 @@ func TestOpenEncryptedWrongOrAbsentPassphrase(t *testing.T) {
 
 	// Wrong passphrase → errWrongPassphrase.
 	wrong := &PlakarConfig{RepoPath: cfg.RepoPath, CacheDir: t.TempDir(), Passphrase: "the-wrong-passphrase"}
-	kctx, err := initPlakarContext(wrong)
-	if err != nil {
-		t.Fatalf("initPlakarContext: %v", err)
-	}
-	if _, err := openRepo(kctx, wrong); !errors.Is(err, errWrongPassphrase) {
-		closePlakarContext(kctx)
+	if _, err := openRepo(newTestContext(t, wrong), wrong); !errors.Is(err, errWrongPassphrase) {
 		t.Fatalf("want errWrongPassphrase, got %v", err)
 	}
-	closePlakarContext(kctx)
 
 	// Absent passphrase → errEncryptedRepoNeedsPassphrase.
 	none := &PlakarConfig{RepoPath: cfg.RepoPath, CacheDir: t.TempDir()}
-	kctx2, err := initPlakarContext(none)
-	if err != nil {
-		t.Fatalf("initPlakarContext: %v", err)
-	}
-	defer closePlakarContext(kctx2)
-	if _, err := openRepo(kctx2, none); !errors.Is(err, errEncryptedRepoNeedsPassphrase) {
+	if _, err := openRepo(newTestContext(t, none), none); !errors.Is(err, errEncryptedRepoNeedsPassphrase) {
 		t.Fatalf("want errEncryptedRepoNeedsPassphrase, got %v", err)
 	}
 }
@@ -363,37 +357,18 @@ func TestListEncryptedRepo(t *testing.T) {
 
 	// With the key: groups are readable.
 	ok := &PlakarConfig{RepoPath: cfg.RepoPath, CacheDir: t.TempDir(), Passphrase: cfg.Passphrase}
-	kctx, err := initPlakarContext(ok)
-	if err != nil {
-		t.Fatalf("initPlakarContext: %v", err)
-	}
-	repo, err := openRepo(kctx, ok)
-	if err != nil {
-		closePlakarContext(kctx)
-		t.Fatalf("open with key: %v", err)
-	}
+	repo := openTestRepo(t, newTestContext(t, ok), ok)
 	groups, err := collectBackupGroups(repo)
 	if err != nil {
-		closeRepo(repo)
-		closePlakarContext(kctx)
 		t.Fatalf("collectBackupGroups: %v", err)
 	}
 	if len(groups) != 1 || groups[0].BackupID != "20260630_000000" {
-		closeRepo(repo)
-		closePlakarContext(kctx)
 		t.Fatalf("want 1 group with id 20260630_000000, got %+v", groups)
 	}
-	closeRepo(repo)
-	closePlakarContext(kctx)
 
 	// Without the key: clear failure.
 	none := &PlakarConfig{RepoPath: cfg.RepoPath, CacheDir: t.TempDir()}
-	kctx2, err := initPlakarContext(none)
-	if err != nil {
-		t.Fatalf("initPlakarContext: %v", err)
-	}
-	defer closePlakarContext(kctx2)
-	if _, err := openRepo(kctx2, none); !errors.Is(err, errEncryptedRepoNeedsPassphrase) {
+	if _, err := openRepo(newTestContext(t, none), none); !errors.Is(err, errEncryptedRepoNeedsPassphrase) {
 		t.Fatalf("want errEncryptedRepoNeedsPassphrase, got %v", err)
 	}
 }
@@ -406,26 +381,15 @@ func TestPlaintextRepoUnchanged(t *testing.T) {
 	writeTestSnapshot(t, cfg, "plain", randomMarker(t, 128), nil)
 
 	// No passphrase: opens normally.
-	kctx, err := initPlakarContext(cfg)
+	repo, err := openRepo(newTestContext(t, cfg), cfg)
 	if err != nil {
-		t.Fatalf("initPlakarContext: %v", err)
-	}
-	repo, err := openRepo(kctx, cfg)
-	if err != nil {
-		closePlakarContext(kctx)
 		t.Fatalf("plaintext open (no passphrase) failed: %v", err)
 	}
 	closeRepo(repo)
-	closePlakarContext(kctx)
 
 	// Passphrase supplied for a plaintext repo: warn + ignore, no error (VR-3).
 	withPass := &PlakarConfig{RepoPath: cfg.RepoPath, CacheDir: t.TempDir(), Passphrase: "ignored-passphrase-here"}
-	kctx2, err := initPlakarContext(withPass)
-	if err != nil {
-		t.Fatalf("initPlakarContext: %v", err)
-	}
-	defer closePlakarContext(kctx2)
-	repo2, err := openRepo(kctx2, withPass)
+	repo2, err := openRepo(newTestContext(t, withPass), withPass)
 	if err != nil {
 		t.Fatalf("plaintext open WITH passphrase should warn+continue, got error: %v", err)
 	}
