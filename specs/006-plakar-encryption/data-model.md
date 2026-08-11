@@ -33,7 +33,7 @@ The operator secret.
 
 ### Runner (from 003)
 
-- **Receives**: the passphrase on **stdin** (`--passphrase-stdin`) for any op against an encrypted repo; derives the secret + verifies the canary inside the container.
+- **Receives**: its secrets on **stdin** as one JSON object (`--credentials-stdin`) — the repository passphrase for an encrypted repo, plus the database password and any object-store credentials; derives the secret + verifies the canary inside the container. The channel started as passphrase-only (`--passphrase-stdin`) and was widened once the code review found the database and S3 credentials sitting on the runner's argv, where `docker inspect` reads them.
 
 ## Validation rules
 

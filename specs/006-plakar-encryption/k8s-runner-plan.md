@@ -177,9 +177,11 @@ transports honest.
 5. Confirm `StopServices`/`StartServices` semantics on Kubernetes (scaling a Deployment to 0,
    presumably) and that `waitForNeo4jBolt` works there — it uses `iops.Exec`, so it should, but
    scaling down and back up is a slower and different sequence than a container restart.
-6. Encryption must hold on this path: the passphrase reaches a Docker runner over
-   `--passphrase-stdin`. Streaming keeps everything in-process, so there is no argv exposure —
-   confirm SC-004 still holds and that an encrypted repository round-trips on Kubernetes.
+6. Encryption must hold on this path: secrets reach a Docker runner over
+   `--credentials-stdin`. Running in-process keeps them off any argv at all, so this path is
+   structurally safer — but confirm SC-004 still holds and that an encrypted repository
+   round-trips on Kubernetes. Note the Postgres port-forward puts a listener on localhost for
+   the duration of the backup; check what that exposes before relying on it.
 
 ## Acceptance criteria
 

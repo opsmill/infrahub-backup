@@ -64,7 +64,7 @@ if cfg.Encryption != nil {                          // encrypted repo
 
 - The host tool obtains the passphrase from (in order) an explicit flag/file → env var (e.g. `INFRAHUB_BACKUP_PASSPHRASE`). Non-interactive (FR-011).
 - **Host-side ops** (repo create, the in-process metadata snapshot, `snapshots list`) use the passphrase directly.
-- **Runner ops**: pass the passphrase to the `__run-connector` worker via **stdin** (`docker run -i`, worker reads stdin), NOT via argv and NOT via `-e`. Rationale (FR-007/FR-011): `docker inspect` exposes both the command line and env, so argv/`-e` would leak the secret into persisted container metadata; stdin does not. The worker gets a `--passphrase-stdin` flag and reads one line.
+- **Runner ops**: pass the passphrase to the `__run-connector` worker via **stdin** (`docker run -i`, worker reads stdin), NOT via argv and NOT via `-e`. Rationale (FR-007/FR-011): `docker inspect` exposes both the command line and env, so argv/`-e` would leak the secret into persisted container metadata; stdin does not. The worker gets a `--credentials-stdin` flag and reads one JSON object. It carries the passphrase, the database password and any object-store credentials together: the same `docker inspect` argument that applies to the passphrase applies to a password embedded in a connector URI, and the review found exactly that — so one channel covers all of them rather than protecting the passphrase alone.
 
 **Alternatives**: `-e INFRAHUB_BACKUP_PASSPHRASE` (rejected — visible in `docker inspect`/env dump); a tmpfs-mounted secret file (viable but more moving parts than stdin); argv `--passphrase` (rejected — visible in `docker inspect` + process list).
 

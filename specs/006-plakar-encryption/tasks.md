@@ -43,6 +43,13 @@ Two independent workstreams on one branch:
 - [X] T007 Add `--passphrase-stdin` to the hidden `__run-connector` worker in `src/internal/app/run_connector.go`: when set, read one line from stdin into the passphrase, pass it to the repo-open path (T006); never accept the passphrase via flag value or env (FR-002, FR-007, contract "Runner key injection").
 - [X] T008 Inject the passphrase into the runner via **stdin** in `src/internal/app/runner.go`: add a `passphrase` parameter to `LaunchComposeBackup`/`LaunchComposeRestore`; when non-empty, run `docker ... -i`, append `--passphrase-stdin` to the worker args, write the passphrase + newline to the container's stdin and close it; MUST NOT add it to argv or `-e` env (FR-007, FR-011, VR-4, contract).
 
+> **T007/T008 superseded in scope (2026-08-11).** The flag is now `--credentials-stdin` and
+> carries one JSON object rather than a single passphrase line. The code review found the
+> database password and the object-store credentials sitting on the runner's argv inside the
+> connector and repository URIs — the same `docker inspect` exposure these two tasks existed to
+> avoid for the passphrase — so the channel covers all of them. See T068.
+
+
 **Checkpoint**: `go build ./...` and `go vet ./...` green; encrypted repo can be created and re-opened in-process (host-side), wrong passphrase rejected by the canary.
 
 ---
@@ -243,6 +250,17 @@ fixed on that branch.
   host/runner asymmetry. Forwarding the variables today would be dead code. Needs a
   `session_token` option upstream (or a different credentials provider), after which both
   `storeConfig` and the runner credentials channel can carry it.
+- [X] T068 **Widen the runner's secret channel from the passphrase to every secret it needs.**
+  T007/T008 kept the passphrase off argv and `-e` because `docker inspect` persists both, but the
+  connector and repository URIs handed to the same runner carried the Neo4j password, the Postgres
+  password, and `s3://key:secret@…` — the identical exposure, one argument along. `-e
+  AWS_SECRET_ACCESS_KEY` was in the same position. The worker flag is now `--credentials-stdin`
+  and takes one JSON object; a non-secret `--s3-insecure` preserves the "userinfo in the URI means
+  plain HTTP" behaviour that lifting the credentials out of the URI would otherwise have silently
+  flipped to TLS. `AWS_SECRET_ACCESS_KEY` also no longer passes through `containerReachable()`,
+  which URL-parses and could rewrite a secret containing `://`. **Done 2026-08-11** (review fix,
+  FR-007/FR-011, SC-004 — SC-004's checklist entry in `quickstart.md` now covers all three secrets
+  rather than the passphrase alone).
 
 ---
 

@@ -68,7 +68,7 @@ src/internal/app/
 ├── plakar_restore.go    # RestorePlakarBackup: accept passphrase; open encrypted repo; pass passphrase to runner
 ├── snapshots.go         # ListSnapshots/openRepo path: supply passphrase for an encrypted repo
 ├── runner.go            # LaunchComposeBackup/Restore: inject passphrase via STDIN (docker run -i), not argv/-e
-└── run_connector.go     # __run-connector: add --passphrase-stdin; derive secret; open repo encrypted
+└── run_connector.go     # __run-connector: add --credentials-stdin; derive secret; open repo encrypted
 src/cmd/infrahub-backup/main.go   # wire --encrypt (plakar) + INFRAHUB_BACKUP_PASSPHRASE / --passphrase-file into create/restore/snapshots;
                                   # enforce 12-char min passphrase (FR-013); reject --encrypt-key with --backend plakar (clarify)
 ```
