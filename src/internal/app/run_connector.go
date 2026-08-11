@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"github.com/PlakarKorp/kloset/connectors"
 	"github.com/PlakarKorp/kloset/connectors/exporter"
@@ -289,14 +288,13 @@ func preserveOwnership(dir string) (func() error, error) {
 		}
 		return nil, fmt.Errorf("inspecting %s before restore: %w", dir, err)
 	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
+	uid, gid, ok := fileOwner(info)
 	if !ok {
 		// Not a platform that reports uid/gid; the runner is always Linux, so this
 		// only spares a developer running the worker directly on another OS.
 		logrus.Debugf("ownership of %s cannot be read on this platform; leaving it alone", dir)
 		return func() error { return nil }, nil
 	}
-	uid, gid := int(stat.Uid), int(stat.Gid)
 
 	return func() error {
 		restored := 0
@@ -308,8 +306,7 @@ func preserveOwnership(dir string) (func() error, error) {
 			if err != nil {
 				return err
 			}
-			st, ok := fi.Sys().(*syscall.Stat_t)
-			if ok && int(st.Uid) == uid && int(st.Gid) == gid {
+			if fileUID, fileGID, ok := fileOwner(fi); ok && fileUID == uid && fileGID == gid {
 				return nil
 			}
 			if err := os.Lchown(path, uid, gid); err != nil {
