@@ -78,10 +78,15 @@ func (iops *InfrahubOps) RestorePlakarBackup(excludeTaskManager bool, restoreMig
 	}
 
 	// A format migration has to run in the same offline window as the load, so it
-	// travels to the runner rather than being run from here.
+	// travels to the runner rather than being run from here. With no Neo4j component
+	// to migrate it is said to be ignored rather than quietly dropped.
 	var migrate Neo4jMigration
 	if restoreMigrateFormat {
-		migrate = Neo4jMigration{Format: "block", Database: iops.config.Neo4jDatabase}
+		if !plan.hasComponent(ComponentNeo4j) {
+			logrus.Warn("--migrate-format ignored: no Neo4j component in this restore")
+		} else {
+			migrate = Neo4jMigration{Format: neo4jBlockFormat, Database: iops.config.Neo4jDatabase}
+		}
 	}
 
 	restoreComponent := func(snapInfo SnapshotInfo) error {
@@ -107,6 +112,20 @@ type restorePlan struct {
 	// Empty when the snapshot predates the tag.
 	backupEdition string
 	snapshots     []SnapshotInfo
+}
+
+// neo4jBlockFormat is the store format --migrate-format migrates to, matching what
+// main passed to `neo4j-admin database migrate --to-format=`.
+const neo4jBlockFormat = "block"
+
+// hasComponent reports whether the plan includes a snapshot of the named component.
+func (p restorePlan) hasComponent(component string) bool {
+	for _, snapInfo := range p.snapshots {
+		if snapInfo.Component == component {
+			return true
+		}
+	}
+	return false
 }
 
 func (p restorePlan) describe() string {

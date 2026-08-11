@@ -202,6 +202,17 @@ func TestRestoreMigrationTargetsTheRunner(t *testing.T) {
 	if err := (Neo4jMigration{Format: "block"}).run(""); err == nil {
 		t.Fatal("a migration without a database was accepted")
 	}
+
+	// And a plan with nothing to migrate must be recognisable, so --migrate-format is
+	// reported as ignored rather than dropped.
+	plan := restorePlan{snapshots: snapshotsFor(ComponentPostgres, ComponentMetadata)}
+	if plan.hasComponent(ComponentNeo4j) {
+		t.Error("hasComponent reported a Neo4j snapshot that is not in the plan")
+	}
+	withNeo4j := restorePlan{snapshots: snapshotsFor(ComponentNeo4j)}
+	if !withNeo4j.hasComponent(ComponentNeo4j) {
+		t.Error("hasComponent missed the Neo4j snapshot in the plan")
+	}
 }
 
 // A component the tool cannot restore must be reported, not skipped: the fixed
