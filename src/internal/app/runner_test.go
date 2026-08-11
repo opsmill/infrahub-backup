@@ -188,6 +188,9 @@ func TestRunCapture(t *testing.T) {
 		if err == nil {
 			t.Fatal("a command exceeding the timeout returned no error")
 		}
+		if !errors.Is(err, errRunnerTimeout) {
+			t.Fatalf("err = %v, want it to wrap errRunnerTimeout — the caller has to tell a timeout from an ordinary failure to know it must also remove the container", err)
+		}
 		if !strings.Contains(err.Error(), "did not finish within") {
 			t.Fatalf("err = %v, want the timeout named in the message", err)
 		}
@@ -206,6 +209,16 @@ func TestRunCapture(t *testing.T) {
 		}
 		if got != "deadbeef" {
 			t.Fatalf("got %q, want %q", got, "deadbeef")
+		}
+	})
+
+	t.Run("an ordinary failure is not reported as a timeout", func(t *testing.T) {
+		_, err := runCapture(time.Minute, "sh", []string{"-c", "exit 1"}, "")
+		if err == nil {
+			t.Fatal("a non-zero exit returned no error")
+		}
+		if errors.Is(err, errRunnerTimeout) {
+			t.Errorf("err = %v, want it NOT to look like a timeout — the container removal must not fire on ordinary failures", err)
 		}
 	})
 
@@ -230,6 +243,22 @@ func TestRunCapture(t *testing.T) {
 			t.Fatalf("got %q, want the piped value back", got)
 		}
 	})
+}
+
+// Each launch needs its own container name: the name is what lets a timed-out
+// launch be removed, and a leftover container from an earlier run must not make the
+// next launch fail on a clash.
+func TestRunnerContainerNameIsUniquePerLaunch(t *testing.T) {
+	first := runnerContainerName("database")
+	second := runnerContainerName("database")
+	if first == second {
+		t.Fatalf("two launches got the same container name %q", first)
+	}
+	for _, name := range []string{first, second} {
+		if !strings.HasPrefix(name, "infrahub-backup-runner-database-") {
+			t.Errorf("name = %q, want it to identify the tool and the target service", name)
+		}
+	}
 }
 
 // The timeout is configurable because some deployments legitimately take longer

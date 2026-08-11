@@ -81,7 +81,7 @@ func (c runnerCredentials) encode() (string, error) {
 // the tool binary + the kloset repo. This needs no separately-built runner image
 // and resolves fs:// repo reachability (the host repo dir is bind-mounted in).
 func LaunchComposeBackup(project, dbService, repoPath, uri string, creds runnerCredentials, opts map[string]string, tags []string, mountDBVolumes bool) (string, error) {
-	args, err := composeRunnerArgs(project, dbService, repoPath, mountDBVolumes)
+	args, container, err := composeRunnerArgs(project, dbService, repoPath, mountDBVolumes)
 	if err != nil {
 		return "", err
 	}
@@ -100,14 +100,14 @@ func LaunchComposeBackup(project, dbService, repoPath, uri string, creds runnerC
 	for _, t := range tags {
 		args = append(args, "--tag", t)
 	}
-	return runDockerCapture(args, stdin)
+	return runDockerCapture(args, container, stdin)
 }
 
 // LaunchComposeRestore runs ONE restore connector op in a co-located runner. A
 // requested Neo4j format migration runs inside the same runner, in the same offline
 // window as the load (see Neo4jMigration).
 func LaunchComposeRestore(project, dbService, repoPath, destURI, snapshot string, creds runnerCredentials, opts map[string]string, mountDBVolumes bool, migrate Neo4jMigration) error {
-	args, err := composeRunnerArgs(project, dbService, repoPath, mountDBVolumes)
+	args, container, err := composeRunnerArgs(project, dbService, repoPath, mountDBVolumes)
 	if err != nil {
 		return err
 	}
@@ -134,35 +134,41 @@ func LaunchComposeRestore(project, dbService, repoPath, destURI, snapshot string
 	for k, v := range opts {
 		args = append(args, "--opt", k+"="+v)
 	}
-	_, err = runDockerCapture(args, stdin)
+	_, err = runDockerCapture(args, container, stdin)
 	return err
 }
 
 // composeRunnerArgs builds the `docker run …` prefix up to (but not including)
 // the in-container command: image, network, mounts, env. The container always
 // keeps stdin open (`-i`), because that is how the credentials reach the worker.
-func composeRunnerArgs(project, dbService, repoPath string, mountDBVolumes bool) ([]string, error) {
+func composeRunnerArgs(project, dbService, repoPath string, mountDBVolumes bool) ([]string, string, error) {
 	cid, err := composeContainerID(project, dbService)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	image, err := dockerInspect(cid, "{{.Config.Image}}")
 	if err != nil {
-		return nil, fmt.Errorf("inspecting image of %s: %w", dbService, err)
+		return nil, "", fmt.Errorf("inspecting image of %s: %w", dbService, err)
 	}
 	network, err := firstNetwork(cid)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	bin, err := runnerBinary()
 	if err != nil {
-		return nil, fmt.Errorf("resolving runner binary: %w", err)
+		return nil, "", fmt.Errorf("resolving runner binary: %w", err)
 	}
 
 	// -i keeps stdin open so the orchestrator can pipe the credentials in. No
 	// secret is ever an argument or a -e env var: docker inspect reports both for
 	// the life of the container, and argv is visible in the host process list.
-	args := []string{"run", "--rm", "-i"}
+	//
+	// --name gives the launch a handle: killing the `docker run` client on timeout
+	// does NOT stop the container it started, and a runner still writing into the
+	// database's shared data volume while the deferred StartServices("database")
+	// boots Neo4j on it is worse than the wedge the timeout was added for.
+	container := runnerContainerName(dbService)
+	args := []string{"run", "--rm", "-i", "--name", container}
 	args = append(args,
 		"--network", network,
 		"--user", "root", // neo4j-admin/pg tools; online backup tolerates root
@@ -210,7 +216,14 @@ func composeRunnerArgs(project, dbService, repoPath string, mountDBVolumes bool)
 	// Restores then write as root, so LaunchComposeRestore asks the worker to put the
 	// data directory's ownership back; see preserveOwnership in run_connector.go.
 	args = append(args, "--entrypoint", runnerBinaryPath, image)
-	return args, nil
+	return args, container, nil
+}
+
+// runnerContainerName names one runner launch. It is unique per launch so that a
+// container left behind by an earlier run cannot make the next one fail on a name
+// clash.
+func runnerContainerName(dbService string) string {
+	return fmt.Sprintf("infrahub-backup-runner-%s-%d-%d", dbService, os.Getpid(), time.Now().UnixNano())
 }
 
 const (
@@ -380,9 +393,27 @@ func firstNetwork(cid string) (string, error) {
 
 // runDockerCapture runs `docker <args>` and returns the last stdout token. When
 // stdin is non-empty it is written to the container (one line) and stdin closed,
-// used to pipe the repository passphrase without exposing it on argv/env.
-func runDockerCapture(args []string, stdin string) (string, error) {
-	return runCapture(runnerTimeout(), "docker", args, stdin)
+// used to pipe the credentials without exposing them on argv/env.
+//
+// container names the launched container so that a timeout can also remove it:
+// the timeout kills the `docker run` client, which leaves the container running.
+func runDockerCapture(args []string, container, stdin string) (string, error) {
+	out, err := runCapture(runnerTimeout(), "docker", args, stdin)
+	if errors.Is(err, errRunnerTimeout) && container != "" {
+		removeRunnerContainer(container)
+	}
+	return out, err
+}
+
+// removeRunnerContainer force-removes a timed-out runner, best effort. It has its
+// own short timeout: this runs on the path where docker has already proved slow,
+// and the caller still has a database to restart.
+func removeRunnerContainer(container string) {
+	if _, err := runCapture(runnerRemoveTimeout, "docker", []string{"rm", "-f", container}, ""); err != nil {
+		logrus.Warnf("Could not remove the timed-out runner container %s (it may still be writing to the database volume): %v", container, err)
+		return
+	}
+	logrus.Warnf("Removed the timed-out runner container %s", container)
 }
 
 const (
@@ -396,7 +427,13 @@ const (
 	// runnerTimeoutEnvVar raises (or lowers) defaultRunnerTimeout for deployments
 	// whose databases legitimately take longer than 30 minutes to dump or load.
 	runnerTimeoutEnvVar = "INFRAHUB_RUNNER_TIMEOUT"
+	// runnerRemoveTimeout bounds the clean-up removal of a timed-out runner.
+	runnerRemoveTimeout = 30 * time.Second
 )
+
+// errRunnerTimeout marks a launch that was killed for exceeding its timeout, as
+// opposed to one that failed on its own.
+var errRunnerTimeout = errors.New("runner timed out")
 
 // runnerTimeout returns the per-launch timeout, honouring INFRAHUB_RUNNER_TIMEOUT
 // (any time.ParseDuration value). An unparseable or non-positive value falls back
@@ -434,8 +471,8 @@ func runCapture(timeout time.Duration, name string, args []string, stdin string)
 
 	if err := cmd.Run(); err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return "", fmt.Errorf("runner did not finish within %v and was killed (raise %s if this deployment needs longer): %s",
-				timeout, runnerTimeoutEnvVar, runnerOutput(&out, &errb))
+			return "", fmt.Errorf("%w: did not finish within %v and was killed (raise %s if this deployment needs longer): %s",
+				errRunnerTimeout, timeout, runnerTimeoutEnvVar, runnerOutput(&out, &errb))
 		}
 		return "", fmt.Errorf("runner launch failed: %w: %s", err, runnerOutput(&out, &errb))
 	}
