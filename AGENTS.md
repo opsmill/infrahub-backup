@@ -290,7 +290,7 @@ The codebase uses explicit error wrapping with `fmt.Errorf` for context. All com
 
 ### Neo4j integration — lives in its own repository
 
-The Neo4j integration is **not** in this repo. It lives at **[opsmill/plakar-integration-neo4j](https://github.com/opsmill/plakar-integration-neo4j)** (module `github.com/opsmill/plakar-integration-neo4j`, currently `v0.1.0`) and is consumed here as an ordinary tagged dependency — no `replace` directive, no vendored copy. The former `contrib/integration-neo4j/` tree has been deleted.
+The Neo4j integration is **not** in this repo. It lives at **[opsmill/plakar-integration-neo4j](https://github.com/opsmill/plakar-integration-neo4j)** (module `github.com/opsmill/plakar-integration-neo4j`; the pinned version is whatever `go.mod` says — currently `v0.3.0`) and is consumed here as an ordinary tagged dependency — no `replace` directive, no vendored copy. The former `contrib/integration-neo4j/` tree has been deleted.
 
 - **Fixes to the connector belong in that repository**, released as a new tag, then picked up here with a version bump plus `scripts/update-vendor-hash.sh`. Do not vendor it back or add a `replace` to a local checkout in anything you merge — a temporary `replace` is fine while developing, but must be gone before merge.
 - **Consumption is in-process**: `src/internal/app/connectors.go` blank-imports its `importer`/`exporter` packages, whose `init()` registers the `neo4j://` and `neo4j+offline://` schemes. The integration's SDK plugin binaries exist for external `plakar pkg add` users and play no part in this repo's build. Its `go-kloset-sdk` and `testcontainers-go` dependencies serve only those plugins and its own tests, and are verified absent from this repo's build closure.

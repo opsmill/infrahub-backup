@@ -204,6 +204,48 @@ The branch had diverged from `main` by 108 commits, which left PR #163 `CONFLICT
 
 ---
 
+## Phase 12: Deferred by the 2026-08-11 code review — blocked on a dependency release
+
+Each of these was verified against the pinned connector sources during the review of
+`test/e2e-plakar-round-trip`. None can be fixed inside this repository: they need a release of
+another module, so they are recorded rather than attempted. Everything else the review found was
+fixed on that branch.
+
+- [ ] T065 **Restore `--expand-commands` to every neo4j-admin invocation.** Blocked on a new
+  `opsmill/plakar-integration-neo4j` release. `main` passed `--expand-commands` at all five
+  neo4j-admin call sites (`backup_neo4j.go` lines 43, 220, 422, 431, 483). The connector's
+  `adminArgs` emits `["database","backup","--to-path=…","--compress=false"]` /
+  `["database","dump",…]` with no such flag, and `ParseConnConfig` accepts only
+  location/host/port/username/password/database/data_dir/neo4j_admin_path/neo4j_bin_dir/
+  include_metadata/overwrite — there is no key to set it through. Impact: a deployment whose
+  `neo4j.conf` uses command expansion (e.g. `server.memory.heap.max_size=$(…)`, common with
+  secret-injection sidecars) fails both backup and restore with "the config file contains command
+  expansion … use --expand-commands". Needs an `expand_commands` option in the integration, then a
+  version bump plus `scripts/update-vendor-hash.sh`.
+- [ ] T066 **Make the runner's view of the store's on-disk layout derived rather than assumed.**
+  Partly blocked on the same integration. `composeRunnerArgs` copies none of the database
+  container's `NEO4J_*` environment, and `dbDataDir` is hardcoded to `/data`. A deployment that
+  relocates the store via `NEO4J_server_directories_data` gets a runner whose neo4j-admin resolves
+  `server.directories.data` from image defaults — so `database dump` archives an absent store and
+  `database load --overwrite-destination` writes where the live server does not read, while
+  `--preserve-owner` chowns the wrong tree. The connector parses `data_dir`
+  (`neo4jconn/conn.go:131-134`) but never passes it to neo4j-admin, so `neo4j+offline:///data` is
+  decorative and the image's own config is the only thing deciding. Fixing this properly needs the
+  integration to honour `data_dir`, plus this repo reading the deployment's actual data directory
+  instead of assuming `/data`.
+- [ ] T067 **STS / temporary S3 credentials on an `s3://` repository.** Blocked on
+  `PlakarKorp/integration-s3`. The review asked for `AWS_SESSION_TOKEN` and `AWS_REGION` to be
+  forwarded into the runner "so STS credentials work"; they would not. Pinned
+  integration-s3 v1.1.0-beta.5 builds its client with
+  `credentials.NewStaticV4(accessKey, secretAccessKey, "")` — the session token is hardcoded empty
+  — and sets no `Region` on `minio.Options` (`storage/storage.go:134-138`). So a session token has
+  nowhere to go, on the host as much as in the runner: this is a uniform limitation, not a
+  host/runner asymmetry. Forwarding the variables today would be dead code. Needs a
+  `session_token` option upstream (or a different credentials provider), after which both
+  `storeConfig` and the runner credentials channel can carry it.
+
+---
+
 ## Dependencies & Execution Order
 
 ```text
