@@ -319,7 +319,7 @@ func (iops *InfrahubOps) restoreComponentViaRunner(project, repoPath, component,
 				logrus.Warnf("Restore completed, but %v", err)
 			}
 		}()
-		opts := map[string]string{"neo4j_bin_dir": "/var/lib/neo4j/bin", "overwrite": "true"}
+		opts := map[string]string{"neo4j_bin_dir": neo4jRunnerBinDir, "overwrite": "true"}
 		if err := LaunchComposeRestore(project, "database", repoPath, uri, snapHex, iops.config.Plakar.Passphrase, opts, true); err != nil {
 			return fmt.Errorf("neo4j restore failed: %w", err)
 		}

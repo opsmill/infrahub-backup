@@ -175,36 +175,87 @@ func (iops *InfrahubOps) CreatePlakarBackup(force bool, neo4jMetadata string, ex
 func (iops *InfrahubOps) backupNeo4jComponent(project, repoPath, neo4jMetadata string, community bool, tags []string) (snapHex string, retErr error) {
 	if community {
 		uri := "neo4j+offline:///data?database=" + url.QueryEscape(iops.config.Neo4jDatabase)
-		logrus.Info("Stopping Neo4j for offline (Community) backup...")
-		if err := iops.StopServices("database"); err != nil {
-			return "", fmt.Errorf("failed to stop neo4j: %w", err)
-		}
-		defer func() {
-			logrus.Info("Restarting Neo4j...")
-			if err := iops.StartServices("database"); err != nil {
-				if retErr == nil {
-					retErr = fmt.Errorf("failed to restart neo4j: %w", err)
-				}
-				return
-			}
-			// Stopping the container killed every client connection to the database,
-			// so returning while it is still starting hands the caller a deployment
-			// that looks up but cannot answer queries.
-			if err := iops.waitForNeo4jBolt(neo4jBoltReadyTimeout); err != nil {
-				logrus.Warnf("Backup completed, but %v", err)
-			}
-		}()
-		opts := map[string]string{"neo4j_bin_dir": "/var/lib/neo4j/bin"}
-		return LaunchComposeBackup(project, "database", repoPath, uri, iops.config.Plakar.Passphrase, opts, tags, true)
+		opts := map[string]string{"neo4j_bin_dir": neo4jRunnerBinDir}
+		return iops.withDeploymentQuiesced(func() (string, error) {
+			return LaunchComposeBackup(project, "database", repoPath, uri, iops.config.Plakar.Passphrase, opts, tags, true)
+		})
 	}
 
 	uri := dbURI("neo4j", iops.config.Neo4jUsername, iops.config.Neo4jPassword, "database", "6362", iops.config.Neo4jDatabase)
-	opts := map[string]string{"neo4j_bin_dir": "/var/lib/neo4j/bin"}
-	if neo4jMetadata != "" && neo4jMetadata != "none" {
+	return LaunchComposeBackup(project, "database", repoPath, uri, iops.config.Plakar.Passphrase,
+		neo4jOnlineBackupOpts(neo4jMetadata), tags, false)
+}
+
+// withDeploymentQuiesced stops the application tier and then the database, runs
+// dump against the now-idle data volume, and brings both back — the database
+// first, then the applications.
+//
+// The Community offline dump takes the database away, so the applications have to
+// go first: main stopped the whole application tier for exactly this path and the
+// runner rewrite kept only StopServices("database"). Left running,
+// infrahub-server and task-worker spend the dump failing against a stopped
+// database, and their in-flight writes are what the dump was meant to be a
+// consistent point in time for.
+func (iops *InfrahubOps) withDeploymentQuiesced(dump func() (string, error)) (snapHex string, retErr error) {
+	stopped, err := iops.stopAppContainers()
+	if err != nil {
+		if len(stopped) > 0 {
+			if startErr := iops.startAppContainers(stopped); startErr != nil {
+				logrus.Warnf("Failed to restart services after stop error: %v", startErr)
+			}
+		}
+		return "", fmt.Errorf("failed to stop application services for the Community offline backup: %w", err)
+	}
+	// Registered before the database restart below so that it runs after it: the
+	// application tier must not come back to a database that is still starting.
+	defer func() {
+		if err := iops.startAppContainers(stopped); err != nil && retErr == nil {
+			retErr = fmt.Errorf("failed to restart application services: %w", err)
+		}
+	}()
+
+	logrus.Info("Stopping Neo4j for offline (Community) backup...")
+	if err := iops.StopServices("database"); err != nil {
+		return "", fmt.Errorf("failed to stop neo4j: %w", err)
+	}
+	defer func() {
+		logrus.Info("Restarting Neo4j...")
+		if err := iops.StartServices("database"); err != nil {
+			if retErr == nil {
+				retErr = fmt.Errorf("failed to restart neo4j: %w", err)
+			}
+			return
+		}
+		// Stopping the container killed every client connection to the database,
+		// so returning while it is still starting hands the caller a deployment
+		// that looks up but cannot answer queries.
+		if err := iops.waitForNeo4jBolt(neo4jBoltReadyTimeout); err != nil {
+			logrus.Warnf("Backup completed, but %v", err)
+		}
+	}()
+
+	return dump()
+}
+
+// neo4jOnlineBackupOpts are the connector options for the Enterprise online backup.
+//
+// --neo4jmetadata=none has to be FORWARDED, not omitted: the integration accepts
+// "none" and turns it into --include-metadata=none, whereas omitting the option
+// leaves neo4j-admin applying its own default of `all`. Skipping "none" therefore
+// wrote users and roles into a backup the operator explicitly asked to exclude
+// them from. The deleted streaming path passed the value unconditionally, so
+// `none` used to work.
+func neo4jOnlineBackupOpts(neo4jMetadata string) map[string]string {
+	opts := map[string]string{"neo4j_bin_dir": neo4jRunnerBinDir}
+	if neo4jMetadata != "" {
 		opts["include_metadata"] = neo4jMetadata
 	}
-	return LaunchComposeBackup(project, "database", repoPath, uri, iops.config.Plakar.Passphrase, opts, tags, false)
+	return opts
 }
+
+// neo4jRunnerBinDir is where neo4j-admin lives in the database image the runner
+// borrows.
+const neo4jRunnerBinDir = "/var/lib/neo4j/bin"
 
 // dbURI builds a connector URI with URL-encoded credentials.
 func dbURI(scheme, user, pass, host, port, database string) string {
