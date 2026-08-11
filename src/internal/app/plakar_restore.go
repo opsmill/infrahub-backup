@@ -323,46 +323,10 @@ func (iops *InfrahubOps) restoreComponents(plan restorePlan, restoreComponent fu
 
 // restoreComponentViaRunner restores one component by driving its connector
 // exporter in a co-located runner, with the lifecycle each engine needs.
-func (iops *InfrahubOps) restoreComponentViaRunner(project, repoPath, component, snapHex string, community, excludeTaskManager bool, migrate Neo4jMigration) (retErr error) {
+func (iops *InfrahubOps) restoreComponentViaRunner(project, repoPath, component, snapHex string, community, excludeTaskManager bool, migrate Neo4jMigration) error {
 	switch component {
 	case ComponentNeo4j:
-		// Stop the writer so neo4j-admin can replace the store, run the exporter in
-		// a runner sharing the (now-quiesced) data volume, then restart. The default
-		// database already exists in the catalog, so --overwrite-destination replaces
-		// its store; no CREATE DATABASE. Enterprise restores from the backup artifact
-		// (neo4j://); Community loads the offline dump (neo4j+offline://).
-		var uri string
-		var dbPassword string
-		if community {
-			uri = "neo4j+offline:///data?database=" + url.QueryEscape(iops.config.Neo4jDatabase)
-		} else {
-			uri = dbURI("neo4j", iops.config.Neo4jUsername, "database", "6362", iops.config.Neo4jDatabase)
-			dbPassword = iops.config.Neo4jPassword
-		}
-		logrus.Info("Stopping Neo4j for offline restore...")
-		if err := iops.StopServices("database"); err != nil {
-			return fmt.Errorf("failed to stop neo4j: %w", err)
-		}
-		defer func() {
-			logrus.Info("Restarting Neo4j...")
-			if err := iops.StartServices("database"); err != nil {
-				if retErr == nil {
-					retErr = fmt.Errorf("failed to restart neo4j: %w", err)
-				}
-				return
-			}
-			// "Infrahub should be available shortly" is only true once the database is
-			// answering again; wait for that rather than asserting it.
-			if err := iops.waitForNeo4jBolt(neo4jBoltReadyTimeout); err != nil {
-				logrus.Warnf("Restore completed, but %v", err)
-			}
-		}()
-		opts := map[string]string{"neo4j_bin_dir": neo4jRunnerBinDir, "overwrite": "true"}
-		if err := LaunchComposeRestore(project, "database", repoPath, uri, snapHex, iops.runnerCredentials(dbPassword), opts, true, migrate); err != nil {
-			return fmt.Errorf("neo4j restore failed: %w", err)
-		}
-		logrus.Info("Neo4j restore completed")
-		return nil
+		return iops.restoreNeo4jComponent(project, repoPath, snapHex, community, migrate)
 
 	case ComponentPostgres:
 		if excludeTaskManager {
@@ -384,6 +348,49 @@ func (iops *InfrahubOps) restoreComponentViaRunner(project, repoPath, component,
 	default:
 		return fmt.Errorf("unknown component type in snapshot: %s", component)
 	}
+}
+
+// restoreNeo4jComponent replaces the Neo4j store from a snapshot: stop the writer
+// so neo4j-admin can replace the store, run the exporter in a runner sharing the
+// (now-quiesced) data volume, then restart.
+//
+// The default database already exists in the catalog, so --overwrite-destination
+// replaces its store; no CREATE DATABASE. Enterprise restores from the backup
+// artifact (neo4j://); Community loads the offline dump (neo4j+offline://).
+func (iops *InfrahubOps) restoreNeo4jComponent(project, repoPath, snapHex string, community bool, migrate Neo4jMigration) (retErr error) {
+	var uri, dbPassword string
+	if community {
+		uri = "neo4j+offline:///data?database=" + url.QueryEscape(iops.config.Neo4jDatabase)
+	} else {
+		uri = dbURI("neo4j", iops.config.Neo4jUsername, "database", "6362", iops.config.Neo4jDatabase)
+		dbPassword = iops.config.Neo4jPassword
+	}
+
+	logrus.Info("Stopping Neo4j for offline restore...")
+	if err := iops.StopServices("database"); err != nil {
+		return fmt.Errorf("failed to stop neo4j: %w", err)
+	}
+	defer func() {
+		logrus.Info("Restarting Neo4j...")
+		if err := iops.StartServices("database"); err != nil {
+			if retErr == nil {
+				retErr = fmt.Errorf("failed to restart neo4j: %w", err)
+			}
+			return
+		}
+		// "Infrahub should be available shortly" is only true once the database is
+		// answering again; wait for that rather than asserting it.
+		if err := iops.waitForNeo4jBolt(neo4jBoltReadyTimeout); err != nil {
+			logrus.Warnf("Restore completed, but %v", err)
+		}
+	}()
+
+	opts := map[string]string{"neo4j_bin_dir": neo4jRunnerBinDir, "overwrite": "true"}
+	if err := LaunchComposeRestore(project, "database", repoPath, uri, snapHex, iops.runnerCredentials(dbPassword), opts, true, migrate); err != nil {
+		return fmt.Errorf("neo4j restore failed: %w", err)
+	}
+	logrus.Info("Neo4j restore completed")
+	return nil
 }
 
 // postgresRestoreOpts are the connector options for restoring the task-manager
