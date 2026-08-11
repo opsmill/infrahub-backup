@@ -276,6 +276,18 @@ fixed on that branch.
   across two hunks. Held back only because removing a subcommand is a CLI-surface change and it may
   still be useful as a manual seam while the Kubernetes transport (T062) is built.
 
+- [ ] T071 **Take the Enterprise online backup without requiring the backup listener to be
+  exposed.** `main` ran `neo4j-admin database backup` via `iops.Exec("database", …)` — inside the
+  database container, over loopback, with no `--from` — so it worked against a stock deployment. The
+  runner runs beside the container instead, so the integration builds `--from=database:6362` and
+  Neo4j's default `127.0.0.1` listener refuses it: every existing Enterprise deployment's plakar
+  backup fails until it sets `server.backup.listen_address`. The prerequisite is now documented in
+  `README.md`, but documenting a new requirement is the weaker fix — running the online backup where
+  the database is would remove it, and is the same conclusion the Kubernetes work reached for the
+  same reason (see [k8s-runner-plan.md](./k8s-runner-plan.md), constraint 1). **This was masked by
+  the harness**: `test/e2e/docker-compose.enterprise.yml:12` sets the listener to `0.0.0.0:6362`, so
+  the branch's own e2e could not see the break.
+
 ---
 
 ## Dependencies & Execution Order
