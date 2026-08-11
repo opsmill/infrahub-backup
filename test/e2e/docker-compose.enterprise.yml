@@ -52,6 +52,19 @@ services:
     image: alpine:3
     command: ["sleep", "infinity"]
 
+  # cache and message-queue exist because the restore lifecycle wipes their
+  # transient state and restarts them (restartDependencies treats a failure to
+  # restart them as fatal, as it does on a real deployment). They are placeholders:
+  # the wipe execs `find` into paths these images do not have, which the tool logs
+  # and continues past.
+  cache:
+    image: alpine:3
+    command: ["sleep", "infinity"]
+
+  message-queue:
+    image: alpine:3
+    command: ["sleep", "infinity"]
+
 volumes:
   neo4j-data:
   pg-data:

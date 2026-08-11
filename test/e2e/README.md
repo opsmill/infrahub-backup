@@ -47,11 +47,19 @@ Only the two services the tool actually backs up are real:
 | `infrahub-server` | `alpine:3` | placeholder; carries `INFRAHUB_DB_*` for credential discovery |
 | `task-manager` | `alpine:3` | placeholder; carries `PREFECT_SERVER_DATABASE_CONNECTION_URL` |
 | `task-worker` | `alpine:3` | placeholder; stopped/restarted by the tool |
+| `cache` | `alpine:3` | placeholder; transient state wiped and restarted by a restore |
+| `message-queue` | `alpine:3` | placeholder; transient state wiped and restarted by a restore |
 
 The placeholders exist because the tool stops and restarts those services and may
 `exec env` into them to discover credentials. They are not Infrahub, so the tool
 logs `Could not detect Infrahub version: exit status 127` and records the version
 as `unknown` — expected, and harmless to the round-trip.
+
+`cache` and `message-queue` are needed rather than optional: a restore wipes their
+transient state (which describes the database being replaced) and then restarts
+them, and treats a failure to restart them as fatal — as it does on a real
+deployment. The wipe itself execs `find` into paths an `alpine:3` image does not
+have, which the tool logs and continues past.
 
 The Enterprise compose additionally enables the backup service on port 6362,
 which is what the online `neo4j://` path connects to.

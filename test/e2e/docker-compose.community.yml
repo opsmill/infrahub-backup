@@ -2,9 +2,10 @@
 # Only the services infrahub-backup actually touches are real:
 #   database        -> Neo4j (the backup/restore target)
 #   task-manager-db -> PostgreSQL (the task-manager DB target)
-# infrahub-server / task-manager / task-worker exist because the tool stops and
-# restarts them and may exec `env` into them for credential discovery; they carry
-# the same INFRAHUB_DB_* / PREFECT_* env the real deployment exposes.
+# infrahub-server / task-manager / task-worker / cache / message-queue exist
+# because the tool stops and restarts them and may exec `env` into them for
+# credential discovery; they carry the same INFRAHUB_DB_* / PREFECT_* env the real
+# deployment exposes.
 services:
   database:
     image: neo4j:2025.10.1-community
@@ -51,6 +52,19 @@ services:
       PREFECT_SERVER_DATABASE_CONNECTION_URL: postgresql+asyncpg://prefect:prefectpass@task-manager-db:5432/prefect
 
   task-worker:
+    image: alpine:3
+    command: ["sleep", "infinity"]
+
+  # cache and message-queue exist because the restore lifecycle wipes their
+  # transient state and restarts them (restartDependencies treats a failure to
+  # restart them as fatal, as it does on a real deployment). They are placeholders:
+  # the wipe execs `find` into paths these images do not have, which the tool logs
+  # and continues past.
+  cache:
+    image: alpine:3
+    command: ["sleep", "infinity"]
+
+  message-queue:
     image: alpine:3
     command: ["sleep", "infinity"]
 
