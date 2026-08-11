@@ -215,7 +215,7 @@ func connectorConfig(location string, creds runnerCredentials, opts map[string]s
 
 // runConnectorBackup runs the registered importer for sourceURI and writes one
 // snapshot (with the given tags) into the kloset repository at repoPath.
-func runConnectorBackup(repoPath, sourceURI string, creds runnerCredentials, s3Insecure bool, opts map[string]string, tags []string) (retErr error) {
+func runConnectorBackup(repoPath, sourceURI string, creds runnerCredentials, s3Insecure bool, opts map[string]string, tags []string) error {
 	cfg := plakarConfigFrom(repoPath, creds, s3Insecure)
 	kctx, err := initPlakarContext(cfg)
 	if err != nil {

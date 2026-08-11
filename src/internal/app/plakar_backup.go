@@ -168,7 +168,7 @@ func (iops *InfrahubOps) CreatePlakarBackup(force bool, neo4jMetadata string, ex
 // backupNeo4jComponent captures the Neo4j component. Enterprise uses an online
 // backup over the backup port; Community stops the writer, runs an offline dump
 // in a runner sharing the (quiesced) data volume, then restarts.
-func (iops *InfrahubOps) backupNeo4jComponent(project, repoPath, neo4jMetadata string, community bool, tags []string) (snapHex string, retErr error) {
+func (iops *InfrahubOps) backupNeo4jComponent(project, repoPath, neo4jMetadata string, community bool, tags []string) (string, error) {
 	if community {
 		uri := "neo4j+offline:///data?database=" + url.QueryEscape(iops.config.Neo4jDatabase)
 		opts := map[string]string{"neo4j_bin_dir": neo4jRunnerBinDir}
