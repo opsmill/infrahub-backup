@@ -196,3 +196,48 @@ transports honest.
 This is feature work, not conflict resolution. It is also the last thing standing between
 #163 and `main` — every other CI check is green, and T064 (the database container restart
 disrupting Infrahub's workers) is a separate behavioural decision recorded in `tasks.md`.
+
+## T062 and T071 are one fix — findings from a first implementation attempt
+
+T071 (Enterprise needs `server.backup.listen_address` exposed) and T062 (Kubernetes refused)
+have the same cause and the same fix: **run `neo4j-admin` inside the database's own container
+or pod** rather than in a sibling. `main` did exactly that and had neither problem.
+
+Doing so removes the need for a Kubernetes-specific transport entirely, because the two
+primitives it needs — `Exec` and `CopyFrom`/`CopyTo` — are implemented by both
+`DockerBackend` and `KubernetesBackend`. The sibling-runner model is what created both
+symptoms, so it is the thing to retire for this component, not each symptom in turn.
+
+### Shape that works
+
+Backup: make a stage dir in the container → `staged.DumpArgs(remoteStage)` → `Exec`
+neo4j-admin there → `CopyFrom` the artifact to a local stage → build the snapshot in this
+process from `importer.NewStagedImporter`. Restore: `exporter.NewStagedExporter` stages
+locally → `CopyTo` the container → `Exec` the argv from `RestoreArgs(remoteStage)`.
+
+### Details established, worth not rediscovering
+
+- **Omit the host from the online location** (`neo4j:///<db>` rather than
+  `neo4j://…@database:6362/<db>`). The integration adds `--from` only when a host is set, and
+  without it neo4j-admin uses loopback — which is the entire point of running inside the
+  container, and what makes the T071 prerequisite disappear.
+- **`cp` onto an existing directory nests rather than replaces.** Copy to a *non-existent*
+  destination so it becomes a copy of the source, and clear the container-side stage before
+  copying in as well as after copying out.
+- **`Neo4jMigration.Requested()` is a method, not a field**, and `run(binDir)` executes
+  locally — the in-place path needs the argv to `Exec` instead, so that knowledge wants
+  exposing the same way `DumpArgs`/`RestoreArgs` were.
+- **Four helpers do not exist yet** and are the bulk of the remaining work:
+  `snapshotFromImporter` (factor out of `writeMetadataSnapshot`, which already does exactly
+  this for the metadata component), `exportSnapshot` + a small exporter interface (factor out
+  of `runConnectorRestore`), and a migrate-argv accessor.
+- **Postgres is unaffected and still needs its own answer.** `pg_dump` speaks the wire
+  protocol, so it needs reachability rather than co-location: the runner on Docker, a
+  port-forward on Kubernetes. `KubernetesBackend` has no port-forward today.
+
+### Then the refusals go
+
+`plakar_backup.go:39` and `plakar_restore.go:34` can be deleted once Neo4j is in-place and
+Postgres has a Kubernetes route. Acceptance stays as stated above: `test_k8s_plakar.py` and
+`test_k8s_plakar_s3.py` green, the Docker suites unbroken, and a backup taken on one backend
+restoring on the other.
