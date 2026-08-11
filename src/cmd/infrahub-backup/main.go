@@ -82,6 +82,16 @@ func resolveRestoreInvocation(backend app.BackendType, args []string, latest, s3
 			return restoreRequest{}, fmt.Errorf("--s3 does not apply to the %s backend: the repository location comes from --repo, and a plakar restore already resolves the latest complete backup group", app.BackendPlakar)
 		}
 
+		// A positional argument cannot mean anything here — this backend selects what to
+		// restore with --backup-id / --snapshot — and it used to be dropped in silence.
+		// `restore --backend plakar --repo … 20260810_020000`, which the README itself
+		// documented, therefore restored the LATEST complete group instead of the named
+		// one: for an operator rolling back, that is a restore of the very state they
+		// were rolling back from.
+		if len(args) > 0 {
+			return restoreRequest{}, fmt.Errorf("the %s backend does not take a positional argument: %q would be ignored — name a backup group with --backup-id, a single component snapshot with --snapshot, or pass neither to restore the latest complete group", app.BackendPlakar, args[0])
+		}
+
 		// --latest is what this backend has always done without an argument, so it takes
 		// the same route rather than a parallel one that could drift from it (FR-004).
 		return restoreRequest{}, nil

@@ -43,7 +43,11 @@ infrahub-backup create --backend plakar --repo fs:///backups/infra --encrypt
 
 # The same passphrase is required for every later operation on the repo:
 infrahub-backup --backend plakar --repo fs:///backups/infra snapshots list
-infrahub-backup restore --backend plakar --repo fs:///backups/infra <backup-id>
+
+# Restore the latest complete backup group, a named group, or one component:
+infrahub-backup restore --backend plakar --repo fs:///backups/infra
+infrahub-backup restore --backend plakar --repo fs:///backups/infra --backup-id 20260810_020000
+infrahub-backup restore --backend plakar --repo fs:///backups/infra --snapshot 8f3a1c2d
 
 # Read the passphrase from a file instead of the environment:
 infrahub-backup create --backend plakar --repo fs:///backups/infra --encrypt \
@@ -52,6 +56,9 @@ infrahub-backup create --backend plakar --repo fs:///backups/infra --encrypt \
 
 Notes:
 
+- The plakar backend selects what to restore with `--backup-id` (a backup group) or
+  `--snapshot` (one component), never with a positional argument. Passing one is
+  rejected rather than ignored.
 - Encryption is fixed when the repository is **created**; it is not applied
   retroactively and cannot be toggled in place. Create a new repository to change it.
 - The passphrase must be **at least 12 characters**. It is supplied non‑interactively
