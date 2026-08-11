@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -25,6 +26,51 @@ func runnerBinary() (string, error) {
 	return os.Executable()
 }
 
+// runnerCredentials are the values the in-container worker needs but which must
+// not appear on its command line or in its environment.
+//
+// `docker inspect` reports both Config.Cmd and Config.Env for as long as the
+// container exists, and the host process list shows the docker CLI's own argv, so
+// either channel publishes a secret to every local user and to anything scraping
+// container metadata. The repository passphrase already avoided both by travelling
+// over the runner's stdin; the database and object-store credentials did not, and
+// went out in the connector URIs (`postgres://user:pass@…`, `s3://key:secret@…`)
+// and as `-e AWS_SECRET_ACCESS_KEY=…`.
+//
+// They are sent as one JSON object rather than key=value lines so that a value
+// containing a newline or an `=` cannot be misread.
+type runnerCredentials struct {
+	// Passphrase opens an encrypted kloset repository.
+	Passphrase string `json:"passphrase,omitempty"`
+	// DBPassword authenticates the connector to the database it is dumping or
+	// loading. The worker applies it as the connector's standalone `password`
+	// option, which both pinned connectors document as overriding the location URI.
+	DBPassword string `json:"db_password,omitempty"`
+	// S3AccessKey / S3SecretKey authenticate an s3:// repository. They are filled in
+	// by the launch functions from repoAccessFor, not by callers.
+	S3AccessKey string `json:"s3_access_key,omitempty"`
+	S3SecretKey string `json:"s3_secret_key,omitempty"`
+}
+
+// runnerCredentials assembles what a runner launch has to send over stdin: the
+// repository passphrase, and the password for the database this launch talks to
+// (empty for the offline Neo4j paths, which authenticate through the filesystem).
+func (iops *InfrahubOps) runnerCredentials(dbPassword string) runnerCredentials {
+	return runnerCredentials{
+		Passphrase: iops.config.Plakar.Passphrase,
+		DBPassword: dbPassword,
+	}
+}
+
+// encode renders the credentials for the runner's stdin.
+func (c runnerCredentials) encode() (string, error) {
+	data, err := json.Marshal(c)
+	if err != nil {
+		return "", fmt.Errorf("encoding runner credentials: %w", err)
+	}
+	return string(data), nil
+}
+
 // LaunchComposeBackup runs ONE backup connector op in a one-shot runner container
 // co-located with the target Docker Compose database service, and returns the
 // created snapshot id.
@@ -34,35 +80,46 @@ func runnerBinary() (string, error) {
 // present), joins the DB's compose network (reach it by service name), and mounts
 // the tool binary + the kloset repo. This needs no separately-built runner image
 // and resolves fs:// repo reachability (the host repo dir is bind-mounted in).
-func LaunchComposeBackup(project, dbService, repoPath, uri, passphrase string, opts map[string]string, tags []string, mountDBVolumes bool) (string, error) {
-	args, err := composeRunnerArgs(project, dbService, repoPath, mountDBVolumes, passphrase != "")
+func LaunchComposeBackup(project, dbService, repoPath, uri string, creds runnerCredentials, opts map[string]string, tags []string, mountDBVolumes bool) (string, error) {
+	args, err := composeRunnerArgs(project, dbService, repoPath, mountDBVolumes)
 	if err != nil {
 		return "", err
 	}
-	repoArg := repoArgFor(repoPath)
-	args = append(args, "__run-connector", "backup", repoArg, uri)
-	if passphrase != "" {
-		args = append(args, "--passphrase-stdin")
+	access := repoAccessFor(repoPath)
+	creds.S3AccessKey, creds.S3SecretKey = access.AccessKey, access.SecretKey
+	stdin, err := creds.encode()
+	if err != nil {
+		return "", err
 	}
+
+	args = append(args, "__run-connector", "backup", access.Location, uri, credentialsStdinFlag)
+	args = append(args, access.flags()...)
 	for k, v := range opts {
 		args = append(args, "--opt", k+"="+v)
 	}
 	for _, t := range tags {
 		args = append(args, "--tag", t)
 	}
-	return runDockerCapture(args, passphrase)
+	return runDockerCapture(args, stdin)
 }
 
 // LaunchComposeRestore runs ONE restore connector op in a co-located runner. A
 // requested Neo4j format migration runs inside the same runner, in the same offline
 // window as the load (see Neo4jMigration).
-func LaunchComposeRestore(project, dbService, repoPath, destURI, snapshot, passphrase string, opts map[string]string, mountDBVolumes bool, migrate Neo4jMigration) error {
-	args, err := composeRunnerArgs(project, dbService, repoPath, mountDBVolumes, passphrase != "")
+func LaunchComposeRestore(project, dbService, repoPath, destURI, snapshot string, creds runnerCredentials, opts map[string]string, mountDBVolumes bool, migrate Neo4jMigration) error {
+	args, err := composeRunnerArgs(project, dbService, repoPath, mountDBVolumes)
 	if err != nil {
 		return err
 	}
-	repoArg := repoArgFor(repoPath)
-	args = append(args, "__run-connector", "restore", repoArg, destURI, snapshot)
+	access := repoAccessFor(repoPath)
+	creds.S3AccessKey, creds.S3SecretKey = access.AccessKey, access.SecretKey
+	stdin, err := creds.encode()
+	if err != nil {
+		return err
+	}
+
+	args = append(args, "__run-connector", "restore", access.Location, destURI, snapshot, credentialsStdinFlag)
+	args = append(args, access.flags()...)
 	if migrate.Requested() {
 		args = append(args, "--migrate-format", migrate.Format, "--migrate-database", migrate.Database)
 	}
@@ -74,20 +131,17 @@ func LaunchComposeRestore(project, dbService, repoPath, destURI, snapshot, passp
 		// recorded this as the tool's job rather than the connector's.
 		args = append(args, "--preserve-owner", dbDataDir)
 	}
-	if passphrase != "" {
-		args = append(args, "--passphrase-stdin")
-	}
 	for k, v := range opts {
 		args = append(args, "--opt", k+"="+v)
 	}
-	_, err = runDockerCapture(args, passphrase)
+	_, err = runDockerCapture(args, stdin)
 	return err
 }
 
 // composeRunnerArgs builds the `docker run …` prefix up to (but not including)
-// the in-container command: image, network, mounts, env. When withStdin is set,
-// the container keeps stdin open (`-i`) so the passphrase can be piped in.
-func composeRunnerArgs(project, dbService, repoPath string, mountDBVolumes, withStdin bool) ([]string, error) {
+// the in-container command: image, network, mounts, env. The container always
+// keeps stdin open (`-i`), because that is how the credentials reach the worker.
+func composeRunnerArgs(project, dbService, repoPath string, mountDBVolumes bool) ([]string, error) {
 	cid, err := composeContainerID(project, dbService)
 	if err != nil {
 		return nil, err
@@ -105,13 +159,10 @@ func composeRunnerArgs(project, dbService, repoPath string, mountDBVolumes, with
 		return nil, fmt.Errorf("resolving runner binary: %w", err)
 	}
 
-	args := []string{"run", "--rm"}
-	if withStdin {
-		// Keep stdin open so the orchestrator can pipe the passphrase in. The
-		// passphrase is never an arg or -e env var (it would leak via docker
-		// inspect / the process list).
-		args = append(args, "-i")
-	}
+	// -i keeps stdin open so the orchestrator can pipe the credentials in. No
+	// secret is ever an argument or a -e env var: docker inspect reports both for
+	// the life of the container, and argv is visible in the host process list.
+	args := []string{"run", "--rm", "-i"}
 	args = append(args,
 		"--network", network,
 		"--user", "root", // neo4j-admin/pg tools; online backup tolerates root
@@ -121,7 +172,7 @@ func composeRunnerArgs(project, dbService, repoPath string, mountDBVolumes, with
 	)
 	if local, hostPath := parseRepoLocation(repoPath); local {
 		// Local repo, spelled either /path or fs:///path — bind-mount the host
-		// directory into the runner, where repoArgFor points the worker at /repo.
+		// directory into the runner, where repoAccessFor points the worker at /repo.
 		args = append(args, "-v", hostPath+":/repo")
 	} else if strings.HasPrefix(repoPath, "s3://") {
 		// The runner is on the database's compose network, so it has no route to a
@@ -130,10 +181,13 @@ func composeRunnerArgs(project, dbService, repoPath string, mountDBVolumes, with
 		// map the host in and rewrite loopback endpoints to it rather than failing
 		// with a bare "connection refused" from inside the container.
 		args = append(args, "--add-host", dockerHostAlias+":host-gateway")
-		for _, e := range []string{"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "INFRAHUB_S3_ENDPOINT"} {
-			if v := os.Getenv(e); v != "" {
-				args = append(args, "-e", e+"="+containerReachable(v))
-			}
+		// Only the endpoint is forwarded through the environment. It is a URL, which
+		// is what containerReachable is for; the access key and secret travel over
+		// stdin instead (see runnerCredentials). AWS_SECRET_ACCESS_KEY used to be
+		// passed through containerReachable too, which is a URL rewriter being handed
+		// something that is not a URL.
+		if v := os.Getenv("INFRAHUB_S3_ENDPOINT"); v != "" {
+			args = append(args, "-e", "INFRAHUB_S3_ENDPOINT="+containerReachable(v))
 		}
 	}
 	if mountDBVolumes {
@@ -231,14 +285,62 @@ func parseRepoLocation(repoPath string) (local bool, path string) {
 	return true, repoPath
 }
 
-// repoArgFor maps the configured repo to the location the in-container worker opens:
-// a local repo is bind-mounted at /repo; a remote URI is passed through, with a
-// loopback host rewritten so it resolves to the Docker host rather than to the runner.
-func repoArgFor(repoPath string) string {
-	if local, _ := parseRepoLocation(repoPath); local {
-		return "/repo"
+// runnerRepoAccess is how the runner is told to reach the repository, split into
+// the part that is safe to put on a command line and the part that is not.
+type runnerRepoAccess struct {
+	// Location is the repository as the in-container worker should open it: the
+	// bind mount for a local repo, or the URI with any credentials removed.
+	Location string
+	// AccessKey / SecretKey are the s3:// credentials, to be sent over stdin.
+	AccessKey string
+	SecretKey string
+	// Insecure records that the repository is to be reached over plain HTTP. It is
+	// implied by credentials embedded in the URI, which storeConfig has always read
+	// as "a local S3-compatible store"; stripping the credentials would otherwise
+	// silently flip such a repository to TLS.
+	Insecure bool
+}
+
+// flags renders the non-secret part of the access for the worker's command line.
+func (a runnerRepoAccess) flags() []string {
+	if a.Insecure {
+		return []string{"--s3-insecure"}
 	}
-	return containerReachable(repoPath)
+	return nil
+}
+
+// repoAccessFor maps the configured repo to what the in-container worker is told:
+// a local repo is bind-mounted at /repo; a remote URI is passed through with a
+// loopback host rewritten so it resolves to the Docker host rather than to the
+// runner, and with any embedded credentials lifted out of the URI so they do not
+// land on `docker run`'s argv. When the URI carries none, the host's AWS_*
+// environment is used — read here, on the host, rather than forwarded into the
+// container's environment.
+func repoAccessFor(repoPath string) runnerRepoAccess {
+	if local, _ := parseRepoLocation(repoPath); local {
+		return runnerRepoAccess{Location: "/repo"}
+	}
+
+	access := runnerRepoAccess{Location: containerReachable(repoPath)}
+	if !strings.HasPrefix(repoPath, "s3://") {
+		return access
+	}
+	if u, err := url.Parse(access.Location); err == nil && u.User != nil {
+		access.AccessKey = u.User.Username()
+		if secret, ok := u.User.Password(); ok {
+			access.SecretKey = secret
+		}
+		u.User = nil
+		access.Location = u.String()
+		access.Insecure = true
+	}
+	if access.AccessKey == "" {
+		access.AccessKey = os.Getenv("AWS_ACCESS_KEY_ID")
+	}
+	if access.SecretKey == "" {
+		access.SecretKey = os.Getenv("AWS_SECRET_ACCESS_KEY")
+	}
+	return access
 }
 
 func composeContainerID(project, service string) (string, error) {

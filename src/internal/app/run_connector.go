@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -41,25 +42,25 @@ func RunConnectorCommand() *cobra.Command {
 	}
 
 	var backupOpts, tags []string
-	var backupPassphraseStdin bool
+	var backupCreds credentialsInput
 	backupCmd := &cobra.Command{
 		Use:          "backup <repo> <source-uri>",
 		Args:         cobra.ExactArgs(2),
 		SilenceUsage: true,
 		RunE: func(_ *cobra.Command, args []string) error {
-			passphrase, err := readPassphraseStdinIf(backupPassphraseStdin)
+			creds, err := backupCreds.read()
 			if err != nil {
 				return err
 			}
-			return runConnectorBackup(args[0], args[1], passphrase, parseKV(backupOpts), tags)
+			return runConnectorBackup(args[0], args[1], creds, backupCreds.s3Insecure, parseKV(backupOpts), tags)
 		},
 	}
 	backupCmd.Flags().StringArrayVar(&backupOpts, "opt", nil, "connector option key=value (repeatable)")
 	backupCmd.Flags().StringArrayVar(&tags, "tag", nil, "snapshot tag key=value (repeatable)")
-	addPassphraseStdinFlag(backupCmd, &backupPassphraseStdin)
+	backupCreds.addFlags(backupCmd)
 
 	var restoreOpts []string
-	var restorePassphraseStdin bool
+	var restoreCreds credentialsInput
 	var restorePreserveOwner string
 	var migrate Neo4jMigration
 	restoreCmd := &cobra.Command{
@@ -67,11 +68,12 @@ func RunConnectorCommand() *cobra.Command {
 		Args:         cobra.ExactArgs(3),
 		SilenceUsage: true,
 		RunE: func(_ *cobra.Command, args []string) error {
-			passphrase, err := readPassphraseStdinIf(restorePassphraseStdin)
+			creds, err := restoreCreds.read()
 			if err != nil {
 				return err
 			}
-			return runConnectorRestore(args[0], args[1], args[2], passphrase, restorePreserveOwner, parseKV(restoreOpts), migrate)
+			return runConnectorRestore(args[0], args[1], args[2], creds, restoreCreds.s3Insecure,
+				restorePreserveOwner, parseKV(restoreOpts), migrate)
 		},
 	}
 	restoreCmd.Flags().StringArrayVar(&restoreOpts, "opt", nil, "connector option key=value (repeatable)")
@@ -81,23 +83,24 @@ func RunConnectorCommand() *cobra.Command {
 		"run `neo4j-admin database migrate --to-format=<format>` after the restore, in the same offline window")
 	restoreCmd.Flags().StringVar(&migrate.Database, "migrate-database", "",
 		"database to migrate (required with --migrate-format)")
-	addPassphraseStdinFlag(restoreCmd, &restorePassphraseStdin)
+	restoreCreds.addFlags(restoreCmd)
 
 	// launch: exercise the co-located runner launcher through the tool (testing the
 	// orchestration path; the create flow will call LaunchComposeBackup directly).
 	var launchOpts, launchTags []string
-	var launchVolumes, launchPassphraseStdin bool
+	var launchVolumes bool
+	var launchCreds credentialsInput
 	launchCmd := &cobra.Command{
 		Use:          "launch <project> <db-service> <repo> <source-uri>",
 		Args:         cobra.ExactArgs(4),
 		Hidden:       true,
 		SilenceUsage: true,
 		RunE: func(_ *cobra.Command, args []string) error {
-			passphrase, err := readPassphraseStdinIf(launchPassphraseStdin)
+			creds, err := launchCreds.read()
 			if err != nil {
 				return err
 			}
-			snap, err := LaunchComposeBackup(args[0], args[1], args[2], args[3], passphrase, parseKV(launchOpts), launchTags, launchVolumes)
+			snap, err := LaunchComposeBackup(args[0], args[1], args[2], args[3], creds, parseKV(launchOpts), launchTags, launchVolumes)
 			if err != nil {
 				return err
 			}
@@ -108,32 +111,58 @@ func RunConnectorCommand() *cobra.Command {
 	launchCmd.Flags().StringArrayVar(&launchOpts, "opt", nil, "connector option key=value (repeatable)")
 	launchCmd.Flags().StringArrayVar(&launchTags, "tag", nil, "snapshot tag key=value (repeatable)")
 	launchCmd.Flags().BoolVar(&launchVolumes, "volumes-from-db", false, "share the DB container's volumes (neo4j community/restore)")
-	addPassphraseStdinFlag(launchCmd, &launchPassphraseStdin)
+	launchCreds.addFlags(launchCmd)
 
 	cmd.AddCommand(backupCmd, restoreCmd, launchCmd)
 	return cmd
 }
 
-// addPassphraseStdinFlag registers the shared --passphrase-stdin flag on a
-// subcommand, binding it to target. Centralized so the flag name and help text
-// stay identical across the backup/restore/launch subcommands.
-func addPassphraseStdinFlag(cmd *cobra.Command, target *bool) {
-	cmd.Flags().BoolVar(target, "passphrase-stdin", false, "read the repository passphrase from stdin (one line)")
+// credentialsStdinFlag is the flag that tells the worker its credentials are
+// waiting on stdin. Shared so the two ends cannot disagree about the name.
+const credentialsStdinFlag = "--credentials-stdin"
+
+// credentialsInput is the worker's side of the credentials channel: the flags that
+// say how to obtain them, and the reader that does.
+type credentialsInput struct {
+	stdin bool
+	// s3Insecure is not a secret, so it travels on the command line. It records that
+	// the repository URI carried embedded credentials, which storeConfig has always
+	// read as "a local S3-compatible store, reached over plain HTTP" — lifting the
+	// credentials out of the URI would otherwise silently flip it to TLS.
+	s3Insecure bool
 }
 
-// readPassphraseStdinIf reads one line from stdin as the repository passphrase
-// when enabled. The orchestrator pipes it in via `docker run -i`, so it never
-// appears on the worker's command line or environment (FR-007). The trailing
-// CR/LF is stripped; interior characters are preserved.
-func readPassphraseStdinIf(enabled bool) (string, error) {
-	if !enabled {
-		return "", nil
+func (c *credentialsInput) addFlags(cmd *cobra.Command) {
+	cmd.Flags().BoolVar(&c.stdin, strings.TrimPrefix(credentialsStdinFlag, "--"), false,
+		"read the repository passphrase and database/object-store credentials from stdin (one JSON object)")
+	cmd.Flags().BoolVar(&c.s3Insecure, "s3-insecure", false,
+		"reach the s3:// repository over plain HTTP (implied by credentials embedded in the repo URI)")
+}
+
+// read decodes the credentials the orchestrator piped in via `docker run -i`, so
+// that none of them appears on the worker's command line or in its environment
+// (FR-007), either of which `docker inspect` would publish.
+//
+// An empty stdin is not an error: a plaintext local repository with an
+// unauthenticated connector legitimately has nothing to send.
+func (c *credentialsInput) read() (runnerCredentials, error) {
+	if !c.stdin {
+		return runnerCredentials{}, nil
 	}
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
-		return "", fmt.Errorf("reading passphrase from stdin: %w", err)
+		return runnerCredentials{}, fmt.Errorf("reading credentials from stdin: %w", err)
 	}
-	return firstLine(string(data)), nil
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" {
+		return runnerCredentials{}, nil
+	}
+	var creds runnerCredentials
+	if err := json.Unmarshal([]byte(trimmed), &creds); err != nil {
+		// The error deliberately does not echo the payload: it holds the secrets.
+		return runnerCredentials{}, fmt.Errorf("decoding credentials from stdin: %w", err)
+	}
+	return creds, nil
 }
 
 func parseKV(kvs []string) map[string]string {
@@ -154,10 +183,41 @@ func connectorOptions(kctx *kcontext.KContext) *connectors.Options {
 	}
 }
 
+// plakarConfigFrom builds the repository configuration the worker opens, from the
+// credentials that arrived over stdin.
+func plakarConfigFrom(repoPath string, creds runnerCredentials, s3Insecure bool) *PlakarConfig {
+	return &PlakarConfig{
+		RepoPath:    repoPath,
+		Passphrase:  creds.Passphrase,
+		S3AccessKey: creds.S3AccessKey,
+		S3SecretKey: creds.S3SecretKey,
+		S3Insecure:  s3Insecure,
+	}
+}
+
+// connectorConfig builds the connector configuration for a location, applying the
+// database password as the standalone `password` option.
+//
+// The URI on the worker's command line carries the username but no password (see
+// dbURI); both pinned connectors document standalone keys as overriding the
+// location URI, so this is where the credential is reunited with the connection.
+// Explicit --opt values still win, so nothing here can silently override an
+// operator's choice.
+func connectorConfig(location string, creds runnerCredentials, opts map[string]string) map[string]string {
+	config := map[string]string{"location": location}
+	if creds.DBPassword != "" {
+		config["password"] = creds.DBPassword
+	}
+	for k, v := range opts {
+		config[k] = v
+	}
+	return config
+}
+
 // runConnectorBackup runs the registered importer for sourceURI and writes one
 // snapshot (with the given tags) into the kloset repository at repoPath.
-func runConnectorBackup(repoPath, sourceURI, passphrase string, opts map[string]string, tags []string) (retErr error) {
-	cfg := &PlakarConfig{RepoPath: repoPath, Passphrase: passphrase}
+func runConnectorBackup(repoPath, sourceURI string, creds runnerCredentials, s3Insecure bool, opts map[string]string, tags []string) (retErr error) {
+	cfg := plakarConfigFrom(repoPath, creds, s3Insecure)
 	kctx, err := initPlakarContext(cfg)
 	if err != nil {
 		return err
@@ -175,12 +235,7 @@ func runConnectorBackup(repoPath, sourceURI, passphrase string, opts map[string]
 	}
 	defer closeRepo(repo)
 
-	config := map[string]string{"location": sourceURI}
-	for k, v := range opts {
-		config[k] = v
-	}
-
-	imp, err := importer.NewImporter(kctx, connectorOptions(kctx), config)
+	imp, err := importer.NewImporter(kctx, connectorOptions(kctx), connectorConfig(sourceURI, creds, opts))
 	if err != nil {
 		return fmt.Errorf("creating importer for %q: %w", sourceURI, err)
 	}
@@ -314,7 +369,8 @@ func (m Neo4jMigration) run(binDir string) error {
 }
 
 // runConnectorRestore loads the snapshot and drives the registered exporter for destURI.
-func runConnectorRestore(repoPath, destURI, snapHex, passphrase, preserveOwnerDir string, opts map[string]string, migrate Neo4jMigration) error {
+func runConnectorRestore(repoPath, destURI, snapHex string, creds runnerCredentials, s3Insecure bool,
+	preserveOwnerDir string, opts map[string]string, migrate Neo4jMigration) error {
 	// Captured before the export so it reflects the ownership the database had, not
 	// whatever the restore leaves behind.
 	restoreOwnership, err := preserveOwnership(preserveOwnerDir)
@@ -322,7 +378,7 @@ func runConnectorRestore(repoPath, destURI, snapHex, passphrase, preserveOwnerDi
 		return err
 	}
 
-	cfg := &PlakarConfig{RepoPath: repoPath, Passphrase: passphrase}
+	cfg := plakarConfigFrom(repoPath, creds, s3Insecure)
 	kctx, err := initPlakarContext(cfg)
 	if err != nil {
 		return err
@@ -344,12 +400,7 @@ func runConnectorRestore(repoPath, destURI, snapHex, passphrase, preserveOwnerDi
 		return fmt.Errorf("loading snapshot %s: %w", snapHex, err)
 	}
 
-	config := map[string]string{"location": destURI}
-	for k, v := range opts {
-		config[k] = v
-	}
-
-	exp, err := exporter.NewExporter(kctx, connectorOptions(kctx), config)
+	exp, err := exporter.NewExporter(kctx, connectorOptions(kctx), connectorConfig(destURI, creds, opts))
 	if err != nil {
 		return fmt.Errorf("creating exporter for %q: %w", destURI, err)
 	}

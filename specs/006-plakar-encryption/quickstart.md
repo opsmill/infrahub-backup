@@ -31,7 +31,7 @@ Verified 2026-06-30 — unit tests (`plakar_encryption_test.go`) + live/throwawa
 - [x] **SC-001**: encrypted backup of the live enterprise instance → repo bytes contain none of the known plaintext tokens (`backup_information`, `infrahub_backup_`, `prefect`, `flow_run`, `CoreNode`, …); packfiles opaque. Unit test scans a known marker.
 - [x] **SC-002**: throwaway **community** round-trip restored 25 neo4j nodes + 12 postgres rows with content intact; in-process encrypted round-trip recovers exact bytes via the real exporter; **enterprise** backup path validated against the live instance.
 - [x] **SC-003 / SC-006**: `snapshots list` without the passphrase → `repository is encrypted; a passphrase is required`; restore with a **wrong** passphrase → `cannot open encrypted repository: incorrect passphrase`, failing at repo-open **before** neo4j was stopped (counts intact). Unit tests assert both error sentinels.
-- [x] **SC-004**: passphrase absent from the create log and from the repo bytes; it is never on the runner's argv/`-e` env (only `--passphrase-stdin`), so `docker inspect` of the runner cannot reveal it.
+- [x] **SC-004**: passphrase absent from the create log and from the repo bytes; it is never on the runner's argv/`-e` env (only `--credentials-stdin`), so `docker inspect` of the runner cannot reveal it. The same channel now carries the database password and the object-store credentials, which used to be on argv inside the connector/repository URIs and in `-e AWS_SECRET_ACCESS_KEY`.
 - [x] **SC-005**: plaintext repos open unchanged; a passphrase supplied for a plaintext repo warns and continues (unit test).
 
 ### Re-verified 2026-08-10, after the `main` merge and the runner fixes
@@ -65,7 +65,9 @@ grep -F "$INFRAHUB_BACKUP_PASSPHRASE" create.log            # → no match
 # 2. the repo bytes must not contain the passphrase
 grep -rF "$INFRAHUB_BACKUP_PASSPHRASE" /tmp/encrepo          # → no match
 # 3. while a runner is alive (long backup), its argv/env must not contain it
-docker inspect <runner-cid> --format '{{json .Args}} {{json .Config.Env}}'   # → passphrase absent; only --passphrase-stdin
+docker inspect <runner-cid> --format '{{json .Args}} {{json .Config.Env}}'   # → passphrase absent; only --credentials-stdin
+# 4. and no other secret either: the DB password and S3 keys travel the same channel
+docker inspect <runner-cid> --format '{{json .Args}} {{json .Config.Env}}' | grep -F "$POSTGRES_PASSWORD"   # → no match
 ```
 
 ## Test recipe (throwaway Infrahub, like 003)

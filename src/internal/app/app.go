@@ -43,6 +43,16 @@ type PlakarConfig struct {
 	BackupID   string // Specific backup-id tag for restore (empty = latest complete group)
 	Encrypt    bool   // Create the repository encrypted (set at create time only)
 	Passphrase string // Symmetric passphrase for an encrypted repo; never logged/persisted
+	// S3AccessKey/S3SecretKey authenticate an s3:// repository when the credentials
+	// did not come from the URI or the AWS_* environment. The co-located runner is
+	// given them over stdin (see runnerCredentials), because its command line and
+	// environment are both readable via `docker inspect`.
+	S3AccessKey string
+	S3SecretKey string
+	// S3Insecure reaches an s3:// repository over plain HTTP. Credentials embedded in
+	// the repository URI imply it, which is how a local MinIO has always been
+	// recognised.
+	S3Insecure bool
 }
 
 // Configuration holds the application configuration

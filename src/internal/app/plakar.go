@@ -117,60 +117,69 @@ func initPlakarContext(cfg *PlakarConfig) (*kcontext.KContext, error) {
 	return kctx, nil
 }
 
-// storeConfig builds the storage configuration map for a given repo path.
+// storeConfig builds the storage configuration map for a repository.
 // Local paths are prefixed with fs:// for the integration-fs backend.
 // For s3:// URIs, credentials are resolved in order:
 //  1. URL userinfo (s3://access_key:secret_key@host/...) — also forces TLS off
-//  2. AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY environment variables
+//  2. cfg.S3AccessKey / cfg.S3SecretKey, which is how the in-container worker
+//     receives credentials that must not appear on its command line or in its
+//     environment (see runnerCredentials)
+//  3. AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY environment variables
 //
 // TLS defaults to true (secure). It is disabled when:
-//   - URL contains userinfo (backward compat — typically local MinIO), or
+//   - the URL contains userinfo (backward compat — typically local MinIO), or
+//   - cfg.S3Insecure is set, which is how the runner is told that the URI it was
+//     given DID carry userinfo before the credentials were lifted out of it, or
 //   - INFRAHUB_S3_ENDPOINT starts with http://
-func storeConfig(repoPath string) map[string]string {
-	location := repoPath
+func storeConfig(cfg *PlakarConfig) map[string]string {
+	location := cfg.RepoPath
 	// Both spellings of a local repo — /path and fs:///path — must resolve to the
 	// same storage location, absolute in each case, so that the two cannot disagree
 	// about which directory the repository lives in.
-	if local, path := parseRepoLocation(repoPath); local {
+	if local, path := parseRepoLocation(cfg.RepoPath); local {
 		if absPath, err := filepath.Abs(path); err == nil {
 			path = absPath
 		}
 		location = "fs://" + path
 	}
 
-	cfg := map[string]string{"location": location}
-
-	if strings.HasPrefix(location, "s3://") {
-		// TLS: default true, override from INFRAHUB_S3_ENDPOINT scheme
-		useTLS := true
-		if ep := os.Getenv("INFRAHUB_S3_ENDPOINT"); strings.HasPrefix(ep, "http://") {
-			useTLS = false
-		}
-
-		if u, err := url.Parse(location); err == nil && u.User != nil {
-			// Credentials from URL userinfo (highest priority)
-			cfg["access_key"] = u.User.Username()
-			if secret, ok := u.User.Password(); ok {
-				cfg["secret_access_key"] = secret
-			}
-			// Strip userinfo from the location so the S3 backend only sees host/path
-			u.User = nil
-			cfg["location"] = u.String()
-			useTLS = false // embedded creds = local S3, backward compat
-		} else {
-			// Fallback: AWS environment variables
-			if ak := os.Getenv("AWS_ACCESS_KEY_ID"); ak != "" {
-				cfg["access_key"] = ak
-			}
-			if sk := os.Getenv("AWS_SECRET_ACCESS_KEY"); sk != "" {
-				cfg["secret_access_key"] = sk
-			}
-		}
-
-		cfg["use_tls"] = strconv.FormatBool(useTLS)
+	sc := map[string]string{"location": location}
+	if !strings.HasPrefix(location, "s3://") {
+		return sc
 	}
 
-	return cfg
+	useTLS := !cfg.S3Insecure
+	if ep := os.Getenv("INFRAHUB_S3_ENDPOINT"); strings.HasPrefix(ep, "http://") {
+		useTLS = false
+	}
+
+	accessKey, secretKey := cfg.S3AccessKey, cfg.S3SecretKey
+	if u, err := url.Parse(location); err == nil && u.User != nil {
+		// Credentials from URL userinfo (highest priority)
+		accessKey = u.User.Username()
+		if secret, ok := u.User.Password(); ok {
+			secretKey = secret
+		}
+		// Strip userinfo from the location so the S3 backend only sees host/path
+		u.User = nil
+		sc["location"] = u.String()
+		useTLS = false // embedded creds = local S3, backward compat
+	}
+	if accessKey == "" {
+		accessKey = os.Getenv("AWS_ACCESS_KEY_ID")
+	}
+	if secretKey == "" {
+		secretKey = os.Getenv("AWS_SECRET_ACCESS_KEY")
+	}
+	if accessKey != "" {
+		sc["access_key"] = accessKey
+	}
+	if secretKey != "" {
+		sc["secret_access_key"] = secretKey
+	}
+	sc["use_tls"] = strconv.FormatBool(useTLS)
+
+	return sc
 }
 
 // inspectEncryption reads the storage CONFIG to detect whether the repository is
@@ -259,7 +268,7 @@ func newRepository(kctx *kcontext.KContext, store storage.Store, configBytes []b
 
 // openRepo opens an existing Plakar repository. Returns an error if the repository does not exist.
 func openRepo(kctx *kcontext.KContext, cfg *PlakarConfig) (*repository.Repository, error) {
-	sc := storeConfig(cfg.RepoPath)
+	sc := storeConfig(cfg)
 
 	store, configBytes, err := storage.Open(kctx, sc)
 	if err != nil {
@@ -315,7 +324,7 @@ func repoMissing(err error) bool {
 // openOrCreateRepo opens an existing Plakar repository, or creates a new one if it
 // doesn't exist. Any other open failure is reported as-is: see repoMissing.
 func openOrCreateRepo(kctx *kcontext.KContext, cfg *PlakarConfig) (*repository.Repository, error) {
-	sc := storeConfig(cfg.RepoPath)
+	sc := storeConfig(cfg)
 
 	// Try to open existing repository. When --encrypt was requested, refuse to
 	// open a pre-existing plaintext repo rather than silently appending plaintext.

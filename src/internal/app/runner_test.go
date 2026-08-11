@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -40,27 +41,98 @@ func TestParseRepoLocation(t *testing.T) {
 	}
 }
 
-// repoArgFor decides what the in-container worker is told to open. For a local repo
-// that must be the mount point, never the host path, whichever spelling was used.
-func TestRepoArgForUsesMountPointForBothLocalSpellings(t *testing.T) {
+// repoAccessFor decides what the in-container worker is told to open. For a local
+// repo that must be the mount point, never the host path, whichever spelling was
+// used. For an s3:// repo the location must reach the store from inside the runner
+// AND must not carry the credentials, which would then land on `docker run`'s argv
+// where docker inspect and the host process list can both read them.
+func TestRepoAccessForLocalRepos(t *testing.T) {
 	for _, repo := range []string{"/backups/infra", "fs:///backups/infra"} {
-		if got := repoArgFor(repo); got != "/repo" {
-			t.Errorf("repoArgFor(%q) = %q, want %q — a host path cannot be opened inside the runner", repo, got, "/repo")
+		access := repoAccessFor(repo)
+		if access.Location != "/repo" {
+			t.Errorf("repoAccessFor(%q).Location = %q, want %q — a host path cannot be opened inside the runner", repo, access.Location, "/repo")
+		}
+		if access.AccessKey != "" || access.SecretKey != "" || access.Insecure {
+			t.Errorf("repoAccessFor(%q) = %+v, want no S3 access for a local repo", repo, access)
 		}
 	}
-	// A remote repo on a real host is passed through untouched.
-	remote := "s3://key:secret@minio.example.com:9000/bucket/prefix"
-	if got := repoArgFor(remote); got != remote {
-		t.Errorf("repoArgFor(%q) = %q, want it passed through unchanged", remote, got)
-	}
+}
 
-	// A loopback host is rewritten, because inside the runner "localhost" is the
-	// runner. Everything else about the URI has to survive — dropping the port is a
-	// mistake this asserts against, having made it once.
-	loopback := "s3://key:secret@localhost:9000/bucket/prefix"
-	want := "s3://key:secret@host.docker.internal:9000/bucket/prefix"
-	if got := repoArgFor(loopback); got != want {
-		t.Errorf("repoArgFor(%q) = %q, want %q", loopback, got, want)
+func TestRepoAccessForS3ReposKeepsCredentialsOffArgv(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
+
+	t.Run("embedded credentials are lifted out of the URI", func(t *testing.T) {
+		access := repoAccessFor("s3://key:secret@minio.example.com:9000/bucket/prefix")
+		if want := "s3://minio.example.com:9000/bucket/prefix"; access.Location != want {
+			t.Errorf("Location = %q, want %q", access.Location, want)
+		}
+		if strings.Contains(access.Location, "secret") {
+			t.Errorf("Location = %q still carries the secret", access.Location)
+		}
+		if access.AccessKey != "key" || access.SecretKey != "secret" {
+			t.Errorf("credentials = %q/%q, want key/secret carried out of band", access.AccessKey, access.SecretKey)
+		}
+		// Embedded credentials have always meant a local S3 reached over plain HTTP;
+		// stripping them must not silently flip the repository to TLS.
+		if !access.Insecure {
+			t.Error("Insecure = false; a URI with embedded credentials used to force TLS off")
+		}
+	})
+
+	t.Run("a loopback host is still rewritten, port and path intact", func(t *testing.T) {
+		access := repoAccessFor("s3://key:secret@localhost:9000/bucket/prefix")
+		if want := "s3://host.docker.internal:9000/bucket/prefix"; access.Location != want {
+			t.Errorf("Location = %q, want %q", access.Location, want)
+		}
+	})
+
+	t.Run("credentials come from the host environment when the URI carries none", func(t *testing.T) {
+		t.Setenv("AWS_ACCESS_KEY_ID", "env-key")
+		t.Setenv("AWS_SECRET_ACCESS_KEY", "env-secret")
+		access := repoAccessFor("s3://minio.example.com:9000/bucket/prefix")
+		if access.AccessKey != "env-key" || access.SecretKey != "env-secret" {
+			t.Errorf("credentials = %q/%q, want them read from the host environment", access.AccessKey, access.SecretKey)
+		}
+		// Read on the host and sent over stdin — never forwarded as -e, which docker
+		// inspect would publish, and never through containerReachable, which is a URL
+		// rewriter being handed something that is not a URL.
+		if access.Insecure {
+			t.Error("Insecure = true without embedded credentials; TLS must stay on")
+		}
+	})
+
+	t.Run("a non-s3 remote scheme is passed through without credential handling", func(t *testing.T) {
+		access := repoAccessFor("gs://bucket/prefix")
+		if access.Location != "gs://bucket/prefix" {
+			t.Errorf("Location = %q, want it passed through unchanged", access.Location)
+		}
+		if access.AccessKey != "" || access.SecretKey != "" {
+			t.Errorf("credentials = %q/%q, want none for a non-s3 scheme", access.AccessKey, access.SecretKey)
+		}
+	})
+}
+
+// The worker is the other end of the credentials channel, so what one encodes the
+// other has to decode — exactly, including values a key=value encoding would have
+// mangled.
+func TestRunnerCredentialsRoundTrip(t *testing.T) {
+	creds := runnerCredentials{
+		Passphrase:  "correct horse battery staple",
+		DBPassword:  "p=ss\nword with = and newline",
+		S3AccessKey: "AKIA",
+		S3SecretKey: "s3cr3t/with+slashes",
+	}
+	encoded, err := creds.encode()
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	var got runnerCredentials
+	if err := json.Unmarshal([]byte(encoded), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got != creds {
+		t.Errorf("round trip = %+v, want %+v", got, creds)
 	}
 }
 
@@ -292,8 +364,8 @@ func TestContainerReachable(t *testing.T) {
 func TestStoreConfigLocationIdenticalForBothLocalSpellings(t *testing.T) {
 	dir := t.TempDir()
 
-	bare := storeConfig(dir)["location"]
-	scheme := storeConfig("fs://" + dir)["location"]
+	bare := storeConfig(&PlakarConfig{RepoPath: dir})["location"]
+	scheme := storeConfig(&PlakarConfig{RepoPath: "fs://" + dir})["location"]
 
 	if bare != scheme {
 		t.Fatalf("location differs by spelling: bare=%q fs=%q", bare, scheme)
@@ -307,7 +379,7 @@ func TestStoreConfigLocationIdenticalForBothLocalSpellings(t *testing.T) {
 // to skip the filepath.Abs call that the bare form got.
 func TestStoreConfigMakesRelativeLocalPathsAbsolute(t *testing.T) {
 	for _, repo := range []string{"relative/repo", "fs://relative/repo"} {
-		location := storeConfig(repo)["location"]
+		location := storeConfig(&PlakarConfig{RepoPath: repo})["location"]
 		path := strings.TrimPrefix(location, "fs://")
 		if !filepath.IsAbs(path) {
 			t.Errorf("storeConfig(%q) location = %q, want an absolute path", repo, location)

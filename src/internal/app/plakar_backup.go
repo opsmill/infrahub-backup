@@ -136,8 +136,9 @@ func (iops *InfrahubOps) CreatePlakarBackup(force bool, neo4jMetadata string, ex
 			snapHex, cerr = iops.backupNeo4jComponent(project, repoPath, neo4jMetadata, editionInfo.IsCommunity, tags)
 
 		case ComponentPostgres:
-			uri := dbURI("postgres", iops.config.PostgresUsername, iops.config.PostgresPassword, "task-manager-db", "5432", iops.config.PostgresDatabase)
-			snapHex, cerr = LaunchComposeBackup(project, "task-manager-db", repoPath, uri, iops.config.Plakar.Passphrase, map[string]string{"compress": "false"}, tags, false)
+			uri := dbURI("postgres", iops.config.PostgresUsername, "task-manager-db", "5432", iops.config.PostgresDatabase)
+			creds := iops.runnerCredentials(iops.config.PostgresPassword)
+			snapHex, cerr = LaunchComposeBackup(project, "task-manager-db", repoPath, uri, creds, map[string]string{"compress": "false"}, tags, false)
 
 		case ComponentMetadata:
 			snapHex, cerr = iops.writeMetadataSnapshot(metadataObj, tags)
@@ -177,12 +178,12 @@ func (iops *InfrahubOps) backupNeo4jComponent(project, repoPath, neo4jMetadata s
 		uri := "neo4j+offline:///data?database=" + url.QueryEscape(iops.config.Neo4jDatabase)
 		opts := map[string]string{"neo4j_bin_dir": neo4jRunnerBinDir}
 		return iops.withDeploymentQuiesced(func() (string, error) {
-			return LaunchComposeBackup(project, "database", repoPath, uri, iops.config.Plakar.Passphrase, opts, tags, true)
+			return LaunchComposeBackup(project, "database", repoPath, uri, iops.runnerCredentials(""), opts, tags, true)
 		})
 	}
 
-	uri := dbURI("neo4j", iops.config.Neo4jUsername, iops.config.Neo4jPassword, "database", "6362", iops.config.Neo4jDatabase)
-	return LaunchComposeBackup(project, "database", repoPath, uri, iops.config.Plakar.Passphrase,
+	uri := dbURI("neo4j", iops.config.Neo4jUsername, "database", "6362", iops.config.Neo4jDatabase)
+	return LaunchComposeBackup(project, "database", repoPath, uri, iops.runnerCredentials(iops.config.Neo4jPassword),
 		neo4jOnlineBackupOpts(neo4jMetadata), tags, false)
 }
 
@@ -257,15 +258,21 @@ func neo4jOnlineBackupOpts(neo4jMetadata string) map[string]string {
 // borrows.
 const neo4jRunnerBinDir = "/var/lib/neo4j/bin"
 
-// dbURI builds a connector URI with URL-encoded credentials.
-func dbURI(scheme, user, pass, host, port, database string) string {
+// dbURI builds a connector URI with the username but WITHOUT the password.
+//
+// The URI is handed to `docker run` as an argument, where the host process list
+// and `docker inspect` (Config.Cmd, for as long as the container exists) can both
+// read it — the exposure the passphrase's stdin channel exists to avoid. The
+// password travels the same way and is reunited with the connection by the worker,
+// as the connector's standalone `password` option; see connectorConfig.
+func dbURI(scheme, user, host, port, database string) string {
 	u := &url.URL{
 		Scheme: scheme,
 		Host:   host + ":" + port,
 		Path:   "/" + database,
 	}
 	if user != "" {
-		u.User = url.UserPassword(user, pass)
+		u.User = url.User(user)
 	}
 	return u.String()
 }

@@ -315,10 +315,12 @@ func (iops *InfrahubOps) restoreComponentViaRunner(project, repoPath, component,
 		// its store; no CREATE DATABASE. Enterprise restores from the backup artifact
 		// (neo4j://); Community loads the offline dump (neo4j+offline://).
 		var uri string
+		var dbPassword string
 		if community {
 			uri = "neo4j+offline:///data?database=" + url.QueryEscape(iops.config.Neo4jDatabase)
 		} else {
-			uri = dbURI("neo4j", iops.config.Neo4jUsername, iops.config.Neo4jPassword, "database", "6362", iops.config.Neo4jDatabase)
+			uri = dbURI("neo4j", iops.config.Neo4jUsername, "database", "6362", iops.config.Neo4jDatabase)
+			dbPassword = iops.config.Neo4jPassword
 		}
 		logrus.Info("Stopping Neo4j for offline restore...")
 		if err := iops.StopServices("database"); err != nil {
@@ -339,7 +341,7 @@ func (iops *InfrahubOps) restoreComponentViaRunner(project, repoPath, component,
 			}
 		}()
 		opts := map[string]string{"neo4j_bin_dir": neo4jRunnerBinDir, "overwrite": "true"}
-		if err := LaunchComposeRestore(project, "database", repoPath, uri, snapHex, iops.config.Plakar.Passphrase, opts, true, migrate); err != nil {
+		if err := LaunchComposeRestore(project, "database", repoPath, uri, snapHex, iops.runnerCredentials(dbPassword), opts, true, migrate); err != nil {
 			return fmt.Errorf("neo4j restore failed: %w", err)
 		}
 		logrus.Info("Neo4j restore completed")
@@ -350,8 +352,9 @@ func (iops *InfrahubOps) restoreComponentViaRunner(project, repoPath, component,
 			logrus.Info("Skipping postgres restore as requested")
 			return nil
 		}
-		uri := dbURI("postgres", iops.config.PostgresUsername, iops.config.PostgresPassword, "task-manager-db", "5432", iops.config.PostgresDatabase)
-		if err := LaunchComposeRestore(project, "task-manager-db", repoPath, uri, snapHex, iops.config.Plakar.Passphrase, postgresRestoreOpts(), false, Neo4jMigration{}); err != nil {
+		uri := dbURI("postgres", iops.config.PostgresUsername, "task-manager-db", "5432", iops.config.PostgresDatabase)
+		creds := iops.runnerCredentials(iops.config.PostgresPassword)
+		if err := LaunchComposeRestore(project, "task-manager-db", repoPath, uri, snapHex, creds, postgresRestoreOpts(), false, Neo4jMigration{}); err != nil {
 			return fmt.Errorf("postgres restore failed: %w", err)
 		}
 		logrus.Info("Postgres restore completed")

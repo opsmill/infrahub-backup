@@ -218,9 +218,10 @@ func TestEncryptWithoutPassphraseRefused(t *testing.T) {
 }
 
 // Regression (F1): resolvePassphrase must normalize the env var the same way it
-// normalizes a file and the way the runner normalizes stdin (firstLine), so the
-// host-stamped canary and the runner-derived data key always agree. A trailing
-// newline on the env value must not change the derived passphrase.
+// normalizes a file, because the resolved value is both what stamps the repository
+// canary and what is sent to the runner. A trailing newline on the env value must
+// not change the derived passphrase, or a repository created with the value from
+// one source could not be opened with the same value from the other.
 func TestResolvePassphraseNormalizesEnv(t *testing.T) {
 	t.Setenv(passphraseEnvVar, "secret-passphrase-123\n")
 	got, err := resolvePassphrase("")
