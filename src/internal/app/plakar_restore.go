@@ -165,11 +165,12 @@ func singleSnapshotPlan(repo *repository.Repository, snapshotID string) (restore
 	tags := parseSnapshotTags(snap.Header.Tags)
 	snap.Close()
 
+	shortID := fmt.Sprintf("%x", mac[:8])
 	plan := restorePlan{
-		snapshotID:    fmt.Sprintf("%x", mac[:8]),
+		snapshotID:    shortID,
 		backupEdition: tags[TagNeo4jEdition],
 		snapshots: []SnapshotInfo{{
-			SnapshotID: fmt.Sprintf("%x", mac[:8]),
+			SnapshotID: shortID,
 			Component:  tags[TagComponent],
 			MAC:        mac,
 		}},
@@ -305,13 +306,10 @@ func (iops *InfrahubOps) restoreComponents(plan restorePlan, restoreComponent fu
 	// already restarted the database and waited for Bolt by this point, which is
 	// what resetDeploymentID needs.
 	if resetDeploymentID {
-		switch {
-		case !restoredNeo4j:
+		if !restoredNeo4j {
 			logrus.Warn("--reset-deployment-id ignored: no Neo4j component was restored")
-		default:
-			if err := iops.resetDeploymentID(); err != nil {
-				return err
-			}
+		} else if err := iops.resetDeploymentID(); err != nil {
+			return err
 		}
 	}
 
