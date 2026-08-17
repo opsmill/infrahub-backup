@@ -76,7 +76,7 @@ The codebase follows a command-pattern architecture using Cobra for CLI structur
 6. **src/internal/app/taskmanager.go** - Task management operations
    - PostgreSQL database connection management
    - Flow run cleanup operations (completed/failed/cancelled)
-   - Stale run cancellation (stuck in running state)
+   - Stale run cancellation (stuck in RUNNING or PENDING state)
    - Uses embedded Python scripts for Prefect API operations
 
 7. **src/internal/app/collect*.go** - Troubleshooting-bundle collection

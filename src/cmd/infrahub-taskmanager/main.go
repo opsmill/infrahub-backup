@@ -62,7 +62,7 @@ func main() {
 
 	staleRunsCmd := &cobra.Command{
 		Use:          "stale-runs [days_to_keep] [batch_size]",
-		Short:        "Cancel flow runs still RUNNING and older than the retention period",
+		Short:        "Cancel flow runs still RUNNING or PENDING and older than the retention period",
 		Args:         cobra.RangeArgs(0, 2),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {

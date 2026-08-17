@@ -28,8 +28,9 @@ var (
 		scriptPath:        "/tmp/infrahubops_clean_old_tasks.py",
 		defaultDaysToKeep: defaultFlowRunsRetention,
 	}
+	// staleRunsConfig has no commandType: stale runs never go through the infrahub
+	// CLI, see FlushStaleRuns.
 	staleRunsConfig = flushConfig{
-		commandType:       "stale-runs",
 		scriptName:        "clean_stale_tasks.py",
 		scriptPath:        "/tmp/infrahubops_clean_stale_tasks.py",
 		defaultDaysToKeep: defaultStaleRunsRetention,
@@ -38,20 +39,53 @@ var (
 
 // FlushFlowRuns removes completed Prefect runs beyond the retention window.
 func (iops *InfrahubOps) FlushFlowRuns(daysToKeep, batchSize int) error {
+	daysToKeep, batchSize, err := iops.prepareFlush(flowRunsConfig, daysToKeep, batchSize)
+	if err != nil {
+		return err
+	}
 	return iops.flushTaskRuns(flowRunsConfig, daysToKeep, batchSize)
 }
 
-// FlushStaleRuns cancels running Prefect flow runs that exceeded retention.
+// FlushStaleRuns crashes Prefect flow runs stuck in RUNNING or PENDING beyond the
+// retention window.
+//
+// Unlike flow-runs, this does not call `infrahub tasks flush stale-runs`: that command
+// hardcodes RUNNING, so runs left in PENDING — a worker that died between accepting a
+// run and starting it — are never cleared. The script drives the same internal helper
+// the command wraps with PENDING added to the state list, and falls back to a
+// standalone Prefect implementation where those internals are unavailable.
 func (iops *InfrahubOps) FlushStaleRuns(daysToKeep, batchSize int) error {
-	return iops.flushTaskRuns(staleRunsConfig, daysToKeep, batchSize)
-}
-
-func (iops *InfrahubOps) flushTaskRuns(config flushConfig, daysToKeep, batchSize int) error {
-	if err := iops.checkPrerequisites(); err != nil {
+	daysToKeep, batchSize, err := iops.prepareFlush(staleRunsConfig, daysToKeep, batchSize)
+	if err != nil {
 		return err
 	}
-	if err := iops.DetectEnvironment(); err != nil {
+
+	logrus.Infof("Crashing Prefect flow runs stuck in RUNNING or PENDING for more than %d days (batch size %d)...", daysToKeep, batchSize)
+
+	scriptContent, err := readEmbeddedScript(staleRunsConfig.scriptName)
+	if err != nil {
+		return fmt.Errorf("could not retrieve %s: %w", staleRunsConfig.scriptName, err)
+	}
+
+	execOpts := iops.buildTaskWorkerExecOpts(nil)
+	scriptArgs := []string{"python", "-u", staleRunsConfig.scriptPath, strconv.Itoa(daysToKeep), strconv.Itoa(batchSize)}
+	if _, err := iops.executeScriptWithOpts("task-worker", string(scriptContent), staleRunsConfig.scriptPath, execOpts, scriptArgs...); err != nil {
 		return err
+	}
+
+	logrus.Info("Stale runs cleanup completed")
+
+	return nil
+}
+
+// prepareFlush validates the deployment and resolves the retention window and batch
+// size shared by every pass of a flush command.
+func (iops *InfrahubOps) prepareFlush(config flushConfig, daysToKeep, batchSize int) (int, int, error) {
+	if err := iops.checkPrerequisites(); err != nil {
+		return 0, 0, err
+	}
+	if err := iops.DetectEnvironment(); err != nil {
+		return 0, 0, err
 	}
 
 	if daysToKeep < 0 {
@@ -69,6 +103,10 @@ func (iops *InfrahubOps) flushTaskRuns(config flushConfig, daysToKeep, batchSize
 		batchSize = maxLimit
 	}
 
+	return daysToKeep, batchSize, nil
+}
+
+func (iops *InfrahubOps) flushTaskRuns(config flushConfig, daysToKeep, batchSize int) error {
 	logrus.Infof("Flushing Prefect flow runs older than %d days (batch size %d)...", daysToKeep, batchSize)
 
 	primaryCmd := []string{"infrahub", "tasks", "flush", config.commandType, "--days-to-keep", strconv.Itoa(daysToKeep), "--batch-size", strconv.Itoa(batchSize)}
