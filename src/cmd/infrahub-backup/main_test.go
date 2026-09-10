@@ -562,6 +562,22 @@ func TestResolveRestoreInvocation(t *testing.T) {
 			latest:      true,
 			errContains: []string{"mutually exclusive"},
 		},
+		{
+			// A positional was accepted and silently dropped, so `restore … 20260810_020000`
+			// restored the LATEST group instead of the named one — for an operator rolling
+			// back, the very state they were rolling back from. The README documented that
+			// spelling.
+			name:        "plakar: a positional backup id is rejected, not ignored",
+			backend:     app.BackendPlakar,
+			args:        []string{"20260810_020000"},
+			errContains: []string{"20260810_020000", "would be ignored", "--backup-id", "--snapshot"},
+		},
+		{
+			name:        "plakar: a positional archive name is rejected too",
+			backend:     app.BackendPlakar,
+			args:        []string{"infrahub_backup_20260804_120000.tar.gz"},
+			errContains: []string{"does not take a positional argument"},
+		},
 	}
 
 	for _, tc := range tests {
@@ -656,6 +672,13 @@ func TestRestoreCommandValidatesBeforeRunning(t *testing.T) {
 			backend:     app.BackendPlakar,
 			args:        []string{"--latest", "--s3"},
 			errContains: "--repo",
+		},
+		{
+			// Rejected by Args, so RunE never runs and nothing is overwritten.
+			name:        "plakar with a positional backup id never runs",
+			backend:     app.BackendPlakar,
+			args:        []string{"20260810_020000"},
+			errContains: "--backup-id",
 		},
 	}
 

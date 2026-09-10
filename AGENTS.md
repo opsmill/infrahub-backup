@@ -283,6 +283,50 @@ The codebase uses explicit error wrapping with `fmt.Errorf` for context. All com
 - Plakar repository (local filesystem or S3 via integration backends) (002-plakar-integration)
 - Go 1.25.0 + cobra, viper, logrus; Docker/Kubernetes via `docker`/`kubectl` CLI shell-out through `CommandExecutor` — no client-go or Docker SDK (003-collect-tool)
 - Local filesystem bundle output under `--output-dir` (default `./infrahub_bundles`); no network egress beyond the target deployment (003-collect-tool)
+- Go 1.25.0 + `github.com/PlakarKorp/kloset` (target stable v1.1.0), `go-kloset-sdk` v1.1.0 (fallback path), `integration-postgresql` v1.1.0-beta.7, `integration-fs`/`integration-s3`, `cobra`, `viper`, `logrus`, `pgx/v5` (retained for the separate task-manager tool); `testcontainers-go` for integration tests (003-upstream-plakar-integrations)
+- kloset repository — `fs://` (local dir) or `s3://` (object store); plaintext by default (unchanged) (003-upstream-plakar-integrations)
+- Go 1.25.0 + `github.com/PlakarKorp/kloset` v1.1.0 — `encryption` (symmetric: `NewDefaultConfiguration`, `DeriveKey`, `DeriveCanary`, `VerifyCanary`), `connectors/storage` (`Configuration.Encryption`, `NewConfigurationFromBytes`), `repository.New(secret, …)`; builds on the 003 runner (`runner.go`, `run_connector.go`) (006-plakar-encryption)
+- kloset repository (`fs://` / `s3://`), optionally symmetric-encrypted (KDF + cipher params + canary in the repo CONFIG) (006-plakar-encryption)
+
+### Neo4j integration — lives in its own repository
+
+The Neo4j integration is **not** in this repo. It lives at **[opsmill/plakar-integration-neo4j](https://github.com/opsmill/plakar-integration-neo4j)** (module `github.com/opsmill/plakar-integration-neo4j`; the pinned version is whatever `go.mod` says — currently `v0.4.0`) and is consumed here as an ordinary tagged dependency — no `replace` directive, no vendored copy. The former `contrib/integration-neo4j/` tree has been deleted.
+
+- **Fixes to the connector belong in that repository**, released as a new tag, then picked up here with a version bump plus `scripts/update-vendor-hash.sh`. Do not vendor it back or add a `replace` to a local checkout in anything you merge — a temporary `replace` is fine while developing, but must be gone before merge.
+- **Consumption is in-process**: `src/internal/app/connectors.go` blank-imports its `importer`/`exporter` packages, whose `init()` registers the `neo4j://` and `neo4j+offline://` schemes. The integration's SDK plugin binaries exist for external `plakar pkg add` users and play no part in this repo's build. Its `go-kloset-sdk` and `testcontainers-go` dependencies serve only those plugins and its own tests, and are verified absent from this repo's build closure.
+- **Engine coupling**: do not adopt a new kloset version here until a compatible integration release exists — Go's minimal-version selection compiles the integration against whichever kloset wins, and it can no longer be patched in place.
+- Plakar have advised that community integrations are **not** upstreamed into `PlakarKorp/integrations`; distribution is via a recipe in `PlakarKorp/hub`. Statements to the contrary in `specs/003-upstream-plakar-integrations/` are superseded — see `specs/003-upstream-plakar-integrations/SUPERSEDED-BY-006.md`.
+
+### Where each database tool runs
+
+The two database components are captured differently, and the difference is not incidental:
+
+- **Neo4j** — `neo4j-admin` manipulates files in the data directory, so it runs **inside the
+  database container or pod**, on Docker Compose and Kubernetes alike (`plakar_neo4j.go`). The
+  integration's staged importer/exporter own the snapshot layout and report the argv
+  (`DumpArgs`/`RestoreArgs`); this repo owns only where it runs. The offline window is a
+  watchdog-assisted `SIGSTOP` of the Neo4j process, **not** a container stop — a stopped container
+  cannot be exec'd into, which is exactly what once forced a sibling runner and made the path
+  Docker-only.
+- **PostgreSQL (task manager)** — `pg_dump` speaks the wire protocol, so it needs reachability
+  rather than co-location: the co-located runner on Docker Compose (`runner.go`), and the upstream
+  connector in-process over a `kubectl port-forward` on Kubernetes (`plakar_postgres.go`). The
+  Kubernetes route therefore needs the **PostgreSQL client binaries on the machine running the
+  tool**, at a version no older than the server; `requirePostgresClient` checks this up front.
+
+Both paths emit the upstream connectors' own layout, so a backup taken on one backend restores on
+the other. Do not add a second emission.
+
+One caveat to that, for the task manager only: `pg_dump`'s archive format is versioned and
+`pg_restore` refuses an archive written by a newer client. The Docker runner borrows the
+deployment's postgres image so its client always matches; the Kubernetes route uses the host's. So
+the *layout* is portable while a task-manager archive taken with a much newer client may not load
+through an older one. See T073 in `specs/006-plakar-encryption/tasks.md`.
+
+Two pre-existing gotchas worth knowing, neither introduced by the extraction:
+
+- `scripts/update-vendor-hash.sh` **only runs on Linux with Nix installed** — it uses GNU `grep -oP` and GNU `sed -i`, both unavailable on macOS, and requires `nix build`. On macOS the vendor hash cannot be regenerated locally.
+- `tools/neo4jwatchdog` uses Linux-only inotify APIs with **no `//go:build linux` constraint**, so plain `go build ./...` and `go test ./tools/...` fail on macOS. Use `make build` (which cross-compiles it) and scope tests to `./src/...`.
 
 ## Recent Changes
 

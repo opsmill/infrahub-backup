@@ -2,7 +2,6 @@ package app
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -17,181 +16,12 @@ const (
 	neo4jWatchdogInitTimeout = 5 * time.Second
 	neo4jProcessStopTimeout  = 120 * time.Second
 	neo4jMetadataScriptPath  = "/data/scripts/neo4j/restore_metadata.cypher"
+	// How long to wait for Neo4j to answer again after the container is restarted, and
+	// how often to retry. A cold start on a large store is slow, so the ceiling is
+	// generous; the poll is short because the common case is a few seconds.
+	neo4jBoltReadyTimeout = 180 * time.Second
+	neo4jBoltPollInterval = 2 * time.Second
 )
-
-// backupNeo4jEnterpriseStream returns a data factory that streams a tar archive of the Neo4j
-// Enterprise backup directory from the container via exec stdout.
-// The backup is created with --compress=false for better Plakar deduplication.
-func (iops *InfrahubOps) backupNeo4jEnterpriseStream(backupMetadata string) (func() (io.ReadCloser, error), error) {
-	return func() (io.ReadCloser, error) {
-		cleanupBackupDir := func() {
-			if _, err := iops.Exec("database", []string{"rm", "-rf", neo4jTempBackupDir}, nil); err != nil {
-				logrus.Warnf("Failed to remove temporary Neo4j backup directory: %v", err)
-			}
-		}
-
-		// Prepare backup directory
-		if _, err := iops.Exec("database", []string{"sh", "-c",
-			fmt.Sprintf("rm -rf %s && mkdir -p %s", neo4jTempBackupDir, neo4jTempBackupDir),
-		}, nil); err != nil {
-			return nil, fmt.Errorf("failed to prepare neo4j backup directory: %w", err)
-		}
-
-		// Run backup command separately so its stdout logs don't contaminate the data stream
-		if output, err := iops.Exec("database", []string{
-			"neo4j-admin", "database", "backup",
-			"--expand-commands",
-			"--include-metadata=" + backupMetadata,
-			"--compress=false",
-			"--to-path=" + neo4jTempBackupDir,
-			iops.config.Neo4jDatabase,
-		}, nil); err != nil {
-			cleanupBackupDir()
-			return nil, fmt.Errorf("failed to backup neo4j: %w\nOutput: %v", err, output)
-		}
-
-		// Stream only the tar archive — no other command output in the pipe
-		stdout, wait, err := iops.ExecStreamPipe("database", []string{"tar", "cf", "-", "-C", "/tmp", "infrahubops"}, nil)
-		if err != nil {
-			cleanupBackupDir()
-			return nil, fmt.Errorf("failed to start neo4j enterprise stream: %w", err)
-		}
-
-		return &execReadCloser{reader: stdout, wait: wait, idleTimeout: defaultStreamIdleTimeout, cleanup: cleanupBackupDir}, nil
-	}, nil
-}
-
-// backupNeo4jCommunityStream returns a data factory that streams the Neo4j Community dump
-// directly from the container via exec stdout using --to-stdout.
-// Community edition requires stopping neo4j before dumping; the process is resumed
-// when the returned ReadCloser is closed.
-func (iops *InfrahubOps) backupNeo4jCommunityStream() (func() (io.ReadCloser, error), error) {
-	return func() (io.ReadCloser, error) {
-		restoreNeo4j := func(pidStr string) {
-			if _, err := iops.Exec("database", []string{"rm", "-f", neo4jRemoteWatchdogBinary, neo4jRemoteWatchdogReady, neo4jRemoteWatchdogLog}, nil); err != nil {
-				logrus.Debugf("Failed to remove watchdog artifacts: %v", err)
-			}
-			if _, err := iops.Exec("database", []string{"kill", "-CONT", pidStr}, nil); err != nil {
-				logrus.Errorf("Failed to send SIGCONT to neo4j (pid %s): %v", pidStr, err)
-			}
-		}
-
-		pidStr, err := iops.readNeo4jPID()
-		if err != nil {
-			return nil, err
-		}
-
-		if err := iops.stopNeo4jCommunity(pidStr); err != nil {
-			return nil, err
-		}
-
-		// Stream the dump directly to stdout — no temp files needed
-		stdout, wait, err := iops.ExecStreamPipe("database", []string{
-			"neo4j-admin", "database", "dump",
-			"--to-stdout",
-			iops.config.Neo4jDatabase,
-		}, nil)
-		if err != nil {
-			restoreNeo4j(pidStr)
-			return nil, fmt.Errorf("failed to start neo4j community stream: %w", err)
-		}
-
-		// Neo4j is resumed when the stream is closed (after reading completes)
-		return &execReadCloser{reader: stdout, wait: wait, idleTimeout: defaultStreamIdleTimeout, cleanup: func() {
-			restoreNeo4j(pidStr)
-		}}, nil
-	}, nil
-}
-
-// defaultStreamIdleTimeout is the default duration after which a streaming backup
-// is considered stalled if no data has been read.
-const defaultStreamIdleTimeout = 30 * time.Minute
-
-// execReadCloser wraps an exec stdout pipe with cleanup logic and idle timeout.
-type execReadCloser struct {
-	reader      io.ReadCloser
-	wait        func() error
-	cleanup     func()
-	closed      bool
-	timedOut    bool
-	idleTimeout time.Duration // 0 = no timeout
-	timer       *time.Timer   // reusable timer for idle timeout
-}
-
-var errStreamIdleTimeout = fmt.Errorf("stream idle timeout")
-
-func (e *execReadCloser) Read(p []byte) (int, error) {
-	if e.timedOut {
-		return 0, errStreamIdleTimeout
-	}
-	if e.idleTimeout <= 0 {
-		return e.reader.Read(p)
-	}
-
-	type readResult struct {
-		n   int
-		err error
-	}
-	ch := make(chan readResult, 1)
-	go func() {
-		n, err := e.reader.Read(p)
-		ch <- readResult{n, err}
-	}()
-
-	// Lazily create the timer on first use, reset on subsequent calls
-	if e.timer == nil {
-		e.timer = time.NewTimer(e.idleTimeout)
-	} else {
-		if !e.timer.Stop() {
-			select {
-			case <-e.timer.C:
-			default:
-			}
-		}
-		e.timer.Reset(e.idleTimeout)
-	}
-
-	select {
-	case res := <-ch:
-		return res.n, res.err
-	case <-e.timer.C:
-		e.timedOut = true
-		// Close the underlying reader to unblock the goroutine
-		e.reader.Close()
-		return 0, fmt.Errorf("stream idle timeout after %v with no data", e.idleTimeout)
-	}
-}
-
-func (e *execReadCloser) Close() error {
-	if e.closed {
-		return nil
-	}
-	e.closed = true
-
-	// Stop the idle timer if active
-	if e.timer != nil {
-		e.timer.Stop()
-	}
-
-	// Close the reader first (may signal EOF to the process)
-	readErr := e.reader.Close()
-
-	// Wait for the process to finish
-	var waitErr error
-	if e.wait != nil {
-		waitErr = e.wait()
-	}
-
-	// Run cleanup
-	if e.cleanup != nil {
-		e.cleanup()
-	}
-
-	if waitErr != nil {
-		return waitErr
-	}
-	return readErr
-}
 
 func (iops *InfrahubOps) backupDatabase(backupDir string, backupMetadata string, neo4jEdition string) error {
 	edition := strings.ToLower(neo4jEdition)
@@ -611,63 +441,6 @@ func (iops *InfrahubOps) restoreNeo4jCommunity(restoreMigrateFormat bool) (retEr
 	return nil
 }
 
-// restoreNeo4jCommunityStream restores a Neo4j Community dump by streaming the data
-// directly from the provided reader into `neo4j-admin database load --from-stdin`.
-// This avoids copying dump files to a temporary directory on the container.
-func (iops *InfrahubOps) restoreNeo4jCommunityStream(reader io.ReadCloser, restoreMigrateFormat bool) (retErr error) {
-	logrus.Info("Restoring Neo4j database (Community Edition streamed load)...")
-
-	pidStr, err := iops.readNeo4jPID()
-	if err != nil {
-		return err
-	}
-
-	if err := iops.stopNeo4jCommunity(pidStr); err != nil {
-		return err
-	}
-
-	defer func() {
-		if _, err := iops.Exec("database", []string{"rm", "-f", neo4jRemoteWatchdogBinary, neo4jRemoteWatchdogReady, neo4jRemoteWatchdogLog}, nil); err != nil {
-			logrus.Debugf("Failed to remove watchdog artifacts: %v", err)
-		}
-		if _, err := iops.Exec("database", []string{"kill", "-CONT", pidStr}, nil); err != nil {
-			logrus.Errorf("Failed to send SIGCONT to neo4j (pid %s): %v", pidStr, err)
-			if retErr == nil {
-				retErr = fmt.Errorf("failed to resume neo4j process: %w", err)
-			}
-		}
-	}()
-
-	opts := iops.getNeo4jExecOptions()
-
-	wait, err := iops.ExecWritePipe(
-		"database",
-		[]string{"neo4j-admin", "database", "load", "--from-stdin", "--overwrite-destination=true", iops.config.Neo4jDatabase},
-		opts,
-		reader,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to start neo4j streamed load: %w", err)
-	}
-
-	if err := wait(); err != nil {
-		return fmt.Errorf("failed to load neo4j dump from stream: %w", err)
-	}
-
-	if restoreMigrateFormat {
-		if output, err := iops.Exec(
-			"database",
-			[]string{"neo4j-admin", "database", "migrate", "--to-format=block", iops.config.Neo4jDatabase},
-			opts,
-		); err != nil {
-			return fmt.Errorf("failed to migrate neo4j to block format: %w\nOutput: %v", err, output)
-		}
-	}
-
-	logrus.Info("Neo4j streamed restore completed successfully")
-	return nil
-}
-
 func (iops *InfrahubOps) readNeo4jPID() (string, error) {
 	output, err := iops.Exec("database", []string{"cat", neo4jPIDFile}, nil)
 	if err != nil {
@@ -744,4 +517,70 @@ func (iops *InfrahubOps) isNeo4jCluster() bool {
 		return count > 1
 	}
 	return false
+}
+
+// neo4jAnswersBolt reports whether the database is serving queries.
+func (iops *InfrahubOps) neo4jAnswersBolt() bool {
+	_, err := iops.Exec("database", []string{
+		"cypher-shell",
+		"-u", iops.config.Neo4jUsername,
+		"-p" + iops.config.Neo4jPassword,
+		"--non-interactive",
+		"RETURN 1;",
+	}, nil)
+	return err == nil
+}
+
+// waitForNeo4jBack waits for the database to serve queries again after a
+// suspended offline window, starting it if nothing else does.
+//
+// Waiting on Bolt, not on the container: every client connection dies with the
+// offline window, and returning as soon as the container reports up hands the
+// caller a database that is not yet answering. Infrahub then serves /api/config
+// (which does not touch the database) while /api/schema fails — exactly the shape
+// of the failure the e2e suite saw. The round-trip harness learned the same
+// lesson independently and grew a wait_bolt of its own; the tool should not make
+// its callers rediscover it.
+//
+// Starting the database, not just waiting for it: resuming the process lets the
+// shutdown it was frozen mid-way through finish, so the container's PID 1 exits
+// and the container stops. A deployment's restart policy normally brings it
+// straight back — Compose's `restart:` and a pod's `restartPolicy` both do — but
+// one configured without either would be left with its database down and only a
+// warning to show for it, and waiting the whole timeout out first would be worse:
+// nothing is coming. So the two conditions are watched together. Bolt answering
+// is the success signal, because it is the only one that means the database is
+// actually usable; the service being observed stopped is the signal to start it,
+// once.
+//
+// A timeout is reported to the caller rather than raised as a failure of the
+// operation that just completed: by the time this runs the backup or restore has
+// already succeeded, and a database that is slow to come back is worth flagging,
+// not a reason to discard good work.
+func (iops *InfrahubOps) waitForNeo4jBack(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	logrus.Info("Waiting for Neo4j to accept connections...")
+	started := false
+
+	for {
+		if iops.neo4jAnswersBolt() {
+			logrus.Info("Neo4j is accepting connections")
+			return nil
+		}
+
+		if !started {
+			if running, err := iops.IsServiceRunning("database"); err == nil && !running {
+				logrus.Info("The database did not come back on its own; starting it...")
+				if err := iops.StartServices("database"); err != nil {
+					return fmt.Errorf("failed to start the database after the offline window: %w", err)
+				}
+				started = true
+			}
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("neo4j did not accept connections within %s of the offline window ending", timeout)
+		}
+		time.Sleep(neo4jBoltPollInterval)
+	}
 }
