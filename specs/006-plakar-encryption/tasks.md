@@ -233,7 +233,14 @@ The branch had diverged from `main` by 108 commits, which left PR #163 `CONFLICT
   construction there; nothing equivalent exists on Kubernetes. It is checked up front by
   `requirePostgresClient` with an actionable message rather than surfacing as an exec failure
   mid-restore, and `postgresql-client` is installed in the `e2e-tests-k8s` CI job.
-- [ ] T064 **Open — the remaining `main` e2e failure.** With T060/T061 in, the plakar backup and `snapshots list` now succeed in CI; all three `test_docker_plakar.py` cases instead fail because Infrahub cannot reach Neo4j afterwards (`/api/config` answers, `/api/schema` returns 503, server-side `SessionExpired: defunct connection … ('database', 7687)`). The three tests share a class-scoped compose stack, so the first one's backup poisons it and the S3 case fails at *seeding* — meaning T061's S3 rewrite is still unexercised. Both editions suspend Neo4j with SIGSTOP and resume with `kill -CONT`, on `main` too, so the DB is not restarted; the candidate difference is how long it stays suspended, since the runner adds container startup per component. Not reproducible in `test/e2e/`, whose `infrahub-server` is an `alpine sleep infinity` placeholder — needs a live instance (`invoke demo.start` in a sibling `infrahub` checkout). Worth capturing the database container's logs in the CI failure dump too: only `infrahub-server` was captured, which is what left the cause unobservable.
+- [X] T064 **Resolved 2026-09-10 — green in CI on `ea1b738`.** `test_docker_plakar.py` passes on
+  both editions. Not fixed by chasing the symptom but by T062 removing its cause: the runner
+  started and stopped the `database` container once per component, and Infrahub's server was left
+  holding a dead connection pool across it (`/api/config` answered, `/api/schema` returned 503,
+  `SessionExpired: defunct connection … ('database', 7687)`). `neo4j-admin` now runs inside the
+  container, so an Enterprise online backup does not take the database away at all and a Community
+  dump only suspends the process — and `waitForNeo4jBack` will not return until Bolt answers
+  again, so the deployment is usable by the time the backup reports success. Original text: With T060/T061 in, the plakar backup and `snapshots list` now succeed in CI; all three `test_docker_plakar.py` cases instead fail because Infrahub cannot reach Neo4j afterwards (`/api/config` answers, `/api/schema` returns 503, server-side `SessionExpired: defunct connection … ('database', 7687)`). The three tests share a class-scoped compose stack, so the first one's backup poisons it and the S3 case fails at *seeding* — meaning T061's S3 rewrite is still unexercised. Both editions suspend Neo4j with SIGSTOP and resume with `kill -CONT`, on `main` too, so the DB is not restarted; the candidate difference is how long it stays suspended, since the runner adds container startup per component. Not reproducible in `test/e2e/`, whose `infrahub-server` is an `alpine sleep infinity` placeholder — needs a live instance (`invoke demo.start` in a sibling `infrahub` checkout). Worth capturing the database container's logs in the CI failure dump too: only `infrahub-server` was captured, which is what left the cause unobservable.
 - [ ] T073 **The task-manager archive's format version follows whichever client took it.** Found
   while checking the chart during T062, not by a failure. The Docker runner borrows the
   deployment's own postgres image, so pg_dump matches the server by construction; the Kubernetes
@@ -260,7 +267,10 @@ The branch had diverged from `main` by 108 commits, which left PR #163 `CONFLICT
   change in it. The risk of leaving it is that it reads as though Neo4j still goes through the
   runner — `exportWithOwnershipRestored` in particular describes a hazard that no longer exists.
 
-- [ ] T063 Confirm or dismiss the enterprise Docker e2e leg. It failed differently across consecutive runs (94% then 11%, the latter on a `collect` test) with a `503` from the Infrahub server, which reads as contention across four parallel e2e jobs on the shared runners rather than a defect. Judge it once the community leg is green.
+- [X] T063 **Dismissed 2026-09-10 — green in CI on `ea1b738`, alongside all three other e2e legs.**
+  The reading was right: contention across four parallel e2e jobs on the shared runners, not a
+  defect. The previous failure was exit code 137 with no test failure reported, which is a killed
+  job rather than a broken one. Original text: It failed differently across consecutive runs (94% then 11%, the latter on a `collect` test) with a `503` from the Infrahub server, which reads as contention across four parallel e2e jobs on the shared runners rather than a defect. Judge it once the community leg is green.
 
 ---
 
