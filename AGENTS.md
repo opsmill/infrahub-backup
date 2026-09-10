@@ -317,6 +317,12 @@ The two database components are captured differently, and the difference is not 
 Both paths emit the upstream connectors' own layout, so a backup taken on one backend restores on
 the other. Do not add a second emission.
 
+One caveat to that, for the task manager only: `pg_dump`'s archive format is versioned and
+`pg_restore` refuses an archive written by a newer client. The Docker runner borrows the
+deployment's postgres image so its client always matches; the Kubernetes route uses the host's. So
+the *layout* is portable while a task-manager archive taken with a much newer client may not load
+through an older one. See T073 in `specs/006-plakar-encryption/tasks.md`.
+
 Two pre-existing gotchas worth knowing, neither introduced by the extraction:
 
 - `scripts/update-vendor-hash.sh` **only runs on Linux with Nix installed** — it uses GNU `grep -oP` and GNU `sed -i`, both unavailable on macOS, and requires `nix build`. On macOS the vendor hash cannot be regenerated locally.

@@ -234,6 +234,22 @@ The branch had diverged from `main` by 108 commits, which left PR #163 `CONFLICT
   `requirePostgresClient` with an actionable message rather than surfacing as an exec failure
   mid-restore, and `postgresql-client` is installed in the `e2e-tests-k8s` CI job.
 - [ ] T064 **Open — the remaining `main` e2e failure.** With T060/T061 in, the plakar backup and `snapshots list` now succeed in CI; all three `test_docker_plakar.py` cases instead fail because Infrahub cannot reach Neo4j afterwards (`/api/config` answers, `/api/schema` returns 503, server-side `SessionExpired: defunct connection … ('database', 7687)`). The three tests share a class-scoped compose stack, so the first one's backup poisons it and the S3 case fails at *seeding* — meaning T061's S3 rewrite is still unexercised. Both editions suspend Neo4j with SIGSTOP and resume with `kill -CONT`, on `main` too, so the DB is not restarted; the candidate difference is how long it stays suspended, since the runner adds container startup per component. Not reproducible in `test/e2e/`, whose `infrahub-server` is an `alpine sleep infinity` placeholder — needs a live instance (`invoke demo.start` in a sibling `infrahub` checkout). Worth capturing the database container's logs in the CI failure dump too: only `infrahub-server` was captured, which is what left the cause unobservable.
+- [ ] T073 **The task-manager archive's format version follows whichever client took it.** Found
+  while checking the chart during T062, not by a failure. The Docker runner borrows the
+  deployment's own postgres image, so pg_dump matches the server by construction; the Kubernetes
+  route runs the host's client over a port-forward, and nothing ties the two together.
+  `pg_dump`'s custom archive format is versioned and `pg_restore` refuses an archive written by a
+  **newer** client, so a task-manager component taken on Kubernetes with, say, client 16 will not
+  restore through a Compose runner borrowing a PostgreSQL 14 image — even though both paths emit
+  the same layout. The Neo4j component has no equivalent exposure, because neo4j-admin is the
+  deployment's own either way. Practical mitigation today: keep the host client near the
+  deployment's major version (the Helm chart currently deploys `bitnamilegacy/postgresql:14.13.0`,
+  and Ubuntu 24.04's `postgresql-client` is 16, which dumps and restores a 14 server fine within
+  one backend). The structural fix is a staged seam in `PlakarKorp/integration-postgresql` so the
+  client can run in the pod, as the Neo4j connector's does — that repository is not ours, so it is
+  a request rather than a change. Until then this should be stated in the docs as a restore
+  constraint, and `requirePostgresClient` could compare `pg_dump --version` against the server's.
+
 - [ ] T072 **Retire the runner machinery that only Neo4j used.** Opened by T062, which is what made
   it dead rather than merely unused. `mountDBVolumes` is now `false` at both call sites and
   `Neo4jMigration{}` is empty at the only one that takes it, so the runner's volume sharing, its

@@ -28,6 +28,18 @@ import (
 // The cost is a host dependency: the PostgreSQL client binaries must be present
 // and at least as new as the server. It is checked up front rather than
 // discovered inside the connector as an exec failure.
+//
+// It has a second consequence worth stating plainly, because it is easy to miss.
+// The Docker runner borrows the deployment's own postgres image, so its client
+// matches the server by construction; the host's does not. pg_dump's custom
+// archive format is versioned, and pg_restore refuses an archive written by a
+// NEWER pg_dump ("unsupported version … in file header"). So while the two
+// backends produce the same snapshot LAYOUT, a task-manager archive taken with a
+// newer client than the one restoring it will not load — which is a real limit on
+// restoring a Kubernetes-taken backup onto a Compose deployment, in a way it is
+// not for the Neo4j component. Keeping the host client close to the server's major
+// version is the practical answer; making the connector run where the server is
+// would be the structural one, and needs a staged seam upstream.
 
 // portForwarder is the backend capability the forwarded path needs. Only the
 // Kubernetes backend has it; asserting on the behaviour keeps this file from
