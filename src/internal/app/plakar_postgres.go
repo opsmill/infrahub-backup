@@ -112,10 +112,17 @@ func (iops *InfrahubOps) postgresConnectorConfig(location string, opts map[strin
 
 // backupTaskManagerForwarded captures the task-manager component in this
 // process, through a port-forward.
+//
+// The snapshot is named for the database as the deployment addresses it, not for
+// the loopback address this run happened to reach it on: the forwarded port is
+// chosen by kubectl and differs every time, so naming the snapshot after it would
+// make two backups of the same database look like backups of different ones — and
+// look different from the same component taken on Docker Compose.
 func (iops *InfrahubOps) backupTaskManagerForwarded(opts map[string]string, tags []string) (string, error) {
+	name := dbURI("postgres", iops.config.PostgresUsername, "task-manager-db", "5432", iops.config.PostgresDatabase)
 	return withTaskManagerForwarded(iops, func(location string) (string, error) {
 		config := iops.postgresConnectorConfig(location, opts)
-		return snapshotFromImporterFunc(iops.config.Plakar, location, tags, func(kctx *kcontext.KContext) (kimporter.Importer, error) {
+		return snapshotFromImporterFunc(iops.config.Plakar, name, tags, func(kctx *kcontext.KContext) (kimporter.Importer, error) {
 			imp, err := kimporter.NewImporter(kctx, connectorOptions(kctx), config)
 			if err != nil {
 				return nil, fmt.Errorf("creating the PostgreSQL importer: %w", err)

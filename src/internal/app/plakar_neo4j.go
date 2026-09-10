@@ -137,7 +137,10 @@ func (iops *InfrahubOps) backupNeo4jInPlace(neo4jMetadata string, community bool
 		return "", fmt.Errorf("copying the Neo4j artifact out of the database container: %w", err)
 	}
 
-	return snapshotFromImporter(iops.config.Plakar, imp, proto, tags)
+	// Named for the location, as the runner-era snapshots were, rather than for the
+	// bare protocol: it is the only part of the header that says which database of
+	// which deployment this is.
+	return snapshotFromImporter(iops.config.Plakar, imp, config["location"], tags)
 }
 
 // restoreNeo4jInPlace replaces the Neo4j store from a snapshot: stage the
