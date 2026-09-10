@@ -64,6 +64,22 @@ func (ce *CommandExecutor) runCommand(name string, args ...string) (string, erro
 	return strings.TrimSpace(string(output)), err
 }
 
+// runCommandSeparate is runCommand with the output streams kept apart: stdout
+// first, stderr second. It is the unbounded sibling of
+// runCommandSeparateContext, for the same callers — those that parse stdout as
+// data — when no bound applies; see that function for what a merged stream does
+// to such a caller.
+func (ce *CommandExecutor) runCommandSeparate(name string, args ...string) (string, string, error) {
+	var stdout, stderr bytes.Buffer
+	cmd := exec.Command(name, args...)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+
+	return strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String()), err
+}
+
 // timeoutError marks a command that exceeded its allotted execution time. Its
 // message is exactly "timed out after <duration>" so orchestrators can surface
 // it verbatim (e.g. as a bundle manifest failure reason).
@@ -275,6 +291,49 @@ func (ce *CommandExecutor) runCommandWritePipe(stdin io.Reader, name string, arg
 
 	wait := func() error {
 		if err := cmd.Wait(); err != nil {
+			stderrStr := strings.TrimSpace(stderrBuf.String())
+			if stderrStr != "" {
+				return fmt.Errorf("%w: %s", err, stderrStr)
+			}
+			return err
+		}
+		return nil
+	}
+
+	return wait, nil
+}
+
+// runCommandWritePipeContext is the timeout-bounded variant of
+// runCommandWritePipe: the command is killed once timeout elapses (or ctx is
+// cancelled) and wait() returns a *timeoutError when the timeout expired. The
+// internal context is released when wait() is called.
+//
+// It exists because a manifest piped to `kubectl create` is how a transient
+// external-database workload is created, and that call had no bound at all
+// (FR-025).
+func (ce *CommandExecutor) runCommandWritePipeContext(ctx context.Context, timeout time.Duration, stdin io.Reader, name string, args ...string) (func() error, error) {
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+
+	cmd := exec.CommandContext(cctx, name, args...)
+	logrus.Debugf("exec write-pipe (timeout %s): %s %s", timeout, name, strings.Join(args, " "))
+
+	cmd.Stdin = stdin
+
+	// Capture stderr for error reporting
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return nil, err
+	}
+
+	wait := func() error {
+		defer cancel()
+		if err := cmd.Wait(); err != nil {
+			if errors.Is(cctx.Err(), context.DeadlineExceeded) {
+				return &timeoutError{timeout: timeout}
+			}
 			stderrStr := strings.TrimSpace(stderrBuf.String())
 			if stderrStr != "" {
 				return fmt.Errorf("%w: %s", err, stderrStr)

@@ -12,6 +12,8 @@ Support frequently asks for "logs plus a backup" so they can reproduce a custome
 
 `--include-backup` runs a collector that delegates to the existing `CreateBackup` unmodified. The produced backup is a **standalone** `infrahub_backup_*.tar.gz` in the standard backup directory — referenced by the manifest's `artifact` field, **not embedded** in the bundle. The collector runs last in the plan (after every read-only collector), because the delegated backup may stop/restart app containers and must not taint the diagnostics. A backup failure is non-fatal: the bundle is still produced (US3 scenario 2).
 
+"Unmodified" has one boundary, and it is a refusal rather than a modification. `CreateBackup` against a database that lives outside the cluster (spec 007) creates and then deletes a transient Pod and Secret in the deployment's namespace, which ADR 0003 forbids `infrahub-collect` without qualification. So a collection run is marked as one that may not capture an external database, and the delegated backup stops at that gate — before anything is stopped and before any object is created — with a message naming `infrahub-backup create`. The delegation itself is untouched: no divergent backup path exists, and the internal path is byte-for-byte the one the backup tool takes.
+
 The backup is invoked with `force=true`. Collection is non-interactive and designed never to hang; `CreateBackup(force=false)` runs `waitForRunningTasks`, an unbounded loop that returns only when no Prefect tasks are running/pending, which never fully drains on a busy instance (e.g. the Enterprise edition's recurring background tasks). `--force` skips only that consistency gate; it does not weaken the backup's own integrity guarantees.
 
 ## Consequences

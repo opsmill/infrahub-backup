@@ -1,6 +1,12 @@
 package app
 
-import "testing"
+import (
+	"net/http"
+	"testing"
+	"time"
+
+	"github.com/minio/minio-go/v7/pkg/credentials"
+)
 
 // s3KeyClient builds a client carrying configuration only. The key filtering and
 // key construction under test are pure functions of the prefix, so no endpoint,
@@ -136,5 +142,52 @@ func TestS3ClientBuildS3Key(t *testing.T) {
 				t.Errorf("buildS3Key(%q) = %q, want %q", name, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestCredentialProbeIsBounded is T141. With no credentials in the
+// environment, every S3 request falls through to the IAM provider's reach for
+// the link-local metadata service, and on a host that has none that address is
+// blackholed rather than refused. Unbounded, one object read against an
+// unreachable endpoint spent its whole s3StatTimeout on it — 125 seconds for a
+// HEAD that failed immediately, which is the runtime swing this test's own
+// package used to show.
+//
+// The bound is asserted at the two places it can be lost: the dialer's timeout,
+// and the provider actually being given a client that carries it. Neither is
+// visible in a run's output, so a regression in either reads as nothing but
+// slowness.
+func TestCredentialProbeIsBounded(t *testing.T) {
+	dialer := credentialProbeDialer()
+	if dialer.Timeout <= 0 {
+		t.Error("credentialProbeDialer() has no timeout: the metadata probe waits out the transport's default, which is what made a failed object read take two minutes")
+	}
+	if dialer.Timeout > 5*time.Second {
+		t.Errorf("credentialProbeDialer().Timeout = %v, want a short bound: a link-local service either answers at once or is not there", dialer.Timeout)
+	}
+
+	providers, err := credentialProviders()
+	if err != nil {
+		t.Fatalf("credentialProviders() = %v, want nil", err)
+	}
+
+	iam := 0
+	for _, provider := range providers {
+		metadata, ok := provider.(*credentials.IAM)
+		if !ok {
+			continue
+		}
+		iam++
+		if metadata.Client == nil {
+			t.Error("the IAM provider was given no client, so it probes the metadata service through http.DefaultClient and the bound above applies to nothing")
+
+			continue
+		}
+		if _, ok := metadata.Client.Transport.(*http.Transport); !ok {
+			t.Errorf("the IAM provider's client carries transport %T, want the bounded *http.Transport", metadata.Client.Transport)
+		}
+	}
+	if iam != 1 {
+		t.Errorf("credentialProviders() holds %d IAM providers, want exactly 1: the metadata probe is the one that reaches the network", iam)
 	}
 }

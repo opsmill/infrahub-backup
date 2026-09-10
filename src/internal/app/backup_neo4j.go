@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -24,6 +25,18 @@ const (
 // The backup is created with --compress=false for better Plakar deduplication.
 func (iops *InfrahubOps) backupNeo4jEnterpriseStream(backupMetadata string) (func() (io.ReadCloser, error), error) {
 	return func() (io.ReadCloser, error) {
+		// The branch is here rather than where the factory is built, so that the
+		// transient workload's life covers the stream rather than starting when
+		// the factory was merely constructed. A nil source is an internal
+		// database, and everything below is the path it has always taken.
+		source, err := iops.externalDatabaseFor(serviceNeo4j)
+		if err != nil {
+			return nil, err
+		}
+		if source != nil {
+			return iops.streamNeo4jEnterpriseExternal(backupMetadata)
+		}
+
 		cleanupBackupDir := func() {
 			if _, err := iops.Exec("database", []string{"rm", "-rf", neo4jTempBackupDir}, nil); err != nil {
 				logrus.Warnf("Failed to remove temporary Neo4j backup directory: %v", err)
@@ -38,14 +51,12 @@ func (iops *InfrahubOps) backupNeo4jEnterpriseStream(backupMetadata string) (fun
 		}
 
 		// Run backup command separately so its stdout logs don't contaminate the data stream
-		if output, err := iops.Exec("database", []string{
-			"neo4j-admin", "database", "backup",
-			"--expand-commands",
-			"--include-metadata=" + backupMetadata,
-			"--compress=false",
-			"--to-path=" + neo4jTempBackupDir,
-			iops.config.Neo4jDatabase,
-		}, nil); err != nil {
+		if output, err := iops.Exec("database", neo4jCaptureCommand(neo4jCaptureRequest{
+			Database:       iops.config.Neo4jDatabase,
+			BackupMetadata: backupMetadata,
+			ToPath:         neo4jTempBackupDir,
+			Uncompressed:   true,
+		}), nil); err != nil {
 			cleanupBackupDir()
 			return nil, fmt.Errorf("failed to backup neo4j: %w\nOutput: %v", err, output)
 		}
@@ -204,6 +215,14 @@ func (iops *InfrahubOps) backupDatabase(backupDir string, backupMetadata string,
 }
 
 func (iops *InfrahubOps) backupNeo4jEnterprise(backupDir string, backupMetadata string) error {
+	source, err := iops.externalDatabaseFor(serviceNeo4j)
+	if err != nil {
+		return err
+	}
+	if source != nil {
+		return iops.backupNeo4jEnterpriseExternal(backupDir, backupMetadata)
+	}
+
 	logrus.Info("Backing up Neo4j database (Enterprise Edition online backup)...")
 
 	if _, err := iops.Exec("database", []string{"mkdir", "-p", neo4jTempBackupDir}, nil); err != nil {
@@ -217,7 +236,11 @@ func (iops *InfrahubOps) backupNeo4jEnterprise(backupDir string, backupMetadata 
 
 	if output, err := iops.Exec(
 		"database",
-		[]string{"neo4j-admin", "database", "backup", "--expand-commands", "--include-metadata=" + backupMetadata, "--to-path=/tmp/infrahubops", iops.config.Neo4jDatabase},
+		neo4jCaptureCommand(neo4jCaptureRequest{
+			Database:       iops.config.Neo4jDatabase,
+			BackupMetadata: backupMetadata,
+			ToPath:         neo4jTempBackupDir,
+		}),
 		nil,
 	); err != nil {
 		return fmt.Errorf("failed to backup neo4j: %w\nOutput: %v", err, output)
@@ -357,6 +380,19 @@ func (iops *InfrahubOps) backupNeo4jCommunity(backupDir string) (retErr error) {
 }
 
 func (iops *InfrahubOps) restoreNeo4j(workDir, neo4jEdition string, restoreMigrateFormat bool) error {
+	// Before the copy into the container, because for a database outside the
+	// deployment there is no container to copy into and nothing to copy: the
+	// server fetches the artifact itself from where the pre-flight staged it.
+	// A nil restore is an in-deployment database and takes the path below
+	// unchanged (FR-015).
+	restore, err := iops.externalRestoreFor(serviceNeo4j)
+	if err != nil {
+		return err
+	}
+	if restore != nil {
+		return iops.restoreNeo4jExternal(restore)
+	}
+
 	backupPath := filepath.Join(workDir, "backup", "database")
 
 	// Clear the destination before copying into it, and abort if it cannot be cleared.
@@ -405,7 +441,11 @@ func (iops *InfrahubOps) restoreNeo4jEnterprise(restoreMigrateFormat bool) error
 	opts := iops.getNeo4jExecOptions()
 
 	// Check if Neo4j is running in cluster mode
-	if iops.isNeo4jCluster() {
+	clustered, err := iops.isNeo4jCluster()
+	if err != nil {
+		return err
+	}
+	if clustered {
 		return iops.restoreNeo4jCluster(opts)
 	}
 
@@ -615,6 +655,24 @@ func (iops *InfrahubOps) restoreNeo4jCommunity(restoreMigrateFormat bool) (retEr
 // directly from the provided reader into `neo4j-admin database load --from-stdin`.
 // This avoids copying dump files to a temporary directory on the container.
 func (iops *InfrahubOps) restoreNeo4jCommunityStream(reader io.ReadCloser, restoreMigrateFormat bool) (retErr error) {
+	// The Plakar paths reach this without going through restoreNeo4j, so the
+	// dispatch that sends a database outside the deployment to the seed path is
+	// not on this route. Everything below suspends the database's own process
+	// and writes into its store, which needs a container this database does not
+	// have.
+	//
+	// Both Plakar entry points now refuse this at their gate, before anything
+	// is stopped, so this is the backstop rather than the refusal — it is the
+	// last place the guarantee can be held, and a path added later could reach
+	// it without passing a gate. See refuseExternalCommunityDumpRestore.
+	restore, err := iops.externalRestoreFor(serviceNeo4j)
+	if err != nil {
+		return err
+	}
+	if restore != nil {
+		return refuseExternalDumpRestoreAfterQuiescing(restore.Endpoint)
+	}
+
 	logrus.Info("Restoring Neo4j database (Community Edition streamed load)...")
 
 	pidStr, err := iops.readNeo4jPID()
@@ -704,8 +762,30 @@ func (iops *InfrahubOps) getNeo4jExecOptions() *ExecOptions {
 	return &ExecOptions{User: "neo4j"}
 }
 
-// isNeo4jCluster checks if Neo4j is running in cluster mode by counting servers
+// redactDatabase replaces every attribute value in the database with a random
+// UUID. It runs `cypher-shell` in the `database` container, which is what makes
+// it an in-deployment operation: it modifies the source database in place,
+// before the capture reads it.
+//
+// A database that lives outside the deployment has no such container, and the
+// exec used to be attempted anyway — producing "no pods found for service
+// database in namespace …", which is the exact misdiagnosis FR-008's refusal
+// exists to remove. So the refusal is stated here too, in the terms an operator
+// can act on: nothing is missing from the deployment, and this build has no way
+// to redact a database it does not host.
 func (iops *InfrahubOps) redactDatabase() error {
+	source, err := iops.externalDatabaseFor(serviceNeo4j)
+	if err != nil {
+		return err
+	}
+	if source != nil {
+		return fmt.Errorf(
+			"cannot redact %s: redaction rewrites the database in place through the %s container, and there is none here because the database is managed outside this deployment. "+
+				"Nothing is missing from the deployment. Take the backup without --redact, or redact the data at its source. "+
+				"No Infrahub service was stopped and no data was changed",
+			source.Endpoint.endpointTarget(), serviceNeo4j)
+	}
+
 	logrus.Warn("Redacting attribute values in the database. This operation is destructive and irreversible!")
 
 	query := `MATCH (av:AttributeValue) WITH av.value AS av_value, collect(av) AS av_verts WITH av_value, av_verts, randomUUID() as new_value CALL (av_value, new_value, av_verts) { UNWIND av_verts AS av SET av.value = new_value } IN TRANSACTIONS`
@@ -725,7 +805,28 @@ func (iops *InfrahubOps) redactDatabase() error {
 	return nil
 }
 
-func (iops *InfrahubOps) isNeo4jCluster() bool {
+// isNeo4jCluster reports whether Neo4j runs in cluster mode.
+//
+// For a database inside the deployment it counts the servers the system
+// database reports, and a query that fails is read as "not clustered" — the
+// answer only selects between two restore procedures, and degrading is what
+// this has always done.
+//
+// For one outside it, the count was already taken: the probe enumerated the
+// members before anything was stopped, and asking again would mean exec'ing
+// `cypher-shell` in a `database` container that is not there — the same
+// misdiagnosis redactDatabase carried. Only the location failing is fatal here,
+// because that is the one thing this cannot degrade around: it decides which of
+// the two answers is even being computed.
+func (iops *InfrahubOps) isNeo4jCluster() (bool, error) {
+	source, err := iops.externalDatabaseFor(serviceNeo4j)
+	if err != nil {
+		return false, err
+	}
+	if source != nil {
+		return len(source.Facts.Members) > 1, nil
+	}
+
 	output, err := iops.Exec("database", []string{
 		"cypher-shell",
 		"-u", iops.config.Neo4jUsername,
@@ -735,13 +836,600 @@ func (iops *InfrahubOps) isNeo4jCluster() bool {
 		"SHOW SERVERS YIELD * RETURN count(*) as serverCount",
 	}, nil)
 	if err != nil {
-		return false // Assume not clustered if query fails
+		return false, nil // Assume not clustered if query fails
 	}
 	// Parse server count - if > 1, it's a cluster
 	lines := strings.Split(strings.TrimSpace(output), "\n")
 	if len(lines) >= 2 {
 		count, _ := strconv.Atoi(strings.TrimSpace(lines[len(lines)-1]))
-		return count > 1
+
+		return count > 1, nil
 	}
+
+	return false, nil
+}
+
+// ---------------------------------------------------------------------------
+// Capturing a Neo4j database that lives outside the deployment
+// ---------------------------------------------------------------------------
+
+// The online backup command is a client: the vendor's own documented topology
+// is to run it "from a server on the same network as the database, but that is
+// not part of the cluster" (research R1). The transient workload is that
+// machine, so the capture below is the same command the in-container path runs,
+// with the one addition that turns it from a local operation into a remote one —
+// the ordered --from list of members to try.
+//
+// Everything else about the two paths is deliberately identical, including the
+// order the flags are written in and the name of the directory the artifact
+// lands in, because an artifact taken from an external database has to be
+// restorable into an internal deployment and vice versa (FR-015, and the
+// artifact contract). neo4jCaptureCommand is what makes that a shared fact
+// rather than two implementations that agree today.
+
+const (
+	// externalNeo4jCaptureName is the directory the artifact lands in, and it
+	// is the internal path's basename rather than a name of its own: the
+	// archive assembled from it is a tar of this directory, so a different name
+	// here would produce an archive whose entries a restore does not recognise.
+	externalNeo4jCaptureName = "infrahubops"
+
+	// externalNeo4jCaptureParent is the scratch volume the capture directory
+	// sits in — the volume FR-022 sizes — rather than the node's own disk,
+	// which a large database filling would take neighbouring workloads with it.
+	externalNeo4jCaptureParent = transientScratchPath
+
+	externalNeo4jCaptureDir = externalNeo4jCaptureParent + "/" + externalNeo4jCaptureName
+
+	// externalNeo4jStagingDir is the --temp-path the command stages the store
+	// and transaction logs into before producing the artifact beside them. It
+	// is named explicitly because the vendor's default is the working
+	// directory, and "the temporary directory must therefore have enough free
+	// space to hold the entire backup" — so leaving it implicit puts the
+	// staging copy somewhere this run has not sized (research R5).
+	externalNeo4jStagingDir = transientScratchPath + "/staging"
+)
+
+// neo4jCaptureRequest is everything the online backup command needs. It exists
+// so the argv is built once for both the internal and the external path.
+type neo4jCaptureRequest struct {
+	// Database is the database to capture, which names the artifact.
+	Database string
+
+	// BackupMetadata is the --include-metadata value.
+	BackupMetadata string
+
+	// ToPath is the directory the artifact is placed in.
+	ToPath string
+
+	// TempPath is the staging directory. Empty leaves the flag off, which is
+	// what the in-container path does — it stages inside the database's own
+	// container, where the vendor's default is already the right place.
+	TempPath string
+
+	// From is the ordered member list. Empty leaves the flag off entirely,
+	// which is what makes the command an in-container capture of the local
+	// store; a member list makes the same command a remote one (FR-005).
+	From []HostPort
+
+	// Uncompressed emits --compress=false, which the streaming path asks for
+	// so the artifact deduplicates.
+	Uncompressed bool
+}
+
+// neo4jCaptureCommand builds the online backup argv.
+//
+// The flag order is the order the in-container path has always written, and each
+// addition is appended only when its field is set, so a request with no member
+// list, no staging path and no compression override produces the exact argv that
+// path produced before this feature existed. That equality is asserted by test
+// rather than left as an intention (FR-015).
+//
+// `--expand-commands` is emitted only for the in-container capture, and the
+// reason is a property of the vendor's own tooling rather than a preference.
+// Given that flag, `neo4j-admin` refuses to read any configuration file whose
+// permissions are looser than 0640 — and it reads both `neo4j.conf` and
+// `neo4j-admin.conf`, so tightening one is not enough. The images this tool
+// pins for the transient workload ship them world-writable: `neo4j:5-enterprise`
+// has `/var/lib/neo4j/conf/neo4j.conf` at 0777. Passing the flag there aborts
+// the capture *before the database is contacted*, reporting a file permission
+// the operator never set, in an image the operator did not build.
+//
+// Nothing is lost by omitting it. The flag exists so that a deployment's own
+// configuration may hold command-valued settings for `neo4j-admin` to expand,
+// and the transient workload has no such configuration — it is a stock image
+// holding only the credentials it was given and the endpoint it was told to
+// read. The in-container path does run against the deployment's config, so it
+// keeps the flag, which is also what keeps its argv byte-identical (FR-015).
+//
+// Verified against real servers on 2026-09-03: with the flag, `neo4j:5-enterprise`
+// fails on config permissions; without it, the same argv completes a full remote
+// capture from a live backup listener and writes
+// `neo4j-<timestamp>.backup`.
+func neo4jCaptureCommand(req neo4jCaptureRequest) []string {
+	command := []string{
+		"neo4j-admin", "database", "backup",
+	}
+
+	if len(req.From) == 0 {
+		command = append(command, "--expand-commands")
+	}
+
+	command = append(command, "--include-metadata="+req.BackupMetadata)
+
+	if req.Uncompressed {
+		command = append(command, "--compress=false")
+	}
+	if len(req.From) > 0 {
+		command = append(command, "--from="+renderHostPorts(req.From))
+	}
+	if req.TempPath != "" {
+		command = append(command, "--temp-path="+req.TempPath)
+	}
+
+	return append(command, "--to-path="+req.ToPath, req.Database)
+}
+
+// externalNeo4jCaptureRequest is the request for a capture from outside the
+// deployment.
+//
+// It carries no credential, and there is nothing missing: the backup service is
+// reached over its own protocol on its own port, and where the probe statements
+// need to authenticate they read NEO4J_USERNAME and NEO4J_PASSWORD from the
+// environment the transient workload's secret provides. So no path here puts a
+// password on a command line (FR-014).
+func externalNeo4jCaptureRequest(capture *externalCapture, backupMetadata string, uncompressed bool) neo4jCaptureRequest {
+	return neo4jCaptureRequest{
+		Database:       capture.Endpoint.Database,
+		BackupMetadata: backupMetadata,
+		ToPath:         externalNeo4jCaptureDir,
+		TempPath:       externalNeo4jStagingDir,
+		From:           capture.captureTargets(),
+		Uncompressed:   uncompressed,
+	}
+}
+
+// errExternalCommunityCapture is the FR-008 refusal, as a value callers and
+// tests can identify rather than a message they have to match.
+var errExternalCommunityCapture = errors.New("the Community Edition backup mechanism requires direct access to the database's own storage")
+
+// externalCommunityCaptureRefusal refuses to capture an external Community
+// database, saying why the mechanism is unavailable.
+//
+// The wording matters more than usual here. Before this feature the same
+// situation produced "service not found", and a customer reasonably concluded
+// their deployment was broken and went looking for a missing container — so the
+// message states that the mechanism needs the database's own storage, that the
+// remote alternative is an Enterprise feature, and explicitly that nothing is
+// missing from the deployment (FR-008, and the failure-message contract).
+func externalCommunityCaptureRefusal(endpoint *DatabaseEndpoint) error {
+	return fmt.Errorf(
+		"cannot back up %s: %w, because it is an offline dump of the store files, and this run has no access to the storage of a server it does not host. "+
+			"The online backup that does work remotely is a Neo4j Enterprise Edition feature. "+
+			"Nothing is missing from the deployment — the %s service has no container here because the database is managed outside it. "+
+			"No Infrahub service was stopped",
+		endpoint.endpointTarget(), errExternalCommunityCapture, serviceNeo4j,
+	)
+}
+
+// refuseExternalCommunityCapture refuses an external capture whose server
+// reported an edition the remote mechanism cannot serve (FR-008).
+//
+// It is called from the gate, on the edition the probe read over Bolt, which is
+// the only place the answer is both known and still free: one exec into a probe
+// pod has been spent, and no Infrahub service has been stopped, no abort window
+// announced, and no capture workload built. Deciding later would mean deciding
+// after detectNeo4jEdition had already turned Community into
+// RequiresOfflineCapture and scaled six services to zero for a dump this run was
+// never going to be able to take.
+//
+// An edition the server did not report is not read as Community: the same
+// asymmetry Neo4jEditionInfo documents applies here, and guessing the
+// destructive branch from a probe that did not answer is what Principle II
+// forbids. requireDeterminedEdition is what stops such a run, one step later.
+func refuseExternalCommunityCapture(endpoint *DatabaseEndpoint, edition string) error {
+	if !isCommunityEdition(edition) {
+		return nil
+	}
+
+	return externalCommunityCaptureRefusal(endpoint)
+}
+
+// ---------------------------------------------------------------------------
+// Deciding whether a capture captured everything (FR-012, research R6)
+// ---------------------------------------------------------------------------
+
+// The backup command's exit codes conflate two outcomes. Code 1 is "Backup
+// failed, or succeeded but encountered problems such as some servers being
+// uncontactable", and for several databases "One or several backups failed, or
+// succeeded with problems". There is no code that separates them, and the
+// vendor documents no machine-readable marker in the output either — the exit
+// code table says only "See logs for more details".
+//
+// So completeness is established from two things the run can observe for itself:
+// whether the command reported success, and whether the artifact it was asked
+// for is actually there. Both are required. A non-zero exit is never complete,
+// and a zero exit that produced no artifact is not complete either, which is the
+// case a signal read from exit status alone would have called a success.
+//
+// What the output is used for is telling the operator which of the two outcomes
+// they hit. Where the output names a server it could not reach, that line is
+// quoted in the failure; where it does not, the failure says so rather than
+// implying an outright failure it did not establish. The markers below therefore
+// never decide anything — inventing a completeness signal the command does not
+// emit is the failure mode this whole section exists to avoid.
+
+// neo4jCaptureVerdict is what a capture established about itself.
+type neo4jCaptureVerdict struct {
+	// Complete is true only for a capture that reported success and left the
+	// artifact it was asked for.
+	Complete bool
+
+	// ArtifactProduced records whether the artifact is there, which is what
+	// separates "succeeded with problems" from "failed outright" on the
+	// identical exit status they share.
+	ArtifactProduced bool
+
+	// Detail is the operator-facing account of an incomplete capture.
+	Detail string
+}
+
+// neo4jUncontactableMarkers are phrasings that indicate the command could not
+// reach a member. They corroborate a verdict already reached from the exit
+// status and the artifact; none of them is the verdict, because the vendor
+// documents no output contract for this and a phrasing that changes between
+// releases must not be able to turn an incomplete capture into a complete one.
+//
+// None of them is attribution either. Every one of these phrasings is also how
+// a cluster's own control plane reports that *it* is unreachable, so a marker
+// counts only on a line that names an endpoint the run supplied — see
+// uncontactableEvidence.
+var neo4jUncontactableMarkers = []string{
+	"uncontactable",
+	"could not be contacted",
+	"unable to connect",
+	"connection refused",
+	"did not respond",
+	"not responding",
+	"unreachable",
+	"failed to connect",
+}
+
+// uncontactableEvidence returns the first line that names one of the endpoints
+// the capture was asked to try and says it could not be reached, or the empty
+// string when nothing does.
+//
+// It reads the command's stdout *and* the error, because the two carry
+// different halves of what the command said: bounded execution returns stdout
+// alone, and a failed command's stderr is folded into its error by withStderr.
+// Reading only stdout — which is what an earlier version of this did, back when
+// the two streams were merged — would look for the evidence in the one place a
+// failing neo4j-admin does not write it.
+//
+// The endpoints are what make reading the error safe, and this is why they are
+// a parameter. kubectl writes its *own* stderr into the same stream the remote
+// command's goes to, and its transport failures are worded exactly like a
+// database that will not answer: an API server that has stopped answering
+// produces "Unable to connect to the server: dial tcp …: connection refused",
+// which matches two of the markers below. So the whole of an API-server outage
+// was reported to the operator as a named Neo4j endpoint the capture could not
+// reach — a diagnosis pointing at the wrong system entirely, on a run that
+// failed for a reason the cluster could have told them.
+//
+// Attribution is therefore positive rather than a list of transport phrasings
+// to ignore: a line is evidence about this database only if it names a host the
+// run supplied. On the host, not the whole address, because the supplied
+// endpoint carries the backup listener's port and the server names its own. A
+// genuine failure whose wording omits the host is not read as evidence, and
+// that is the safe direction: the markers only ever corroborate a verdict
+// already reached from the exit status and the artifact, so losing one costs
+// the operator the endpoint's name in the message, never a capture reported
+// complete when it was not.
+func uncontactableEvidence(output string, runErr error, targets []HostPort) string {
+	for _, line := range nonEmptyLines(output) {
+		if namesAnUncontactableEndpoint(line, targets) {
+			return strings.TrimSpace(line)
+		}
+	}
+
+	if runErr == nil {
+		return ""
+	}
+
+	for _, line := range nonEmptyLines(runErr.Error()) {
+		if namesAnUncontactableEndpoint(line, targets) {
+			return strings.TrimSpace(line)
+		}
+	}
+
+	return ""
+}
+
+// namesAnUncontactableEndpoint reports whether one line says a supplied
+// endpoint could not be reached.
+func namesAnUncontactableEndpoint(line string, targets []HostPort) bool {
+	lowered := strings.ToLower(strings.TrimSpace(line))
+
+	named := false
+	for _, target := range targets {
+		host := strings.ToLower(strings.TrimSpace(target.Host))
+		if host != "" && strings.Contains(lowered, host) {
+			named = true
+
+			break
+		}
+	}
+	if !named {
+		return false
+	}
+
+	for _, marker := range neo4jUncontactableMarkers {
+		if strings.Contains(lowered, marker) {
+			return true
+		}
+	}
+
 	return false
+}
+
+// neo4jArtifactProduced reports whether a listing of the capture directory shows
+// an artifact for the database that was asked for.
+//
+// The artifact is named `<database>-<timestamp>.backup`, and this reads all
+// three parts. Matching the bare name as a prefix — which is what this did —
+// lets a sibling database's `<database>2-….backup` satisfy the check, so a run
+// that captured nothing of the database it was asked for records a complete
+// capture. Requiring the separator fixes that case but not `<database>-staging`,
+// whose own artifact also begins `<database>-`; so what follows the separator
+// must additionally begin a timestamp rather than more name.
+//
+// Both of the assumptions here — the `.backup` suffix and a timestamp starting
+// with its year — fail in the same direction if the vendor ever changes the
+// name: the artifact is not recognised, the capture is reported incomplete, and
+// the run fails. That is the direction Principle II asks for. The opposite
+// reading is the one this whole section exists to prevent: a complete, loadable
+// artifact of something else, sitting where the reader looks, reported as the
+// backup that was asked for.
+func neo4jArtifactProduced(database, listing string) bool {
+	prefix := database + "-"
+
+	for _, entry := range nonEmptyLines(listing) {
+		if !strings.HasPrefix(entry, prefix) || !strings.HasSuffix(entry, ".backup") {
+			continue
+		}
+
+		if remainder := entry[len(prefix):]; remainder != "" && remainder[0] >= '0' && remainder[0] <= '9' {
+			return true
+		}
+	}
+
+	return false
+}
+
+// classifyNeo4jCapture decides whether a capture captured everything it was
+// asked for, from what the operation reported rather than from its exit status
+// alone (FR-012).
+//
+// targets are the endpoints the capture was asked to try, and they are what
+// make the "could not reach an endpoint" wording attributable to this database
+// rather than to the cluster the command ran through (uncontactableEvidence).
+func classifyNeo4jCapture(runErr error, output string, artifactProduced bool, targets []HostPort) neo4jCaptureVerdict {
+	verdict := neo4jCaptureVerdict{ArtifactProduced: artifactProduced}
+	evidence := uncontactableEvidence(output, runErr, targets)
+
+	switch {
+	case runErr == nil && artifactProduced:
+		verdict.Complete = true
+
+		// Reported, not acted on: a successful capture that also mentions an
+		// unreachable member is a capture the vendor called successful, and
+		// overriding that on a phrase match would refuse work the server did.
+		if evidence != "" {
+			logrus.Warnf("The capture reported success but its output mentions an endpoint it could not reach: %s", evidence)
+		}
+
+	case runErr == nil && !artifactProduced:
+		verdict.Detail = "the operation reported success but left no artifact in the capture directory, so there is nothing to record as a backup"
+		if line := firstOutputLine(output); line != "" {
+			verdict.Detail += " (the command said: " + line + ")"
+		}
+
+	case artifactProduced && evidence != "":
+		verdict.Detail = "the operation produced an artifact and then reported a problem, and its output names an endpoint it could not reach: " + evidence + ". A capture that reached only some of the endpoints supplied is not a complete capture, and its exit status is the same as an outright failure's, so it is treated as incomplete"
+
+	case artifactProduced:
+		verdict.Detail = "the operation produced an artifact and then reported a problem. Its exit status means either that the capture failed or that it succeeded against only some of the endpoints supplied, and no exit status distinguishes the two, so it is treated as incomplete. The server's own logs say which"
+
+	case evidence != "":
+		verdict.Detail = "the operation produced no artifact and its output names an endpoint it could not reach: " + evidence
+
+	default:
+		verdict.Detail = "the operation produced no artifact"
+	}
+
+	return verdict
+}
+
+// firstOutputLine is what the command said, for the one verdict that has no
+// endpoint to name: a success that produced nothing should not be reported as a
+// bare assertion when the command's own first line is there to quote.
+func firstOutputLine(output string) string {
+	lines := nonEmptyLines(output)
+	if len(lines) == 0 {
+		return ""
+	}
+
+	return lines[0]
+}
+
+// ---------------------------------------------------------------------------
+// The external capture itself
+// ---------------------------------------------------------------------------
+
+// prepareExternalCaptureDirs clears and creates the capture and staging
+// directories in the transient workload's scratch volume.
+func (iops *InfrahubOps) prepareExternalCaptureDirs(capture *externalCapture) error {
+	command := []string{"sh", "-c", fmt.Sprintf("rm -rf %s %s && mkdir -p %s %s",
+		externalNeo4jCaptureDir, externalNeo4jStagingDir, externalNeo4jCaptureDir, externalNeo4jStagingDir)}
+
+	if _, err := iops.execBoundedAgainst(
+		externalDBControlBound(iops.config), "preparing the capture directory",
+		transientWorkloadTarget(serviceNeo4j), serviceNeo4j, command, capture.execOptions(nil),
+	); err != nil {
+		return fmt.Errorf("failed to prepare the external Neo4j capture directory for %s: %w", capture.Endpoint.endpointTarget(), err)
+	}
+
+	return nil
+}
+
+// cleanupExternalCaptureDirs removes what the capture staged. It is best-effort:
+// the workload is about to be given back and its scratch volume goes with it, so
+// a failure here costs nothing (FR-011, FR-023).
+func (iops *InfrahubOps) cleanupExternalCaptureDirs(capture *externalCapture) {
+	iops.removeTransientScratch(serviceNeo4j, "the capture directory", capture.execOptions(nil), externalNeo4jCaptureDir, externalNeo4jStagingDir)
+}
+
+// externalCaptureProducedArtifact asks the capture directory whether the
+// artifact is there, which is the observation that separates a partial capture
+// from a failed one.
+//
+// A listing that cannot be read reports "no artifact", which is the safe
+// direction: it makes the run fail as an incomplete capture rather than record a
+// completeness it did not observe.
+func (iops *InfrahubOps) externalCaptureProducedArtifact(capture *externalCapture) bool {
+	command := []string{"sh", "-c", "ls -1 " + externalNeo4jCaptureDir + " 2>/dev/null"}
+
+	output, err := iops.execBoundedAgainst(
+		externalDBControlBound(iops.config), "listing the capture directory",
+		transientWorkloadTarget(serviceNeo4j), serviceNeo4j, command, capture.execOptions(nil),
+	)
+	if err != nil {
+		logrus.Warnf("Could not list the external Neo4j capture directory, so the capture is treated as having produced nothing: %v", err)
+
+		return false
+	}
+
+	return neo4jArtifactProduced(capture.Endpoint.Database, output)
+}
+
+// runExternalNeo4jCapture runs the online backup against the resolved members
+// and fails the run for anything short of a complete capture (FR-012).
+//
+// It is bounded by the operator's --external-db-timeout rather than run through
+// the unbounded Exec (FR-025). The internal path is deliberately left unbounded:
+// it is the path every existing deployment takes, and a bound that has never
+// been there is a behaviour change to a working flow (FR-015).
+func (iops *InfrahubOps) runExternalNeo4jCapture(capture *externalCapture, backupMetadata string, uncompressed bool) error {
+	command := neo4jCaptureCommand(externalNeo4jCaptureRequest(capture, backupMetadata, uncompressed))
+
+	output, runErr := iops.execBoundedAgainst(
+		capture.Bound, "the online backup", capture.Endpoint.endpointTarget(), serviceNeo4j, command, capture.execOptions(nil),
+	)
+
+	verdict := classifyNeo4jCapture(runErr, output, iops.externalCaptureProducedArtifact(capture), capture.captureTargets())
+	if verdict.Complete {
+		return nil
+	}
+
+	// Recorded before the error is returned, so that FR-012's other half — no
+	// artefact survives this run — is decided from the verdict itself rather
+	// than from an error value a caller between here and the archive could
+	// replace. See InfrahubOps.discardIncompleteCapture.
+	iops.recordIncompleteCapture(serviceNeo4j, verdict.Detail)
+
+	if runErr != nil {
+		return fmt.Errorf("the Neo4j capture from %s is incomplete and will not be kept: %s: %w", capture.Endpoint.endpointTarget(), verdict.Detail, runErr)
+	}
+
+	return fmt.Errorf("the Neo4j capture from %s is incomplete and will not be kept: %s", capture.Endpoint.endpointTarget(), verdict.Detail)
+}
+
+// reportExternalCapture announces the capture about to run: the members it will
+// try, in order, and the role each was observed in at this moment (FR-005).
+//
+// It states no member as the one that will serve the capture, because --from
+// tries its list in order and reports no such thing. What the operator gets
+// instead is enough to see that a follower could serve it, which is the fact
+// that bears on the recovery point.
+func (capture *externalCapture) reportExternalCapture(action string) {
+	targets := capture.captureTargets()
+
+	logrus.Infof("%s the external Neo4j database (Enterprise Edition online backup, endpoints tried in order: %s; roles observed now: %s; the member that serves the capture is not reported by the backup command)",
+		action, renderHostPorts(targets), describeCaptureRoles(targets, capture.observedRoles()))
+}
+
+// backupNeo4jEnterpriseExternal is the directory-copy capture from a database
+// outside the deployment. It is the internal path's shape with the container
+// replaced by the transient workload, which is why the destination and the
+// artifact layout are unchanged.
+func (iops *InfrahubOps) backupNeo4jEnterpriseExternal(backupDir, backupMetadata string) error {
+	capture, err := iops.openExternalCapture(serviceNeo4j)
+	if err != nil {
+		return err
+	}
+	defer capture.Release()
+
+	capture.reportExternalCapture("Backing up")
+
+	if err := iops.prepareExternalCaptureDirs(capture); err != nil {
+		return err
+	}
+	defer iops.cleanupExternalCaptureDirs(capture)
+
+	if err := iops.runExternalNeo4jCapture(capture, backupMetadata, false); err != nil {
+		return err
+	}
+
+	if err := iops.copyFromTransientWorkload(capture.Pod, externalNeo4jCaptureDir, filepath.Join(backupDir, "database")); err != nil {
+		return fmt.Errorf("failed to copy the external database backup: %w", err)
+	}
+
+	logrus.Info("Neo4j backup completed")
+
+	return nil
+}
+
+// streamNeo4jEnterpriseExternal is the streaming capture from a database outside
+// the deployment.
+//
+// The tar is taken with the same -C and the same member name the internal path
+// uses, so the archive is byte-compatible with an internal one and restores by
+// the same code (FR-015). The transient workload is given back when the stream
+// is closed, and on every failure path before that (FR-011).
+func (iops *InfrahubOps) streamNeo4jEnterpriseExternal(backupMetadata string) (io.ReadCloser, error) {
+	capture, err := iops.openExternalCapture(serviceNeo4j)
+	if err != nil {
+		return nil, err
+	}
+
+	capture.reportExternalCapture("Streaming")
+
+	if err := iops.prepareExternalCaptureDirs(capture); err != nil {
+		capture.Release()
+
+		return nil, err
+	}
+
+	// Once the directories exist, giving the workload back means clearing them
+	// first, on every path out of here — including the stream's own close.
+	teardown := func() {
+		iops.cleanupExternalCaptureDirs(capture)
+		capture.Release()
+	}
+
+	if err := iops.runExternalNeo4jCapture(capture, backupMetadata, true); err != nil {
+		teardown()
+
+		return nil, err
+	}
+
+	stdout, wait, err := iops.ExecStreamPipe(serviceNeo4j,
+		[]string{"tar", "cf", "-", "-C", externalNeo4jCaptureParent, externalNeo4jCaptureName}, capture.execOptions(nil))
+	if err != nil {
+		teardown()
+
+		return nil, fmt.Errorf("failed to start the external neo4j enterprise stream: %w", err)
+	}
+
+	return &execReadCloser{reader: stdout, wait: wait, idleTimeout: defaultStreamIdleTimeout, cleanup: teardown}, nil
 }

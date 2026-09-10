@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdh"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -73,6 +74,156 @@ func (iops *InfrahubOps) applyCreateRetention(s3UploadedThisRun bool) error {
 	return err
 }
 
+// ---------------------------------------------------------------------------
+// An incomplete capture is not retained (FR-012)
+// ---------------------------------------------------------------------------
+
+// recordIncompleteCapture remembers that one database's capture was not a
+// complete one, with the account the operator will read.
+//
+// The capture path fails the run at the same moment. This record exists because
+// failing is only half of FR-012: the other half is that no artefact survives
+// the run, and that has to be decided from the verdict itself rather than from
+// an error value, which any layer between the capture and the archive could
+// wrap, replace or — on a path that only logs — drop.
+func (iops *InfrahubOps) recordIncompleteCapture(service, detail string) {
+	if iops.incompleteCaptures == nil {
+		iops.incompleteCaptures = map[string]string{}
+	}
+
+	iops.incompleteCaptures[service] = detail
+}
+
+// capturesComplete reports whether every capture this run made reported a
+// complete capture. It is true for a run that captured nothing external, which
+// is every internal deployment.
+func (iops *InfrahubOps) capturesComplete() bool {
+	return len(iops.incompleteCaptures) == 0
+}
+
+// incompleteCaptureDetail renders why the run's captures were not complete, in a
+// stable order so two runs against the same fault say the same thing.
+func (iops *InfrahubOps) incompleteCaptureDetail() string {
+	services := make([]string, 0, len(iops.incompleteCaptures))
+	for service := range iops.incompleteCaptures {
+		services = append(services, service)
+	}
+	slices.Sort(services)
+
+	details := make([]string, 0, len(services))
+	for _, service := range services {
+		details = append(details, service+": "+iops.incompleteCaptures[service])
+	}
+
+	return strings.Join(details, "; ")
+}
+
+// artifactReach is where this run's archive actually landed. It is the input to
+// FR-012's removal, which has to cover every location the artefact reached
+// rather than only the last one written to: with --s3-upload the object is in
+// the bucket before retention or a restore-point listing would ever consider it,
+// and one left there is one a later run can select.
+type artifactReach struct {
+	// localNames are the names the archive has had in the backup directory, in
+	// the order it took them. There is more than one because encrypting renames
+	// it, and removing the plaintext afterwards is a warning rather than a
+	// failure — so a run can legitimately leave both behind, and both are
+	// archives retention would count.
+	//
+	// Names are not cleared when the run removes a file itself: deleting
+	// something already gone is the outcome the deletion asked for, and clearing
+	// them would make the removal depend on which flags the run was given rather
+	// than on where the artefact went.
+	localNames []string
+
+	// s3Name is the name that reached the bucket, empty until the upload
+	// returned. Configuration alone never puts an object in a bucket, so it
+	// never authorises a deletion from one — the same rule
+	// retentionLegsForCreate follows for pruning.
+	s3Name string
+}
+
+// reachedLocally records a name the archive now has in the backup directory.
+func (r *artifactReach) reachedLocally(name string) {
+	if name == "" || slices.Contains(r.localNames, name) {
+		return
+	}
+
+	r.localNames = append(r.localNames, name)
+}
+
+// removeArtifactFrom deletes one named archive from one location, through the
+// same storageLocation deletion retention uses: the name is re-checked against
+// the archive pattern before anything is removed, and an archive already gone is
+// not a failure.
+func removeArtifactFrom(ctx context.Context, leg storageLocation, name string) error {
+	ref, ok := parseBackupName(name)
+	if !ok {
+		// Delete would refuse this name anyway. Saying so here is the difference
+		// between an operator knowing an artefact may still be out there and
+		// believing the run cleaned up after itself.
+		return fmt.Errorf("cannot remove %q from %s: it is not a backup archive name", name, leg.Name())
+	}
+
+	if err := leg.Delete(ctx, ref); err != nil {
+		return fmt.Errorf("failed to remove the incomplete backup from %s: %w", leg.Name(), err)
+	}
+
+	logrus.Infof("Removed the incomplete backup %s from %s", name, leg.Name())
+
+	return nil
+}
+
+// discardIncompleteCapture is the rest of FR-012: a capture that did not capture
+// everything it was asked for must not be retained, so the run fails and the
+// artefact is removed from every location it reached.
+//
+// Removal rather than a metadata flag is what keeps retention out of this.
+// Retention selects from artefact names and recency ranks and never reads
+// metadata, so an artefact merely *marked* incomplete would still occupy a keep
+// slot and evict a good backup — and a previously released tool, which ignores
+// fields it has never heard of, would have offered it as a restore point. An
+// artefact that does not exist changes nothing either of them decides.
+//
+// Removal is not a prune, so unlike retentionLegsForCreate this consults no
+// retention policy: a deployment that never configured retention is not thereby
+// asking to keep an unusable backup.
+//
+// It returns the failure the run reports. Every location is attempted before it
+// returns, and one that could not be cleared is named rather than swallowed —
+// the artefact is then still out there, and BackupMetadata.CaptureComplete is
+// what remains to identify it.
+func (iops *InfrahubOps) discardIncompleteCapture(reach artifactReach) error {
+	failure := fmt.Errorf("the backup is incomplete and will not be kept (%s)", iops.incompleteCaptureDetail())
+
+	ctx := context.Background()
+	var problems []error
+
+	if len(reach.localNames) > 0 {
+		local := newLocalLocation(iops.config.BackupDir)
+		for _, name := range reach.localNames {
+			if err := removeArtifactFrom(ctx, local, name); err != nil {
+				problems = append(problems, err)
+			}
+		}
+	}
+
+	if reach.s3Name != "" {
+		client, err := NewS3Client(iops.config.S3)
+		if err != nil {
+			problems = append(problems, fmt.Errorf("failed to create S3 client to remove the incomplete backup: %w", err))
+		} else if err := removeArtifactFrom(ctx, newS3Location(client), reach.s3Name); err != nil {
+			problems = append(problems, err)
+		}
+	}
+
+	if len(problems) == 0 {
+		return failure
+	}
+
+	return fmt.Errorf("%w; it may still be present: %w", failure, errors.Join(problems...))
+}
+
 // loadEncryptionKey loads the public key for encryption.
 // If keyPath is empty, returns the default hardcoded key.
 func loadEncryptionKey(keyPath string) (*ecdh.PublicKey, error) {
@@ -100,9 +251,27 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 		return err
 	}
 
-	// Detect Neo4j edition
+	// The run's single exit path for every transient workload it creates
+	// (FR-011). Deferred before the gate below rather than after it, because the
+	// gate is what creates the first one — a probe that answered and then hit a
+	// version refusal has already put a pod in the namespace.
+	defer iops.releaseTransientWorkloads()
+
+	// Where each database lives, before the edition probe reads a missing
+	// container as Community and before anything is stopped for it.
+	if err := iops.prepareDatabaseCapture(!excludeTaskManager); err != nil {
+		return err
+	}
+
+	// Detect Neo4j edition. A probe that did not answer stops the run here,
+	// before the abort window and before anything is stopped: the edition
+	// decides whether Neo4j has to be taken offline, and a failed probe is not
+	// evidence that it does.
 	editionInfo := iops.detectNeo4jEditionInfo("backup")
-	if editionInfo.IsCommunity {
+	if err := editionInfo.requireDeterminedEdition(); err != nil {
+		return err
+	}
+	if editionInfo.RequiresOfflineCapture() {
 		logrus.Warn("Neo4j Community Edition detected; Infrahub services will be stopped and restarted before the backup begins.")
 		logrus.Warn("Waiting 10 seconds to allow the user to abort... CTRL+C to cancel.")
 		time.Sleep(10 * time.Second)
@@ -129,14 +298,13 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 	}
 
 	var servicesToRestart []string
-	if editionInfo.IsCommunity {
+	if editionInfo.RequiresOfflineCapture() {
 		stoppedServices, stopErr := iops.stopAppContainers()
 		if stopErr != nil {
-			if len(stoppedServices) > 0 {
-				if startErr := iops.startAppContainers(stoppedServices); startErr != nil {
-					logrus.Warnf("Failed to restart services after stop error: %v", startErr)
-				}
-			}
+			// Whatever was taken down before the failure goes back up, and
+			// what could not be is named (FR-013).
+			iops.returnAppContainersToScale(stoppedServices)
+
 			return fmt.Errorf("failed to stop services for Neo4j Community backup: %w", stopErr)
 		}
 		servicesToRestart = append([]string(nil), stoppedServices...)
@@ -151,10 +319,50 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 				}
 			}
 		}()
+
+		// Asked for is not stopped, and the capture below reads the store
+		// offline. This is the same confirmation the restore paths make before
+		// their own destructive step, and it is needed here for the reason
+		// stopAppContainers states: `kubectl scale` returns as soon as the
+		// replica count is recorded, so an infrahub-server still holding a Bolt
+		// session is a writer attached to the store `neo4j-admin dump` is about
+		// to read — a torn dump reported as a successful backup.
+		//
+		// After the restart defer, so a deployment that will not quiesce is
+		// returned to the scale it was found at rather than left down.
+		if err := iops.confirmAppContainersQuiesced(servicesToRestart); err != nil {
+			return err
+		}
 	}
 
 	backupFilename := iops.generateBackupFilename()
 	backupPath := filepath.Join(iops.config.BackupDir, backupFilename)
+
+	// Where the archive has got to, updated as it gets there, so FR-012's
+	// removal covers every location rather than the one the run last touched.
+	var reach artifactReach
+
+	// FR-012's backstop, registered before the captures run so that no path out
+	// of them can skip it: if a capture that was not complete somehow reached an
+	// archive, the archive does not survive the run. It is written as an
+	// invariant rather than as a branch of the capture's own error handling,
+	// because the verdict — not an error value some layer between could wrap,
+	// replace or drop — is what decides whether an artefact may be kept.
+	//
+	// On the ordinary path the gate after the captures has already handled it
+	// and cleared reach, so this does nothing.
+	defer func() {
+		if iops.capturesComplete() || (len(reach.localNames) == 0 && reach.s3Name == "") {
+			return
+		}
+
+		if retErr != nil {
+			logrus.Errorf("The backup failed: %v", retErr)
+		}
+
+		retErr = iops.discardIncompleteCapture(reach)
+	}()
+
 	workDir, err := os.MkdirTemp("", "infrahub_backup_*")
 	if err != nil {
 		return fmt.Errorf("failed to create temp directory: %w", err)
@@ -200,12 +408,33 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 		logrus.Info("Skipping task manager database backup as requested")
 	}
 
+	// FR-012's gate. This is the last moment the completeness verdict can
+	// change — only the capture paths above record one — and nothing downstream
+	// may advance an artefact this run must not keep.
+	//
+	// It matters that the check is here rather than only in the deferred
+	// backstop. Retention ranks by recency, so an archive written and then
+	// removed would still have been the location's newest while the prune ran,
+	// and would have pushed the real newest down a rank: exactly the eviction
+	// FR-012 exists to prevent.
+	if !iops.capturesComplete() {
+		discardErr := iops.discardIncompleteCapture(reach)
+		reach = artifactReach{}
+
+		return discardErr
+	}
+
 	// Calculate checksums for backup files
 	checksums, err := calculateBackupChecksums(backupDir, excludeTaskManager)
 	if err != nil {
 		return err
 	}
 	metadata.Checksums = checksums
+
+	// What the captures reported, read now that they have run rather than when
+	// the metadata was built above — which was before backupDatabase (FR-012,
+	// see applyCaptureCompleteness).
+	iops.applyCaptureCompleteness(metadata)
 
 	metadataBytes, err := json.MarshalIndent(metadata, "", "    ")
 	if err != nil {
@@ -224,6 +453,8 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 	if err := createTarball(backupPath, workDir, "backup/"); err != nil {
 		return fmt.Errorf("failed to create archive: %w", err)
 	}
+
+	reach.reachedLocally(backupFilename)
 
 	// Encrypt backup if requested
 	if encrypt || encryptKey != "" {
@@ -244,6 +475,7 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 
 		backupPath = encryptedPath
 		backupFilename = filepath.Base(encryptedPath)
+		reach.reachedLocally(backupFilename)
 	}
 
 	// Log backup creation with structured fields
@@ -263,6 +495,7 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 		if err != nil {
 			return fmt.Errorf("backup created locally but S3 upload failed: %w", err)
 		}
+		reach.s3Name = backupFilename
 		logrus.Infof("Backup uploaded to: %s", s3URI)
 
 		if !s3KeepLocal {
@@ -383,6 +616,22 @@ func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager boo
 		return err
 	}
 
+	// Where each database lives, before the edition is misdiagnosed, before
+	// transient data is wiped and before anything is scaled to zero. The
+	// discovery this gate's successor needs reads `env` out of infrahub-server
+	// and task-manager, so it cannot run any later than this: stopAppContainers
+	// has scaled both to zero by then.
+	//
+	// It is also where a database outside the deployment gets the workload the
+	// restore runs in, so the workloads this run created are given back on
+	// every exit path from here on (FR-011). An all-internal deployment created
+	// none and the call does nothing.
+	defer iops.releaseTransientWorkloads()
+
+	if err := iops.prepareDatabaseRestore(!excludeTaskManager); err != nil {
+		return err
+	}
+
 	workDir, err := os.MkdirTemp("", "infrahub_restore_*")
 	if err != nil {
 		return fmt.Errorf("failed to create temp directory: %w", err)
@@ -425,6 +674,15 @@ func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager boo
 		"neo4j_edition":    metadata.Neo4jEdition,
 		"components":       metadata.Components,
 	}).Info("Backup metadata loaded")
+
+	// Before the checksums, the edition resolution and everything destructive:
+	// an artefact whose own capture reported itself incomplete is not a restore
+	// point (FR-012). It is also the refusal `--latest` needs, since selection
+	// there has only the archive's name to go on and would pick exactly this
+	// artefact for being the newest.
+	if err := metadata.refuseIncompleteCapture(backupFile); err != nil {
+		return err
+	}
 
 	// Detect Neo4j edition for restore
 	detectedEdition, detectionErr := iops.detectNeo4jEdition()
@@ -469,11 +727,40 @@ func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager boo
 		logrus.Info("Task manager database dump detected; will restore")
 	}
 
+	// The last check that can be made with the deployment still up and the
+	// databases still holding their data: for a database outside the
+	// deployment, the server fetches the artifact itself, so the artifact is
+	// staged where it can be read from, and a run that cannot establish that
+	// stops here (FR-007). It does nothing for an in-deployment database.
+	if err := iops.preflightExternalNeo4jRestore(workDir); err != nil {
+		return err
+	}
+
 	// Wipe transient data
 	iops.wipeTransientData()
 
 	// Stop application containers
-	if _, err := iops.stopAppContainers(); err != nil {
+	stopped, err := iops.stopAppContainers()
+	if err != nil {
+		// Whatever was taken down before the failure goes back up: the run is
+		// over, and leaving a partially quiesced deployment behind is the
+		// outage FR-013 exists to prevent.
+		iops.returnAppContainersToScale(stopped)
+
+		return err
+	}
+
+	// Every exit path from here to the ordinary restart below is a failure, and
+	// each of them returns the deployment to the scale it was found at (FR-013).
+	// The success path hands the list over by clearing it, so nothing is started
+	// twice.
+	defer func() {
+		iops.returnAppContainersToScale(stopped)
+	}()
+
+	// Asked for is not stopped, and the next steps overwrite databases
+	// (FR-026).
+	if err := iops.confirmAppContainersQuiesced(stopped); err != nil {
 		return err
 	}
 
@@ -509,6 +796,12 @@ func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager boo
 	if err := iops.StartServices("infrahub-server", "task-worker"); err != nil {
 		return fmt.Errorf("failed to restart infrahub services: %w", err)
 	}
+
+	// The deployment is back, so the deferred failure-path restart has nothing
+	// left to do. What it would still be useful for is saying whether the
+	// services actually came back up, which is what this reports (FR-026).
+	iops.reportAppContainersRunning(stopped)
+	stopped = nil
 
 	logrus.Info("Restore completed successfully")
 	logrus.Info("Infrahub should be available shortly")
