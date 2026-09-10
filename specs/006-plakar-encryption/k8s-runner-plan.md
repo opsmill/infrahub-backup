@@ -268,3 +268,55 @@ crashing the session before collection. A one-line `try/except` upstream in
 `infrahub_testcontainers/host.py` would fix it for every M-series machine. Until then, verify the
 layer that matters by deploying the chart with helm and running `infrahub-backup --backend plakar`
 against it by hand, as was done against the live Docker instance.
+
+---
+
+## Outcome — implemented 2026-09-10
+
+Both T062 and T071 are closed by one change. The shape is the one the "T062 and T071 are one fix"
+section above arrived at, not either of the two routes the Options section listed: there is **no
+second transport and no pod-based runner**.
+
+**Neo4j runs in place on both backends** (`src/internal/app/plakar_neo4j.go`).
+
+- Backup: clear a stage directory in the database container, ask
+  `importer.NewStagedImporter(...).DumpArgs(remoteStage)` for the argv, `Exec` it there, `CopyFrom`
+  the artifact to a local stage that must not already exist, then build the snapshot in this
+  process from the staged importer.
+- Restore: `exporter.NewStagedExporter` stages the snapshot's records locally, `RestoreArgs` reports
+  the argv, `CopyTo` moves the stage in, and `Exec` runs it. The migration travels the same way,
+  through a new `Neo4jMigration.args()` so the in-place and in-runner migrations cannot diverge.
+- The online location omits the host, so the integration emits no `--from` and neo4j-admin uses
+  loopback. That is T071.
+
+**The offline window is a suspend, not a container stop.** `StopServices("database")` is replaced by
+the watchdog sequence the tarball backend already used. This is the load-bearing part: a stopped
+container cannot be exec'd into, and needing a sibling that shares its volume is precisely what made
+the path Docker-only.
+
+One thing this document did not anticipate, found by running the harness: resuming the process lets
+the shutdown it was frozen mid-way through **finish**, so the container's PID 1 exits and the
+container stops. A real deployment's restart policy brings it back, and the harness's compose files
+have none — so `waitForNeo4jBack` now watches Bolt and the service together and starts the database
+itself if nothing else does, rather than warning after a 180 s wait for a restart that was never
+coming.
+
+**PostgreSQL keeps the runner on Docker and gets a port-forward on Kubernetes**
+(`src/internal/app/plakar_postgres.go`, `environment_kubernetes_portforward.go`), running the real
+upstream connector in this process. Its emission is therefore identical by construction, with no
+upstream change — which matters, because that repository is not ours.
+
+The cost, and it is a real one: the Kubernetes route needs the **PostgreSQL client binaries on the
+machine running the tool**, no older than the server. The Docker runner borrows the postgres image,
+so versions match by construction there. `requirePostgresClient` reports a missing client up front
+with an actionable message instead of letting it surface as an exec failure with the deployment
+already quiesced, and the `e2e-tests-k8s` CI job installs `postgresql-client`.
+
+### Verification
+
+- `go vet ./src/...` clean; `go test ./src/...` green, including the two new regression tests that
+  assert the database container is never stopped, and `TestNeo4jOnlineLocationOmitsTheHost`, which
+  asserts against the integration's own parser that no `--from` reaches the argv.
+- `nix build .#default` green on the regenerated `vendorHash` (integration v0.4.0).
+- `test/e2e/docker-compose.enterprise.yml` no longer publishes the backup listener, so the
+  Enterprise leg proves the loopback fix rather than hiding its absence.

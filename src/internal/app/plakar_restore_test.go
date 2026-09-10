@@ -33,6 +33,30 @@ func (b *lifecycleBackend) Exec(service string, command []string, opts *ExecOpti
 		b.calls = append(b.calls, "exec-cypher:"+command[len(command)-1])
 		return "", nil
 	}
+
+	// The Neo4j offline window is a suspend-and-resume inside the container now
+	// rather than a container stop, so the fake has to answer the probes that
+	// window is driven by — otherwise waitForProcessStopped polls a container
+	// that never reports a stopped process and the test hangs out its timeout.
+	joined := strings.Join(command, " ")
+	switch {
+	case command[0] == "cat" && command[1] == neo4jPIDFile:
+		b.calls = append(b.calls, "exec:read-pid")
+		return "42\n", nil
+	case command[0] == "uname":
+		return "x86_64\n", nil
+	case command[0] == "whoami":
+		return "neo4j\n", nil
+	case strings.Contains(joined, "/proc/42/status"):
+		return "T (stopped)\n", nil
+	case command[0] == "kill" && len(command) > 1 && command[1] == "-CONT":
+		b.calls = append(b.calls, "resume:neo4j")
+		return "", nil
+	case command[0] == "kill":
+		b.calls = append(b.calls, "suspend:neo4j")
+		return "", nil
+	}
+
 	b.calls = append(b.calls, "exec:"+service)
 	return "", nil
 }

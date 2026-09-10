@@ -290,12 +290,32 @@ The codebase uses explicit error wrapping with `fmt.Errorf` for context. All com
 
 ### Neo4j integration — lives in its own repository
 
-The Neo4j integration is **not** in this repo. It lives at **[opsmill/plakar-integration-neo4j](https://github.com/opsmill/plakar-integration-neo4j)** (module `github.com/opsmill/plakar-integration-neo4j`; the pinned version is whatever `go.mod` says — currently `v0.3.0`) and is consumed here as an ordinary tagged dependency — no `replace` directive, no vendored copy. The former `contrib/integration-neo4j/` tree has been deleted.
+The Neo4j integration is **not** in this repo. It lives at **[opsmill/plakar-integration-neo4j](https://github.com/opsmill/plakar-integration-neo4j)** (module `github.com/opsmill/plakar-integration-neo4j`; the pinned version is whatever `go.mod` says — currently `v0.4.0`) and is consumed here as an ordinary tagged dependency — no `replace` directive, no vendored copy. The former `contrib/integration-neo4j/` tree has been deleted.
 
 - **Fixes to the connector belong in that repository**, released as a new tag, then picked up here with a version bump plus `scripts/update-vendor-hash.sh`. Do not vendor it back or add a `replace` to a local checkout in anything you merge — a temporary `replace` is fine while developing, but must be gone before merge.
 - **Consumption is in-process**: `src/internal/app/connectors.go` blank-imports its `importer`/`exporter` packages, whose `init()` registers the `neo4j://` and `neo4j+offline://` schemes. The integration's SDK plugin binaries exist for external `plakar pkg add` users and play no part in this repo's build. Its `go-kloset-sdk` and `testcontainers-go` dependencies serve only those plugins and its own tests, and are verified absent from this repo's build closure.
 - **Engine coupling**: do not adopt a new kloset version here until a compatible integration release exists — Go's minimal-version selection compiles the integration against whichever kloset wins, and it can no longer be patched in place.
 - Plakar have advised that community integrations are **not** upstreamed into `PlakarKorp/integrations`; distribution is via a recipe in `PlakarKorp/hub`. Statements to the contrary in `specs/003-upstream-plakar-integrations/` are superseded — see `specs/003-upstream-plakar-integrations/SUPERSEDED-BY-006.md`.
+
+### Where each database tool runs
+
+The two database components are captured differently, and the difference is not incidental:
+
+- **Neo4j** — `neo4j-admin` manipulates files in the data directory, so it runs **inside the
+  database container or pod**, on Docker Compose and Kubernetes alike (`plakar_neo4j.go`). The
+  integration's staged importer/exporter own the snapshot layout and report the argv
+  (`DumpArgs`/`RestoreArgs`); this repo owns only where it runs. The offline window is a
+  watchdog-assisted `SIGSTOP` of the Neo4j process, **not** a container stop — a stopped container
+  cannot be exec'd into, which is exactly what once forced a sibling runner and made the path
+  Docker-only.
+- **PostgreSQL (task manager)** — `pg_dump` speaks the wire protocol, so it needs reachability
+  rather than co-location: the co-located runner on Docker Compose (`runner.go`), and the upstream
+  connector in-process over a `kubectl port-forward` on Kubernetes (`plakar_postgres.go`). The
+  Kubernetes route therefore needs the **PostgreSQL client binaries on the machine running the
+  tool**, at a version no older than the server; `requirePostgresClient` checks this up front.
+
+Both paths emit the upstream connectors' own layout, so a backup taken on one backend restores on
+the other. Do not add a second emission.
 
 Two pre-existing gotchas worth knowing, neither introduced by the extraction:
 

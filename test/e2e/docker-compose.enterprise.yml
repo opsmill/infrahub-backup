@@ -1,7 +1,12 @@
 # Throwaway Infrahub-shaped stack, Neo4j ENTERPRISE — exercises the ONLINE
-# neo4j:// path (neo4j-admin database backup --from=database:6362), which needs
-# the backup service enabled and listening on all interfaces so the co-located
-# runner container can reach it by service name.
+# neo4j:// path (neo4j-admin database backup).
+#
+# The backup service is enabled but its listen address is deliberately LEFT AT THE
+# DEFAULT of 127.0.0.1. neo4j-admin runs inside this container, so loopback is all
+# it needs — and a stock deployment publishes nothing. An earlier revision of this
+# file set 0.0.0.0:6362 because the command ran in a sibling container, and that is
+# exactly what hid the breakage: every real Enterprise deployment failed to back up
+# until it published the listener, and the harness could not see it.
 services:
   database:
     image: neo4j:2025.10.1-enterprise
@@ -9,7 +14,6 @@ services:
       NEO4J_AUTH: neo4j/e2epassword
       NEO4J_ACCEPT_LICENSE_AGREEMENT: "yes"
       NEO4J_server_backup_enabled: "true"
-      NEO4J_server_backup_listen__address: "0.0.0.0:6362"
       NEO4J_server_memory_heap_max__size: 512m
       NEO4J_server_memory_pagecache_size: 256m
     volumes:

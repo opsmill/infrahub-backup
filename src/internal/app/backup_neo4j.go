@@ -540,20 +540,67 @@ func (iops *InfrahubOps) waitForNeo4jBolt(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	logrus.Info("Waiting for Neo4j to accept connections...")
 
-	for attempt := 0; ; attempt++ {
-		if _, err := iops.Exec("database", []string{
-			"cypher-shell",
-			"-u", iops.config.Neo4jUsername,
-			"-p" + iops.config.Neo4jPassword,
-			"--non-interactive",
-			"RETURN 1;",
-		}, nil); err == nil {
+	for {
+		if iops.neo4jAnswersBolt() {
 			logrus.Info("Neo4j is accepting connections")
 			return nil
 		}
 
 		if time.Now().After(deadline) {
 			return fmt.Errorf("neo4j did not accept connections within %s of being restarted", timeout)
+		}
+		time.Sleep(neo4jBoltPollInterval)
+	}
+}
+
+// neo4jAnswersBolt reports whether the database is serving queries.
+func (iops *InfrahubOps) neo4jAnswersBolt() bool {
+	_, err := iops.Exec("database", []string{
+		"cypher-shell",
+		"-u", iops.config.Neo4jUsername,
+		"-p" + iops.config.Neo4jPassword,
+		"--non-interactive",
+		"RETURN 1;",
+	}, nil)
+	return err == nil
+}
+
+// waitForNeo4jBack waits for the database to serve queries again after a
+// suspended offline window, starting it if nothing else does.
+//
+// Resuming the process lets the shutdown it was frozen mid-way through finish,
+// so the container's PID 1 exits and the container stops. A deployment's restart
+// policy normally brings it straight back — Compose's `restart:` and a pod's
+// `restartPolicy` both do — but a deployment configured without one would
+// otherwise be left with its database down and only a warning to show for it.
+// Waiting the whole timeout out first would be worse still: nothing is coming.
+//
+// So the two conditions are watched together. Bolt answering is the success
+// signal, because it is the only one that means the database is actually usable;
+// the service being observed stopped is the signal to start it, once.
+func (iops *InfrahubOps) waitForNeo4jBack(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	logrus.Info("Waiting for Neo4j to accept connections...")
+	started := false
+
+	for {
+		if iops.neo4jAnswersBolt() {
+			logrus.Info("Neo4j is accepting connections")
+			return nil
+		}
+
+		if !started {
+			if running, err := iops.IsServiceRunning("database"); err == nil && !running {
+				logrus.Info("The database did not come back on its own; starting it...")
+				if err := iops.StartServices("database"); err != nil {
+					return fmt.Errorf("failed to start the database after the offline window: %w", err)
+				}
+				started = true
+			}
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("neo4j did not accept connections within %s of the offline window ending", timeout)
 		}
 		time.Sleep(neo4jBoltPollInterval)
 	}

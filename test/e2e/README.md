@@ -11,8 +11,9 @@ no compose file in the repo, so the recipe was not reproducible.
 ```bash
 make build                                    # produces bin/infrahub-backup
 
-# The runner container executes the tool binary, so on macOS/Windows also build
-# a Linux one (the script picks it up automatically):
+# The task-manager component runs in a runner container executing the tool binary,
+# so on macOS/Windows also build a Linux one (the script picks it up automatically).
+# Neo4j does not need it: neo4j-admin runs inside the database container itself.
 GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
   go build -o bin/infrahub-backup-linux ./src/cmd/infrahub-backup
 
@@ -100,6 +101,13 @@ a random 1024-byte marker, plus a **control** asserting a plaintext repository
 | `enterprise` | Neo4j online backup/restore (`neo4j://`) + Postgres |
 | `ENCRYPT=1 community` | Encrypted repository end to end, plus the negative case that listing without the passphrase fails |
 
-Not covered: Kubernetes (the K8s runner is still pending), `s3://` repositories
-(encryption lives in the repository CONFIG and is storage-agnostic, so `fs://`
-covers the encryption path), and restore-to-a-different-Neo4j-version.
+Not covered: Kubernetes, `s3://` repositories (encryption lives in the repository
+CONFIG and is storage-agnostic, so `fs://` covers the encryption path), and
+restore-to-a-different-Neo4j-version.
+
+Kubernetes is supported by the tool — `neo4j-admin` runs inside the database pod
+exactly as it does inside the container here, and the task-manager component runs
+the upstream connector over a `kubectl port-forward` — but it is covered by
+`tests/e2e/test_k8s_plakar.py` against a cluster rather than by this harness. What
+this harness *does* cover for it is the Neo4j half: the same in-place code path runs
+on both backends, so a break in it shows up here first.

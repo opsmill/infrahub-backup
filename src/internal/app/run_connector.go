@@ -84,35 +84,14 @@ func RunConnectorCommand() *cobra.Command {
 		"database to migrate (required with --migrate-format)")
 	restoreCreds.addFlags(restoreCmd)
 
-	// launch: exercise the co-located runner launcher through the tool (testing the
-	// orchestration path; the create flow will call LaunchComposeBackup directly).
-	var launchOpts, launchTags []string
-	var launchVolumes bool
-	var launchCreds credentialsInput
-	launchCmd := &cobra.Command{
-		Use:          "launch <project> <db-service> <repo> <source-uri>",
-		Args:         cobra.ExactArgs(4),
-		Hidden:       true,
-		SilenceUsage: true,
-		RunE: func(_ *cobra.Command, args []string) error {
-			creds, err := launchCreds.read()
-			if err != nil {
-				return err
-			}
-			snap, err := LaunchComposeBackup(args[0], args[1], args[2], args[3], creds, parseKV(launchOpts), launchTags, launchVolumes)
-			if err != nil {
-				return err
-			}
-			fmt.Println(snap)
-			return nil
-		},
-	}
-	launchCmd.Flags().StringArrayVar(&launchOpts, "opt", nil, "connector option key=value (repeatable)")
-	launchCmd.Flags().StringArrayVar(&launchTags, "tag", nil, "snapshot tag key=value (repeatable)")
-	launchCmd.Flags().BoolVar(&launchVolumes, "volumes-from-db", false, "share the DB container's volumes (neo4j community/restore)")
-	launchCreds.addFlags(launchCmd)
-
-	cmd.AddCommand(backupCmd, restoreCmd, launchCmd)
+	// There is deliberately no third subcommand launching the runner from here.
+	// One existed while the co-located runner was the only transport, and nothing
+	// ever invoked it: the create flow calls LaunchComposeBackup directly, and the
+	// runner image's entrypoint reaches only backup and restore. It also predated
+	// runnerRepoPath, so it would not have honoured the fs:// spelling. It was kept
+	// as a manual seam while the Kubernetes transport was being built; that
+	// transport exists now, so the seam went with it.
+	cmd.AddCommand(backupCmd, restoreCmd)
 	return cmd
 }
 
@@ -345,6 +324,16 @@ type Neo4jMigration struct {
 // Requested reports whether a migration was asked for.
 func (m Neo4jMigration) Requested() bool { return m.Format != "" }
 
+// args reports the neo4j-admin arguments for the migration, without the binary.
+//
+// Exposed separately from run because the in-place Neo4j path executes the same
+// migration inside the database container rather than in this process: the two
+// must migrate identically, so there is one description of what to run and two
+// places that decide where.
+func (m Neo4jMigration) args() []string {
+	return []string{"database", "migrate", "--to-format=" + m.Format, m.Database}
+}
+
 // run executes the migration with neo4j-admin from binDir (or $PATH when empty).
 func (m Neo4jMigration) run(binDir string) error {
 	if !m.Requested() {
@@ -358,7 +347,7 @@ func (m Neo4jMigration) run(binDir string) error {
 		bin = filepath.Join(binDir, bin)
 	}
 	logrus.Infof("Migrating %s to --to-format=%s...", m.Database, m.Format)
-	if _, err := runCapture(runnerTimeout(), bin, []string{"database", "migrate", "--to-format=" + m.Format, m.Database}, ""); err != nil {
+	if _, err := runCapture(runnerTimeout(), bin, m.args(), ""); err != nil {
 		return fmt.Errorf("migrating %s to format %s: %w", m.Database, m.Format, err)
 	}
 	logrus.Infof("Migrated %s to format %s", m.Database, m.Format)

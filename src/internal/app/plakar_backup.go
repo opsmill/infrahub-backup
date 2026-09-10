@@ -1,7 +1,6 @@
 package app
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,9 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/PlakarKorp/kloset/objects"
-	"github.com/PlakarKorp/kloset/repository"
-	"github.com/PlakarKorp/kloset/snapshot"
 	"github.com/sirupsen/logrus"
 )
 
@@ -45,10 +41,17 @@ func prepareRepoBeforeRedact(redact, force bool, prepareRepo, redactDatabase fun
 }
 
 // CreatePlakarBackup creates an Infrahub backup as multiple Plakar snapshots
-// (one per component). Database components are captured by the upstream
-// connectors running in a co-located one-shot runner (see runner.go); the
-// metadata component is written in-process by the host tool (it can reach the
-// kloset repository directly).
+// (one per component), on Docker Compose or Kubernetes alike.
+//
+// Each component is captured where its tool has to run. Neo4j runs neo4j-admin
+// inside the database container or pod, because it manipulates the data
+// directory (see plakar_neo4j.go). The task manager only needs to reach its
+// server, so it runs in a co-located runner on Docker Compose (see runner.go)
+// and in this process over a port-forward on Kubernetes (see plakar_postgres.go).
+// The metadata component is written in-process either way.
+//
+// Every path emits the upstream connectors' own snapshot layout, so a backup
+// taken on one backend restores on the other.
 func (iops *InfrahubOps) CreatePlakarBackup(force bool, neo4jMetadata string, excludeTaskManager bool, sleepDuration time.Duration, redact bool) (retErr error) {
 	if err := iops.checkPrerequisites(); err != nil {
 		return err
@@ -57,10 +60,11 @@ func (iops *InfrahubOps) CreatePlakarBackup(force bool, neo4jMetadata string, ex
 		return err
 	}
 
-	project := iops.config.DockerComposeProject
-	if project == "" {
-		return fmt.Errorf("the plakar runner backend currently supports Docker Compose only; Kubernetes support is pending")
-	}
+	// Empty on Kubernetes. The Neo4j component runs in place on either backend
+	// (see plakar_neo4j.go); only the task-manager component still needs a runner,
+	// and only on Docker Compose, so the project name is resolved from the detected
+	// backend and checked where it is used rather than refused up front.
+	project := iops.composeProjectForRunner()
 
 	editionInfo := iops.detectNeo4jEditionInfo("backup")
 
@@ -101,8 +105,8 @@ func (iops *InfrahubOps) CreatePlakarBackup(force bool, neo4jMetadata string, ex
 		"repo":          iops.config.Plakar.RepoPath,
 		"neo4j_edition": editionInfo.Edition,
 		"backup_id":     backupID,
-		"project":       project,
-	}).Info("Creating Plakar backup via co-located runner")
+		"backend":       iops.backendName(),
+	}).Info("Creating Plakar backup")
 
 	components := []string{ComponentNeo4j}
 	if !excludeTaskManager {
@@ -128,12 +132,10 @@ func (iops *InfrahubOps) CreatePlakarBackup(force bool, neo4jMetadata string, ex
 		var cerr error
 		switch component {
 		case ComponentNeo4j:
-			snapHex, cerr = iops.backupNeo4jComponent(project, repoPath, neo4jMetadata, editionInfo.IsCommunity, tags)
+			snapHex, cerr = iops.backupNeo4jComponent(neo4jMetadata, editionInfo.IsCommunity, tags)
 
 		case ComponentPostgres:
-			uri := dbURI("postgres", iops.config.PostgresUsername, "task-manager-db", "5432", iops.config.PostgresDatabase)
-			creds := iops.runnerCredentials(iops.config.PostgresPassword)
-			snapHex, cerr = LaunchComposeBackup(project, "task-manager-db", repoPath, uri, creds, map[string]string{"compress": "false"}, tags, false)
+			snapHex, cerr = iops.backupTaskManagerComponent(project, repoPath, tags)
 
 		case ComponentMetadata:
 			snapHex, cerr = iops.writeMetadataSnapshot(metadataObj, tags)
@@ -165,26 +167,42 @@ func (iops *InfrahubOps) CreatePlakarBackup(force bool, neo4jMetadata string, ex
 	return nil
 }
 
-// backupNeo4jComponent captures the Neo4j component. Enterprise uses an online
-// backup over the backup port; Community stops the writer, runs an offline dump
-// in a runner sharing the (quiesced) data volume, then restarts.
-func (iops *InfrahubOps) backupNeo4jComponent(project, repoPath, neo4jMetadata string, community bool, tags []string) (string, error) {
-	if community {
-		uri := "neo4j+offline:///data?database=" + url.QueryEscape(iops.config.Neo4jDatabase)
-		opts := map[string]string{"neo4j_bin_dir": neo4jRunnerBinDir}
-		return iops.withDeploymentQuiesced(func() (string, error) {
-			return LaunchComposeBackup(project, "database", repoPath, uri, iops.runnerCredentials(""), opts, tags, true)
-		})
+// backupNeo4jComponent captures the Neo4j component, running neo4j-admin inside
+// the database container or pod on either backend.
+//
+// Enterprise takes an online backup over loopback with the server up. Community
+// needs the store idle, so the application tier is stopped and the Neo4j process
+// is suspended for the length of the dump — suspended rather than the container
+// stopped, because a stopped container is one this tool can no longer exec into,
+// and exec is what makes the same code work on Kubernetes.
+func (iops *InfrahubOps) backupNeo4jComponent(neo4jMetadata string, community bool, tags []string) (string, error) {
+	if !community {
+		return iops.backupNeo4jInPlace(neo4jMetadata, false, tags)
 	}
-
-	uri := dbURI("neo4j", iops.config.Neo4jUsername, "database", "6362", iops.config.Neo4jDatabase)
-	return LaunchComposeBackup(project, "database", repoPath, uri, iops.runnerCredentials(iops.config.Neo4jPassword),
-		neo4jOnlineBackupOpts(neo4jMetadata), tags, false)
+	return iops.withDeploymentQuiesced(func() (string, error) {
+		return iops.backupNeo4jInPlace(neo4jMetadata, true, tags)
+	})
 }
 
-// withDeploymentQuiesced stops the application tier and then the database, runs
-// dump against the now-idle data volume, and brings both back — the database
-// first, then the applications.
+// backupTaskManagerComponent captures the task-manager database.
+//
+// Unlike Neo4j, pg_dump speaks the wire protocol rather than touching the data
+// directory, so it needs reachability rather than co-location: a runner beside
+// the container on Docker Compose, and a port-forward from this process on
+// Kubernetes.
+func (iops *InfrahubOps) backupTaskManagerComponent(project, repoPath string, tags []string) (string, error) {
+	opts := map[string]string{"compress": "false"}
+	if project == "" {
+		return iops.backupTaskManagerForwarded(opts, tags)
+	}
+	uri := dbURI("postgres", iops.config.PostgresUsername, "task-manager-db", "5432", iops.config.PostgresDatabase)
+	creds := iops.runnerCredentials(iops.config.PostgresPassword)
+	return LaunchComposeBackup(project, "task-manager-db", repoPath, uri, creds, opts, tags, false)
+}
+
+// withDeploymentQuiesced stops the application tier, suspends Neo4j, runs the
+// dump against the now-idle store, and brings both back — Neo4j first, then the
+// applications.
 //
 // The Community offline dump takes the database away, so the applications have to
 // go first: main stopped the whole application tier for exactly this path and the
@@ -202,7 +220,7 @@ func (iops *InfrahubOps) withDeploymentQuiesced(dump func() (string, error)) (sn
 		}
 		return "", fmt.Errorf("failed to stop application services for the Community offline backup: %w", err)
 	}
-	// Registered before the database restart below so that it runs after it: the
+	// Registered before the Neo4j resume below so that it runs after it: the
 	// application tier must not come back to a database that is still starting.
 	defer func() {
 		if err := iops.startAppContainers(stopped); err != nil && retErr == nil {
@@ -210,48 +228,8 @@ func (iops *InfrahubOps) withDeploymentQuiesced(dump func() (string, error)) (sn
 		}
 	}()
 
-	logrus.Info("Stopping Neo4j for offline (Community) backup...")
-	if err := iops.StopServices("database"); err != nil {
-		return "", fmt.Errorf("failed to stop neo4j: %w", err)
-	}
-	defer func() {
-		logrus.Info("Restarting Neo4j...")
-		if err := iops.StartServices("database"); err != nil {
-			if retErr == nil {
-				retErr = fmt.Errorf("failed to restart neo4j: %w", err)
-			}
-			return
-		}
-		// Stopping the container killed every client connection to the database,
-		// so returning while it is still starting hands the caller a deployment
-		// that looks up but cannot answer queries.
-		if err := iops.waitForNeo4jBolt(neo4jBoltReadyTimeout); err != nil {
-			logrus.Warnf("Backup completed, but %v", err)
-		}
-	}()
-
-	return dump()
+	return withNeo4jSuspended(iops, "offline (Community) backup", dump)
 }
-
-// neo4jOnlineBackupOpts are the connector options for the Enterprise online backup.
-//
-// --neo4jmetadata=none has to be FORWARDED, not omitted: the integration accepts
-// "none" and turns it into --include-metadata=none, whereas omitting the option
-// leaves neo4j-admin applying its own default of `all`. Skipping "none" therefore
-// wrote users and roles into a backup the operator explicitly asked to exclude
-// them from. The deleted streaming path passed the value unconditionally, so
-// `none` used to work.
-func neo4jOnlineBackupOpts(neo4jMetadata string) map[string]string {
-	opts := map[string]string{"neo4j_bin_dir": neo4jRunnerBinDir}
-	if neo4jMetadata != "" {
-		opts["include_metadata"] = neo4jMetadata
-	}
-	return opts
-}
-
-// neo4jRunnerBinDir is where neo4j-admin lives in the database image the runner
-// borrows.
-const neo4jRunnerBinDir = "/var/lib/neo4j/bin"
 
 // dbURI builds a connector URI with the username but WITHOUT the password.
 //
@@ -307,42 +285,24 @@ func (iops *InfrahubOps) ensurePlakarRepo() error {
 // writeMetadataSnapshot writes the backup metadata JSON as a snapshot in-process
 // (no database connection is needed for it).
 func (iops *InfrahubOps) writeMetadataSnapshot(metadataObj *BackupMetadata, tags []string) (string, error) {
-	kctx, err := initPlakarContext(iops.config.Plakar)
-	if err != nil {
-		return "", err
-	}
-	defer closePlakarContext(kctx)
-	repo, err := openOrCreateRepo(kctx, iops.config.Plakar)
-	if err != nil {
-		return "", err
-	}
-	defer closeRepo(repo)
-
 	data, err := json.MarshalIndent(metadataObj, "", "    ")
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal metadata: %w", err)
 	}
-	imp := NewMemoryImporter(kctx.Hostname, "/backup_information.json", data)
+	imp := NewMemoryImporter(hostnameForSnapshot(), "/backup_information.json", data)
+	return snapshotFromImporter(iops.config.Plakar, imp, "metadata", tags)
+}
 
-	src, err := snapshot.NewSource(context.Background(), imp)
+// hostnameForSnapshot is the origin recorded on an in-process snapshot. It
+// resolves the hostname the same way initPlakarContext does — same value, same
+// fallback — so moving the metadata snapshot onto the shared builder did not
+// change what it records.
+func hostnameForSnapshot() string {
+	hostname, err := os.Hostname()
 	if err != nil {
-		return "", err
+		return "unknown"
 	}
-	builder, err := snapshot.Create(repo, repository.DefaultType, os.TempDir(), objects.NilMac, &snapshot.BuilderOptions{
-		Name: "metadata",
-		Tags: tags,
-	})
-	if err != nil {
-		return "", err
-	}
-	defer builder.Close()
-	if err := builder.Backup(src); err != nil {
-		return "", err
-	}
-	if err := builder.Commit(); err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%x", builder.Header.Identifier), nil
+	return hostname
 }
 
 // logIncompleteBackup warns about a partial backup failure. kloset doesn't

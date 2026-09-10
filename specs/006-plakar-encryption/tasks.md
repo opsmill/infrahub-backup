@@ -200,13 +200,50 @@ The branch had diverged from `main` by 108 commits, which left PR #163 `CONFLICT
 - [X] T059 Delete the streaming helpers the runner rework orphaned (254 lines across `backup_neo4j.go`, `backup_taskmanager.go`). `golangci-lint` reported all eight as unused; `main` lints clean and this branch already carried them pre-merge. This was not cosmetic: `test` needs `go-lint` and both e2e suites need `test`, so the whole Go test chain was skipping and the merge was unverified beyond `nix-build` and the linters.
 - [X] T060 Fix `fs:///path` being classified as remote (FR-002 regression, operator-facing). Three call sites tested only for `"://"`, which `fs://` contains, so the **documented** spelling got no bind-mount and the host path was handed to the in-container worker. All four sites now share `parseRepoLocation`. Every local test recipe used the bare `--repo /tmp/...` spelling, which is why this branch's own E2E passed while `--repo fs:///backups/infra` — the form in `README.md` and the quickstart — was broken throughout.
 - [X] T061 Fix the runner's effective user, and preserve data-directory ownership across a restore. `--user root` never took effect for Neo4j: `docker-entrypoint.sh` drops to uid 7474 even when started as root, so the worker could not read a repository directory owned by whoever ran the tool (`open /repo/CONFIG: permission denied`). Postgres honours root, so Neo4j was the only image deviating from what the runner already asked for; the entrypoint is now bypassed, since the runner borrows the image for its tools rather than to start a database. Restores therefore write as real root, so `--preserve-owner` restores the data directory's original ownership — previously correct only by accident, via the privilege drop being removed. This closes the "neo4j-user ownership" item 003 recorded as the tool's job. Also rewrites loopback S3 endpoints to `host.docker.internal` (+`--add-host`), because the runner sits on the database's compose network where `localhost` is the runner itself.
-- [ ] T062 **Open — regression vs `main`, blocks merging #163.** Design prepared in
+- [X] T062 **Done 2026-09-10 — Kubernetes parity restored, with T071.** Design prepared in
   [k8s-runner-plan.md](./k8s-runner-plan.md), which establishes why the 003 runner is structurally
   Docker-only (the connector runs `neo4j-admin` itself so it must sit with the data directory,
   while `test_k8s_plakar.py` puts the repository on the tool's local disk where no pod can reach
   it), why `main` avoided it (streaming through backend-agnostic `ExecStreamPipe`, snapshot written
-  in-process), and recommends one transport per backend. **Decided**: align the layouts — the streaming path adopts the connector output. Without it a Docker-taken enterprise backup cannot restore on Kubernetes at all (a tar where a `.backup` artifact is expected), and a Community one silently depends on the database being named `neo4j`. `plakar_backup.go:39` and `plakar_restore.go:34` refuse Kubernetes outright ("supports Docker Compose only; Kubernetes support is pending"), but `main` ships `tests/e2e/test_k8s_plakar.py` and `test_k8s_plakar_s3.py` and **both k8s e2e suites pass on `main`**. So the 003/004 runner rework moved plakar on Kubernetes from working to unsupported. Merging as-is would put that regression on `main`. Two routes: keep a non-runner path for the Kubernetes backend, or implement pod-based execution in the runner. Decision deferred deliberately — it is feature work, not conflict resolution.
+  in-process), and recommends one transport per backend. **Decided**: align the layouts — the streaming path adopts the connector output. Without it a Docker-taken enterprise backup cannot restore on Kubernetes at all (a tar where a `.backup` artifact is expected), and a Community one silently depends on the database being named `neo4j`. `plakar_backup.go:39` and `plakar_restore.go:34` refuse Kubernetes outright ("supports Docker Compose only; Kubernetes support is pending"), but `main` ships `tests/e2e/test_k8s_plakar.py` and `test_k8s_plakar_s3.py` and **both k8s e2e suites pass on `main`**. So the 003/004 runner rework moved plakar on Kubernetes from working to unsupported. Merging as-is would put that regression on `main`.
+
+  **What shipped is neither of the two routes originally listed.** Implementing the shared emission
+  (step 1) showed that the two components need co-location for different reasons and only one of
+  them really does, so there is no second transport and no pod-based runner. `neo4j-admin` now runs
+  **inside the database container or pod on both backends** (`src/internal/app/plakar_neo4j.go`),
+  through the integration's `importer.NewStagedImporter` + `DumpArgs` and
+  `exporter.NewStagedExporter` + `RestoreArgs` (v0.4.0): the integration keeps owning the layout and
+  the argv, and this repo owns only where the argv runs. There is therefore one snapshot layout by
+  construction rather than two kept in step. `pg_dump` needs reachability rather than co-location,
+  so the task-manager component keeps the runner on Docker Compose and runs the real upstream
+  connector in-process over a `kubectl port-forward` on Kubernetes
+  (`src/internal/app/plakar_postgres.go`, `environment_kubernetes_portforward.go`) — again the
+  connector's own emission, so nothing about the snapshot differs by backend.
+
+  The offline window changed with it: `StopServices("database")` is replaced by the watchdog
+  suspend the tarball backend already used (`readNeo4jPID` → `stopNeo4jCommunity` → `kill -CONT`).
+  A stopped container is one that cannot be exec'd into, which is precisely what forced the sibling
+  runner and made the path Docker-only. Regression tests pin it:
+  `TestTheOfflineDumpLeavesTheDatabaseContainerRunning` and
+  `TestTheRestoreLeavesTheDatabaseContainerRunning`.
+
+  One new prerequisite, on the Kubernetes path only: the PostgreSQL client (`pg_dump`,
+  `pg_dumpall`, `pg_restore`, `psql`) must be on the machine running the tool, at a version no
+  older than the server. The Docker runner borrows the postgres image, so versions match by
+  construction there; nothing equivalent exists on Kubernetes. It is checked up front by
+  `requirePostgresClient` with an actionable message rather than surfacing as an exec failure
+  mid-restore, and `postgresql-client` is installed in the `e2e-tests-k8s` CI job.
 - [ ] T064 **Open — the remaining `main` e2e failure.** With T060/T061 in, the plakar backup and `snapshots list` now succeed in CI; all three `test_docker_plakar.py` cases instead fail because Infrahub cannot reach Neo4j afterwards (`/api/config` answers, `/api/schema` returns 503, server-side `SessionExpired: defunct connection … ('database', 7687)`). The three tests share a class-scoped compose stack, so the first one's backup poisons it and the S3 case fails at *seeding* — meaning T061's S3 rewrite is still unexercised. Both editions suspend Neo4j with SIGSTOP and resume with `kill -CONT`, on `main` too, so the DB is not restarted; the candidate difference is how long it stays suspended, since the runner adds container startup per component. Not reproducible in `test/e2e/`, whose `infrahub-server` is an `alpine sleep infinity` placeholder — needs a live instance (`invoke demo.start` in a sibling `infrahub` checkout). Worth capturing the database container's logs in the CI failure dump too: only `infrahub-server` was captured, which is what left the cause unobservable.
+- [ ] T072 **Retire the runner machinery that only Neo4j used.** Opened by T062, which is what made
+  it dead rather than merely unused. `mountDBVolumes` is now `false` at both call sites and
+  `Neo4jMigration{}` is empty at the only one that takes it, so the runner's volume sharing, its
+  bypass of the database image's entrypoint (`--user root`), `--preserve-owner` with
+  `preserveOwnership`/`fileOwner`, `dbDataDir`, `Neo4jMigration.run` and the `--migrate-format`
+  worker flags are all reachable by nothing. Left standing in the T062 change on purpose: deleting
+  it is a separate, purely subtractive pass, and mixing it in would have buried the behavioural
+  change in it. The risk of leaving it is that it reads as though Neo4j still goes through the
+  runner — `exportWithOwnershipRestored` in particular describes a hazard that no longer exists.
+
 - [ ] T063 Confirm or dismiss the enterprise Docker e2e leg. It failed differently across consecutive runs (94% then 11%, the latter on a `collect` test) with a `503` from the Infrahub server, which reads as contention across four parallel e2e jobs on the shared runners rather than a defect. Judge it once the community leg is green.
 
 ---
@@ -218,8 +255,17 @@ Each of these was verified against the pinned connector sources during the revie
 another module, so they are recorded rather than attempted. Everything else the review found was
 fixed on that branch.
 
-- [ ] T065 **Restore `--expand-commands` to every neo4j-admin invocation.** Blocked on a new
-  `opsmill/plakar-integration-neo4j` release. `main` passed `--expand-commands` at all five
+- [ ] T065 **Restore `--expand-commands` to every neo4j-admin invocation.** *Integration side
+  written 2026-09-10 and awaiting release.* `opsmill/plakar-integration-neo4j` branch
+  `feat/expand-commands` (commit `6a51738`) adds an `expand_commands` option to both connectors,
+  emitted **before** the subcommand because picocli treats it as a global option and rejects it
+  after `database dump`. It is off by default: Neo4j refuses to expand commands from a config file
+  writable by anyone but its owner, so enabling it where it is not needed turns a working backup
+  into a failing one. Deliberately **not tagged or pushed** — a Go module tag is immutable once the
+  proxy has fetched it, so publishing v0.5.0 is a call to make explicitly. Once it is tagged: bump
+  here, run `scripts/update-vendor-hash.sh`, and pass `expand_commands` from
+  `neo4jConnectorConfig` (and through `Neo4jMigration.args()`), restoring `main`'s behaviour of
+  passing it at every call site. Originally blocked on a new `main` passed `--expand-commands` at all five
   neo4j-admin call sites (`backup_neo4j.go` lines 43, 220, 422, 431, 483). The connector's
   `adminArgs` emits `["database","backup","--to-path=…","--compress=false"]` /
   `["database","dump",…]` with no such flag, and `ParseConnConfig` accepts only
@@ -229,7 +275,15 @@ fixed on that branch.
   secret-injection sidecars) fails both backup and restore with "the config file contains command
   expansion … use --expand-commands". Needs an `expand_commands` option in the integration, then a
   version bump plus `scripts/update-vendor-hash.sh`.
-- [ ] T066 **Make the runner's view of the store's on-disk layout derived rather than assumed.**
+- [X] T066 **Resolved for Neo4j by T062. The runner no longer has a view of the store's on-disk
+  layout, because it no longer touches the store.** `neo4j-admin` runs inside the database
+  container, where it reads that deployment's own `neo4j.conf` — so a store relocated with
+  `NEO4J_server_directories_data` is found by construction, and there is no bind mount or
+  `--preserve-owner` chown to point at the wrong tree. The `/data` in the offline location is now
+  only what `ConnConfig.Origin()` keys the snapshot on; it no longer decides where anything is
+  read or written. What remains is cosmetic: that origin string names `/data` even for a
+  relocated store. The original text follows.
+
   Partly blocked on the same integration. `composeRunnerArgs` copies none of the database
   container's `NEO4J_*` environment, and `dbDataDir` is hardcoded to `/data`. A deployment that
   relocates the store via `NEO4J_server_directories_data` gets a runner whose neo4j-admin resolves
@@ -269,15 +323,16 @@ fixed on that branch.
   intentionally down comes back up after a restore. This reproduces `main`'s behaviour, so it is
   left alone rather than changed silently — but the asymmetry between the two paths is worth a
   decision. Found by the 2026-08-11 simplification pass.
-- [ ] T070 **Delete the dead `__run-connector launch` subcommand.** Nothing invokes it: the create
+- [X] T070 **Done 2026-09-10. Deleted the dead `__run-connector launch` subcommand.** Nothing invokes it: the create
   flow calls `LaunchComposeBackup` directly, as its own comment anticipated, and
   `build/runner/Dockerfile` references only `backup`/`restore`. It also bypasses
   `runnerRepoPath()`, so it would not honour the `fs://` handling fixed in T060. Roughly 28 lines
-  across two hunks. Held back only because removing a subcommand is a CLI-surface change and it may
-  still be useful as a manual seam while the Kubernetes transport (T062) is built.
+  across two hunks. It was held back only as a possible manual seam while the Kubernetes transport
+  (T062) was being built; that transport exists now, so the seam went with it. A comment in its
+  place records why there is no third subcommand, so it is not reintroduced.
 
-- [ ] T071 **Take the Enterprise online backup without requiring the backup listener to be
-  exposed.** `main` ran `neo4j-admin database backup` via `iops.Exec("database", …)` — inside the
+- [X] T071 **Done 2026-09-10, as one fix with T062. The Enterprise online backup no longer
+  requires the backup listener to be exposed.** `main` ran `neo4j-admin database backup` via `iops.Exec("database", …)` — inside the
   database container, over loopback, with no `--from` — so it worked against a stock deployment. The
   runner runs beside the container instead, so the integration builds `--from=database:6362` and
   Neo4j's default `127.0.0.1` listener refuses it: every existing Enterprise deployment's plakar
@@ -285,8 +340,17 @@ fixed on that branch.
   `README.md`, but documenting a new requirement is the weaker fix — running the online backup where
   the database is would remove it, and is the same conclusion the Kubernetes work reached for the
   same reason (see [k8s-runner-plan.md](./k8s-runner-plan.md), constraint 1). **This was masked by
-  the harness**: `test/e2e/docker-compose.enterprise.yml:12` sets the listener to `0.0.0.0:6362`, so
+  the harness**: `test/e2e/docker-compose.enterprise.yml:12` set the listener to `0.0.0.0:6362`, so
   the branch's own e2e could not see the break.
+
+  Fixed by running `neo4j-admin` in the database container again (T062). The online location is now
+  built with **no host** (`neo4j:///<db>` rather than `neo4j://…@database:6362/<db>`): the
+  integration adds `--from` only when a host is set, so omitting it puts neo4j-admin back on
+  loopback. The harness override is removed — `docker-compose.enterprise.yml` now leaves the listen
+  address at Neo4j's default, so the e2e proves the fix rather than hiding its absence — and
+  `TestNeo4jOnlineLocationOmitsTheHost` asserts against the integration's own parser that no
+  `--from` reaches the argv. The `README.md` prerequisite is replaced by a note that nothing needs
+  publishing.
 
 ---
 

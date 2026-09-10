@@ -128,6 +128,8 @@ github.com/nickball/go-aes-key-wrap v0.0.0-20170929221519-1c3aa3e4dfc5 h1:eQr2od
 github.com/nickball/go-aes-key-wrap v0.0.0-20170929221519-1c3aa3e4dfc5/go.mod h1:1VYCE0dvZM9Y2q8kcAHdXZB6YwfrCUQDeSJ2DuIiA4k=
 github.com/opsmill/plakar-integration-neo4j v0.3.0 h1:XwbADjKd7pEwuDBJ1SSMQEiysmQAp1CizieoUJVeK78=
 github.com/opsmill/plakar-integration-neo4j v0.3.0/go.mod h1:1GBlX3lN7TQARmhhyd9Z6a35YyEQSOHyqDPfGRkfapo=
+github.com/opsmill/plakar-integration-neo4j v0.4.0 h1:B4r630q/P+7Hc3z7gFOdm65XVyqjEnJB07o2PRh0iq8=
+github.com/opsmill/plakar-integration-neo4j v0.4.0/go.mod h1:1GBlX3lN7TQARmhhyd9Z6a35YyEQSOHyqDPfGRkfapo=
 github.com/pelletier/go-toml/v2 v2.2.4 h1:mye9XuhQ6gvn5h28+VilKrrPoQVanw5PMw/TB0t5Ec4=
 github.com/pelletier/go-toml/v2 v2.2.4/go.mod h1:2gIqNv+qfxSVS7cM2xJQKtLSTLUE9V8t9Stt+h56mCY=
 github.com/philhofer/fwd v1.2.0 h1:e6DnBTl7vGY+Gz322/ASL4Gyp1FspeMvx1RNDoToZuM=

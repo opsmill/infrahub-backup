@@ -36,20 +36,11 @@ The Plakar backend (`--backend plakar`) can write **encrypted at-rest** reposito
 using the engine's native symmetric encryption (Argon2id KDF + AES‑256‑GCM‑SIV). A
 leaked or stolen repository is unreadable without the passphrase.
 
-> **Neo4j Enterprise prerequisite.** The Plakar backend runs `neo4j-admin` in a
-> short-lived container beside the database rather than inside it, so an Enterprise
-> online backup reaches the backup service over the network. Neo4j only listens for it on
-> `127.0.0.1` by default, which is not reachable from another container, so the deployment
-> must expose it:
->
-> ```yaml
-> NEO4J_server_backup_enabled: "true"
-> NEO4J_server_backup_listen__address: "0.0.0.0:6362"
-> ```
->
-> Without this, `create --backend plakar` fails on the Neo4j component with a connection
-> refused against `database:6362`. Community deployments are unaffected — they take an
-> offline dump and never use the backup service. The tarball backend is unaffected too.
+> **Neo4j needs nothing exposed.** The Plakar backend runs `neo4j-admin` inside the
+> database container or pod, so an Enterprise online backup reaches the backup service
+> over loopback and Neo4j's default `127.0.0.1` listener is enough. An earlier revision
+> ran it in a short-lived container beside the database, which did require
+> `NEO4J_server_backup_listen__address` to be published; that requirement is gone.
 
 ```bash
 # Create an encrypted repository (passphrase via env or file)
