@@ -1,0 +1,73 @@
+# Throwaway Infrahub-shaped stack for the 004-B E2E round-trip.
+# Only the services infrahub-backup actually touches are real:
+#   database        -> Neo4j (the backup/restore target)
+#   task-manager-db -> PostgreSQL (the task-manager DB target)
+# infrahub-server / task-manager / task-worker / cache / message-queue exist
+# because the tool stops and restarts them and may exec `env` into them for
+# credential discovery; they carry the same INFRAHUB_DB_* / PREFECT_* env the real
+# deployment exposes.
+services:
+  database:
+    image: neo4j:2025.10.1-community
+    environment:
+      NEO4J_AUTH: neo4j/e2epassword
+      NEO4J_server_memory_heap_max__size: 512m
+      NEO4J_server_memory_pagecache_size: 256m
+    volumes:
+      - neo4j-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p e2epassword 'RETURN 1' || exit 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+
+  task-manager-db:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: prefect
+      POSTGRES_PASSWORD: prefectpass
+      POSTGRES_DB: prefect
+    # postgres:18+ uses PGDATA=/var/lib/postgresql/18/docker and requires the
+    # mount one level up, at /var/lib/postgresql (not .../data as in <=17).
+    volumes:
+      - pg-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U prefect -d prefect"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  infrahub-server:
+    image: alpine:3
+    command: ["sleep", "infinity"]
+    environment:
+      INFRAHUB_DB_DATABASE: neo4j
+      INFRAHUB_DB_USERNAME: neo4j
+      INFRAHUB_DB_PASSWORD: e2epassword
+
+  task-manager:
+    image: alpine:3
+    command: ["sleep", "infinity"]
+    environment:
+      PREFECT_SERVER_DATABASE_CONNECTION_URL: postgresql+asyncpg://prefect:prefectpass@task-manager-db:5432/prefect
+
+  task-worker:
+    image: alpine:3
+    command: ["sleep", "infinity"]
+
+  # cache and message-queue exist because the restore lifecycle wipes their
+  # transient state and restarts them (restartDependencies treats a failure to
+  # restart them as fatal, as it does on a real deployment). They are placeholders:
+  # the wipe execs `find` into paths these images do not have, which the tool logs
+  # and continues past.
+  cache:
+    image: alpine:3
+    command: ["sleep", "infinity"]
+
+  message-queue:
+    image: alpine:3
+    command: ["sleep", "infinity"]
+
+volumes:
+  neo4j-data:
+  pg-data:

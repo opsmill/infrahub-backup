@@ -29,6 +29,9 @@ func ConfigureRootCommand(cmd *cobra.Command, app *InfrahubOps) {
 	cmd.PersistentFlags().String("backup-id", "", "Plakar backup group ID to restore (latest complete if empty)")
 	cmd.PersistentFlags().String("snapshot", "", "Plakar snapshot ID for single-component restore")
 
+	// Plakar encryption: passphrase source (also reads INFRAHUB_BACKUP_PASSPHRASE)
+	cmd.PersistentFlags().String("passphrase-file", "", "Read the encrypted-repository passphrase from a file (first line); alternative to INFRAHUB_BACKUP_PASSPHRASE")
+
 	// S3 configuration flags
 	cmd.PersistentFlags().StringVar(&cfg.S3.Bucket, "s3-bucket", cfg.S3.Bucket, "S3 bucket name for backup storage")
 	cmd.PersistentFlags().StringVar(&cfg.S3.Prefix, "s3-prefix", cfg.S3.Prefix, "S3 key prefix (path within bucket)")
@@ -49,6 +52,7 @@ func ConfigureRootCommand(cmd *cobra.Command, app *InfrahubOps) {
 	bind("repo")
 	bind("backup-id")
 	bind("snapshot")
+	bind("passphrase-file")
 	bind("s3-bucket")
 	bind("s3-prefix")
 	bind("s3-endpoint")
