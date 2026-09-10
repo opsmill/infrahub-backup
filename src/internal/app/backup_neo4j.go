@@ -519,40 +519,6 @@ func (iops *InfrahubOps) isNeo4jCluster() bool {
 	return false
 }
 
-// waitForNeo4jBolt blocks until Neo4j accepts a query again, or the timeout elapses.
-//
-// The plakar offline paths stop and start the whole `database` container rather than
-// suspending the process, so every client connection to it dies. Returning as soon as
-// `docker compose start` returns means the caller — and anything watching the
-// deployment — sees a container that is up but a database that is not yet answering.
-// Infrahub then serves /api/config (which does not touch the database) while
-// /api/schema fails, which is exactly the shape of the failure in the e2e suite.
-//
-// This is the same lesson the round-trip harness learned: a count taken before Bolt is
-// answering silently returns empty, so it grew a wait_bolt of its own. The tool should
-// not make its callers rediscover that.
-//
-// A timeout is reported to the caller rather than raised as a failure of the operation
-// that just completed: by the time this runs the backup or restore has already
-// succeeded, and a database that is slow to come back is worth flagging, not a reason
-// to discard good work.
-func (iops *InfrahubOps) waitForNeo4jBolt(timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	logrus.Info("Waiting for Neo4j to accept connections...")
-
-	for {
-		if iops.neo4jAnswersBolt() {
-			logrus.Info("Neo4j is accepting connections")
-			return nil
-		}
-
-		if time.Now().After(deadline) {
-			return fmt.Errorf("neo4j did not accept connections within %s of being restarted", timeout)
-		}
-		time.Sleep(neo4jBoltPollInterval)
-	}
-}
-
 // neo4jAnswersBolt reports whether the database is serving queries.
 func (iops *InfrahubOps) neo4jAnswersBolt() bool {
 	_, err := iops.Exec("database", []string{
@@ -568,16 +534,29 @@ func (iops *InfrahubOps) neo4jAnswersBolt() bool {
 // waitForNeo4jBack waits for the database to serve queries again after a
 // suspended offline window, starting it if nothing else does.
 //
-// Resuming the process lets the shutdown it was frozen mid-way through finish,
-// so the container's PID 1 exits and the container stops. A deployment's restart
-// policy normally brings it straight back — Compose's `restart:` and a pod's
-// `restartPolicy` both do — but a deployment configured without one would
-// otherwise be left with its database down and only a warning to show for it.
-// Waiting the whole timeout out first would be worse still: nothing is coming.
+// Waiting on Bolt, not on the container: every client connection dies with the
+// offline window, and returning as soon as the container reports up hands the
+// caller a database that is not yet answering. Infrahub then serves /api/config
+// (which does not touch the database) while /api/schema fails — exactly the shape
+// of the failure the e2e suite saw. The round-trip harness learned the same
+// lesson independently and grew a wait_bolt of its own; the tool should not make
+// its callers rediscover it.
 //
-// So the two conditions are watched together. Bolt answering is the success
-// signal, because it is the only one that means the database is actually usable;
-// the service being observed stopped is the signal to start it, once.
+// Starting the database, not just waiting for it: resuming the process lets the
+// shutdown it was frozen mid-way through finish, so the container's PID 1 exits
+// and the container stops. A deployment's restart policy normally brings it
+// straight back — Compose's `restart:` and a pod's `restartPolicy` both do — but
+// one configured without either would be left with its database down and only a
+// warning to show for it, and waiting the whole timeout out first would be worse:
+// nothing is coming. So the two conditions are watched together. Bolt answering
+// is the success signal, because it is the only one that means the database is
+// actually usable; the service being observed stopped is the signal to start it,
+// once.
+//
+// A timeout is reported to the caller rather than raised as a failure of the
+// operation that just completed: by the time this runs the backup or restore has
+// already succeeded, and a database that is slow to come back is worth flagging,
+// not a reason to discard good work.
 func (iops *InfrahubOps) waitForNeo4jBack(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	logrus.Info("Waiting for Neo4j to accept connections...")
