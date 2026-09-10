@@ -8,6 +8,12 @@ VERSION?=
 LDFLAGS=-ldflags "-X main.version=$(VERSION) -s -w"
 # cockroachdb/swiss (transitive dep of pebble cache) needs this tag for Go 1.26+
 GO_TAGS=-tags untested_go_version
+# golangci-lint must be a v2 to read .golangci.yaml (version: "2"), and must be
+# built by a toolchain at least as new as the one in use — an older binary
+# cannot read the compiler's export data and fails every package on typecheck.
+# Installed from source rather than by the upstream script so it is built with
+# whichever Go is installed here.
+GOLANGCI_VERSION=v2.13.2
 CGO_ENABLED=0
 
 # Default target
@@ -71,7 +77,7 @@ test-coverage: ## Run tests with coverage
 
 lint: ## Run golangci-lint
 	@echo "Running linter..."
-	@golangci-lint run
+	@golangci-lint run --build-tags untested_go_version
 
 fmt: ## Format Go code
 	@echo "Formatting code..."
@@ -105,7 +111,7 @@ run-example: build ## Run example commands
 dev-setup: ## Set up development environment
 	@echo "Setting up development environment..."
 	@go mod download
-	@which golangci-lint > /dev/null || curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $$(go env GOPATH)/bin v1.54.2
+	@go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION)
 	@echo "Development environment ready!"
 
 DOCKER_REGISTRY?=registry.opsmill.io/opsmill

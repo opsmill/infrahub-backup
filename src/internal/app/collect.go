@@ -133,6 +133,13 @@ func (e *collectSkipError) Error() string { return e.reason }
 // run (FR-009); only a missing environment, an unwritable output directory,
 // or an archiving failure returns an error.
 func (iops *InfrahubOps) CollectBundle(opts CollectOptions) error {
+	// Marked for the whole run rather than inside the --include-backup
+	// collector, because the property belongs to the binary and not to one of
+	// its steps: nothing collection does may create, delete or scale a
+	// workload of the deployment's (ADR-0003). It is what stops --include-backup
+	// reaching the external-database capture path, which would.
+	iops.forbidExternalCapture()
+
 	backend, err := iops.ensureBackend()
 	if err != nil {
 		return fmt.Errorf("bundle collection requires a usable Infrahub environment: %w", err)

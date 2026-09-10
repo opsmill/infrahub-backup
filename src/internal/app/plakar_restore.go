@@ -37,6 +37,19 @@ func (iops *InfrahubOps) RestorePlakarBackup(excludeTaskManager bool, restoreMig
 		return err
 	}
 
+	// Where each database lives, before the repository is opened and long
+	// before anything is stopped. See prepareDatabaseRestore.
+	//
+	// It is also where a database outside the deployment gets the workload the
+	// restore runs in, so whatever this run creates is given back on every exit
+	// path from here on (FR-011). An all-internal deployment creates none and
+	// the call does nothing.
+	defer iops.releaseTransientWorkloads()
+
+	if err := iops.prepareDatabaseRestore(!excludeTaskManager); err != nil {
+		return err
+	}
+
 	// Initialize Plakar context and repository
 	kctx, err := initPlakarContext(iops.config.Plakar)
 	if err != nil {
@@ -149,6 +162,17 @@ func (iops *InfrahubOps) restoreBackupGroup(kctx *kcontext.KContext, repo *repos
 		"components":       metadata.Components,
 	}).Info("Backup metadata loaded")
 
+	// The group's own status already refuses an incomplete capture, from the
+	// tag the run wrote. This reads the same verdict from the metadata the
+	// snapshot carries, and it is not the same check: the tag can be lost —
+	// a group whose components survived a failed discard, an artefact from a
+	// repository this tool did not write — while the metadata travels inside
+	// the snapshot. Neither is a substitute for the other, and this one has no
+	// --force escape (see refuseIncompleteCapture).
+	if err := metadata.refuseIncompleteCapture("backup group " + group.BackupID); err != nil {
+		return err
+	}
+
 	// Detect Neo4j edition for restore
 	detectedEdition, detectionErr := iops.detectNeo4jEdition()
 	editionInfo := NewNeo4jEditionInfo(detectedEdition, detectionErr)
@@ -161,6 +185,16 @@ func (iops *InfrahubOps) restoreBackupGroup(kctx *kcontext.KContext, repo *repos
 
 	// For enterprise, export neo4j snapshot and extract the tar archive for file-based restore
 	isCommunity := strings.EqualFold(neo4jEdition, neo4jEditionCommunity)
+
+	// A dump cannot be loaded into a server this run does not host, and this is
+	// the first moment that is known: the edition came out of the group's own
+	// metadata just above. Refused here rather than at the load, so the
+	// deployment is not taken down to learn it (see
+	// refuseExternalCommunityDumpRestore).
+	if err := iops.refuseExternalCommunityDumpRestore(neo4jSnapInfo != nil && isCommunity); err != nil {
+		return err
+	}
+
 	if neo4jSnapInfo != nil && !isCommunity {
 		if err := iops.exportSnapshotToDir(kctx, repo, *neo4jSnapInfo, backupDir); err != nil {
 			return err
@@ -203,11 +237,37 @@ func (iops *InfrahubOps) restoreBackupGroup(kctx *kcontext.KContext, repo *repos
 		logrus.Info("Task manager database dump detected; will restore")
 	}
 
+	// The last check makeable with the deployment up and the databases intact:
+	// a database outside the deployment fetches its own artifact, so it is
+	// staged where it can be read from, and a run that cannot establish that
+	// stops here (FR-007). Only where this group actually carries a Neo4j
+	// component — there is no artifact to stage for a group that does not.
+	if neo4jSnapInfo != nil {
+		if err := iops.preflightExternalNeo4jRestore(workDir); err != nil {
+			return err
+		}
+	}
+
 	// Wipe transient data
 	iops.wipeTransientData()
 
 	// Stop application containers
-	if _, err := iops.stopAppContainers(); err != nil {
+	stopped, err := iops.stopAppContainers()
+	if err != nil {
+		iops.returnAppContainersToScale(stopped)
+
+		return err
+	}
+
+	// Every exit path from here to the ordinary restart below is a failure, and
+	// each of them returns the deployment to the scale it was found at (FR-013).
+	defer func() {
+		iops.returnAppContainersToScale(stopped)
+	}()
+
+	// Asked for is not stopped, and the next steps overwrite databases
+	// (FR-026).
+	if err := iops.confirmAppContainersQuiesced(stopped); err != nil {
 		return err
 	}
 
@@ -267,6 +327,11 @@ func (iops *InfrahubOps) restoreBackupGroup(kctx *kcontext.KContext, repo *repos
 		return fmt.Errorf("failed to restart infrahub services: %w", err)
 	}
 
+	// The deployment is back, so the deferred failure-path restart has nothing
+	// left to do; what remains useful is saying whether it came back (FR-026).
+	iops.reportAppContainersRunning(stopped)
+	stopped = nil
+
 	logrus.Info("Restore from Plakar backup group completed successfully")
 	logrus.Info("Infrahub should be available shortly")
 
@@ -318,6 +383,16 @@ func (iops *InfrahubOps) exportSnapshotToDir(kctx *kcontext.KContext, repo *repo
 
 // restoreSingleSnapshot restores from a single snapshot (--snapshot flag).
 func (iops *InfrahubOps) restoreSingleSnapshot(kctx *kcontext.KContext, repo *repository.Repository, snapshotID string, excludeTaskManager bool, restoreMigrateFormat bool, resetDeploymentID bool) error {
+	// Whatever this restore takes down goes back up on every exit path,
+	// including the failing ones (FR-013). Each of the three branches below
+	// quiesces the deployment for itself and records what it stopped here; the
+	// success paths hand the list to the ordinary restart by clearing it, so
+	// nothing is started twice.
+	var stopped []string
+	defer func() {
+		iops.returnAppContainersToScale(stopped)
+	}()
+
 	snapshotMAC, err := resolveSnapshotID(repo, snapshotID)
 	if err != nil {
 		return err
@@ -338,30 +413,51 @@ func (iops *InfrahubOps) restoreSingleSnapshot(kctx *kcontext.KContext, repo *re
 	// Determine component type and edition from tags before deciding export strategy
 	tags := parseSnapshotTags(snap.Header.Tags)
 	component := tags[TagComponent]
-	neo4jEdition := tags[TagNeo4jEdition]
 
 	logrus.Infof("Restoring single component: %s", component)
 
 	// Detect Neo4j edition for restore
 	detectedEdition, detectionErr := iops.detectNeo4jEdition()
 	editionInfo := NewNeo4jEditionInfo(detectedEdition, detectionErr)
-	if neo4jEdition != "" {
-		resolvedEdition, err := editionInfo.ResolveRestoreEdition(neo4jEdition)
-		if err != nil {
-			return err
+
+	// The edition tag is group metadata: buildSnapshotTags stamps it on every
+	// component's snapshot, as it does the version and the component list, so
+	// that any one snapshot identifies its group. It gates only the component
+	// it describes. Read for every component, it refused a Postgres-only
+	// restore on a Community server because the group's Neo4j had been
+	// Enterprise — an edition that restore never touches.
+	var neo4jEdition string
+	if component == ComponentNeo4j {
+		if tagged := tags[TagNeo4jEdition]; tagged != "" {
+			resolvedEdition, err := editionInfo.ResolveRestoreEdition(tagged)
+			if err != nil {
+				return err
+			}
+			neo4jEdition = resolvedEdition
 		}
-		neo4jEdition = resolvedEdition
 	}
 
 	// Neo4j community: stream directly from snapshot without exporting to disk
-	if component == ComponentNeo4j && strings.EqualFold(neo4jEdition, neo4jEditionCommunity) {
+	loadsCommunityDump := component == ComponentNeo4j && strings.EqualFold(neo4jEdition, neo4jEditionCommunity)
+
+	// Before the branch, because the branch's first destructive act is
+	// stopAppContainers and this is knowable from the snapshot's own tags (see
+	// refuseExternalCommunityDumpRestore).
+	if err := iops.refuseExternalCommunityDumpRestore(loadsCommunityDump); err != nil {
+		return err
+	}
+
+	if loadsCommunityDump {
 		reader, err := snap.NewReader("/neo4j.dump")
 		if err != nil {
 			return fmt.Errorf("failed to open neo4j dump stream from snapshot: %w", err)
 		}
 		defer reader.Close()
 
-		if _, err := iops.stopAppContainers(); err != nil {
+		if stopped, err = iops.stopAppContainers(); err != nil {
+			return err
+		}
+		if err := iops.confirmAppContainersQuiesced(stopped); err != nil {
 			return err
 		}
 		if err := iops.restartDependencies(); err != nil {
@@ -381,6 +477,9 @@ func (iops *InfrahubOps) restoreSingleSnapshot(kctx *kcontext.KContext, repo *re
 		if err := iops.StartServices("infrahub-server", "task-worker"); err != nil {
 			return fmt.Errorf("failed to restart infrahub services: %w", err)
 		}
+
+		iops.reportAppContainersRunning(stopped)
+		stopped = nil
 
 		logrus.Info("Restore from Plakar snapshot completed successfully")
 		return nil
@@ -425,8 +524,19 @@ func (iops *InfrahubOps) restoreSingleSnapshot(kctx *kcontext.KContext, repo *re
 		}
 		os.Remove(tarPath)
 
+		// With the deployment still up and the database still holding its data:
+		// an external server fetches its own artifact, so it is staged where it
+		// can be read from and a run that cannot establish that stops here
+		// (FR-007).
+		if err := iops.preflightExternalNeo4jRestore(workDir); err != nil {
+			return err
+		}
+
 		// Stop services and restore
-		if _, err := iops.stopAppContainers(); err != nil {
+		if stopped, err = iops.stopAppContainers(); err != nil {
+			return err
+		}
+		if err := iops.confirmAppContainersQuiesced(stopped); err != nil {
 			return err
 		}
 		if err := iops.restartDependencies(); err != nil {
@@ -455,7 +565,10 @@ func (iops *InfrahubOps) restoreSingleSnapshot(kctx *kcontext.KContext, repo *re
 		if _, err := os.Stat(srcDump); os.IsNotExist(err) {
 			return fmt.Errorf("postgres snapshot does not contain prefect.dump")
 		}
-		if _, err := iops.stopAppContainers(); err != nil {
+		if stopped, err = iops.stopAppContainers(); err != nil {
+			return err
+		}
+		if err := iops.confirmAppContainersQuiesced(stopped); err != nil {
 			return err
 		}
 		if err := iops.restorePostgreSQL(workDir); err != nil {
@@ -478,6 +591,9 @@ func (iops *InfrahubOps) restoreSingleSnapshot(kctx *kcontext.KContext, repo *re
 	if err := iops.StartServices("infrahub-server", "task-worker"); err != nil {
 		return fmt.Errorf("failed to restart infrahub services: %w", err)
 	}
+
+	iops.reportAppContainersRunning(stopped)
+	stopped = nil
 
 	logrus.Info("Restore from Plakar snapshot completed successfully")
 	return nil
