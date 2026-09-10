@@ -178,6 +178,19 @@ func (iops *InfrahubOps) RestoreLatestBackup(s3 bool, excludeTaskManager bool, r
 		return fmt.Errorf("selecting the latest backup from a pool does not apply to the %s backend: its repository already resolves the latest snapshot, so restore without --latest", BackendPlakar)
 	}
 
+	// This entry point calls the restore gate itself — the S3 leg does, before
+	// pulling an object a refusal would make pointless — so it creates
+	// transient workloads of its own and owes them the same single exit path
+	// every other entry point provides (FR-011).
+	//
+	// It is not enough that RestoreBackup defers one too. Two things happen
+	// before the run ever gets there: the download can fail, and the second
+	// database's preparation can fail after the first has already been
+	// recorded. Neither reaches RestoreBackup, and both leave a Pod and a
+	// Secret behind. It is safe alongside RestoreBackup's own defer, which
+	// finds nothing left to give back.
+	defer iops.releaseTransientWorkloads()
+
 	// The one restore this entry point performs, wherever the archive came from: every
 	// parameter travels through untouched, so both legs inherit the same validation,
 	// decryption, and container guarantees.
@@ -203,6 +216,18 @@ func (iops *InfrahubOps) RestoreLatestBackup(s3 bool, excludeTaskManager bool, r
 		// configuration and no URI round-trip that could resolve a different bucket,
 		// prefix, or endpoint in between.
 		return restoreLatestFrom(ctx, newS3Location(client), decryptKey, func(ref backupRef) error {
+			// Where each database lives, before the object is pulled out of S3.
+			// RestoreBackup gates on the same question and would refuse the same run,
+			// but only after a multi-gigabyte download onto a host that then deletes it
+			// again — and a scheduled restore is exactly the caller that cannot watch
+			// that happen. The local leg needs no gate of its own: its archive is
+			// already on this host, so RestoreBackup's costs nothing extra. It is
+			// placed after the pool's own refusals so a mistyped bucket still reports
+			// the bucket (FR-006, FR-007).
+			if err := iops.prepareDatabaseRestore(!excludeTaskManager); err != nil {
+				return err
+			}
+
 			return downloadLatestS3Backup(ctx, client, iops.config.BackupDir, ref, restore)
 		})
 	}

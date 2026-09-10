@@ -29,11 +29,54 @@ All three tools share common internal application logic but expose different com
 - `make fmt` - Format code with go fmt
 - `make vet` - Run go vet
 
+Notes on running these directly rather than through `make`:
+
+- `golangci-lint` is installed by `make dev-setup` into `$(go env GOPATH)/bin`, which is **not**
+  necessarily on `PATH`. Invoking it as a bare command can fail with `command not found` while
+  `make lint` works.
+- The Makefile passes `GO_TAGS=-tags untested_go_version`. Use the same tag when running `go test`
+  or `go vet` by hand, or results will not match CI. `golangci-lint` needs it too, spelled
+  `--build-tags untested_go_version`: without it every package fails `typecheck` on undefined
+  symbols in `cockroachdb/swiss`, which reads as a code error and is not one.
+- The linter binary must be a **v2** (`.golangci.yaml` is `version: "2"`) built by a toolchain at
+  least as new as the one in use. A binary built by an older Go cannot decode the compiler's
+  export data and reports `export data version N is greater than maximum supported version M` for
+  every stdlib import — or panics outright in `goanalysis`. `make dev-setup` reinstalls it from
+  source at the pinned `GOLANGCI_VERSION`; re-run it after a Go upgrade.
+- `make vet`, `make lint` and `go test ./...` fail on `tools/neo4jwatchdog` on darwin, because it
+  uses `unix.Inotify*`. This is expected and unrelated to any change under `src/`; scope to
+  `./src/...` when working on macOS — for the linter that is
+  `golangci-lint run --build-tags untested_go_version ./src/...`. CI runs on Linux and lints the
+  whole tree, so the targets are deliberately not narrowed.
+
 ### Development Setup
 
 - `make dev-setup` - Install development dependencies including golangci-lint
 - `make deps` - Download and tidy dependencies
 - `make deps-update` - Update all dependencies
+
+### Spec-kit extensions: registered but only partly vendored
+
+`.specify/extensions.yml` lists `critique`, `opsmill` and `review` under `installed:`, but not all
+of their assets are present in this repo. A skill step that names one of the missing ones needs a
+substitute rather than a retry:
+
+| Named by a skill | Present? | Substitute |
+|---|---|---|
+| `speckit-checkpoint-commit` | **no** | Commit inline, following the conventions in `git log` |
+| `.specify/templates/critique-template.md` | **no** | Follow the structure the critique command describes |
+| git extension (`before_specify` hook) | **no** | `/speckit-specify` creates **no branch** — create one by hand if the work should not sit on `main` |
+| `reconcile` command | **no** | Do the substance inline |
+| `/speckit-critique-run`, `/speckit-review-run` | yes | Wired as *optional* `after_plan` / `after_implement` hooks, so they are offered, not run |
+
+Two further hazards when running the pipeline here:
+
+- `.specify/scripts/bash/update-agent-context.sh` writes its own `## Active Technologies` and
+  `## Recent Changes` sections into the agent file. `CLAUDE.md` in this repo is deliberately a
+  one-line `@AGENTS.md` router, so the script corrupts it and truncates values at the first `**`.
+  Restore `CLAUDE.md` afterwards and hand-write the entries into this file instead.
+- `/code-review` reads the **working tree**, not the commit range passed to it. Do not run it while
+  an implementation subagent holds uncommitted edits.
 
 ### Nix Vendor Hash
 
@@ -89,14 +132,69 @@ The codebase follows a command-pattern architecture using Cobra for CLI structur
    - `masking.go` - Key-name secret masking for env and config dumps
 
 8. **src/internal/app/utils.go** - Utility functions
-   - File operations, checksum validation
+   - File operations, checksum validation, tar/tarball handling
    - Environment variable handling
-   - Version detection and comparison
+   - This tool's own build version (`SetVersion`, `BuildRevision`) from ldflags — **not** a
+     version comparator. Comparators live elsewhere and are deliberately separate:
+     `src/internal/updater/version.go` compares this tool's own release tags with strict semver,
+     and `src/internal/app/external_endpoint.go` compares *database* versions, which must handle
+     both `5.x.y` and calendar `YYYY.MM.p` schemes. Do not merge them.
 
 9. **src/internal/app/cli.go** - Shared CLI configuration
    - `ConfigureRootCommand()` - Sets up common flags and configuration
    - `AttachEnvironmentCommands()` - Adds environment detection commands
    - Shared between all three binaries
+
+10. **src/internal/app/external_*.go** - Databases that live outside the deployment (spec 007)
+    - `external_backup_gate.go` - Where the location is settled *before* anything is stopped;
+      `resolveDatabaseTargets` is the only way a *run* obtains `databaseTarget`s, and holding one
+      is the evidence that the reachability question was answered. The constructor it calls,
+      `databaseTargetWith`, is directly callable within the package (tests drive it), so the
+      evidence is a `gated` field only that constructor sets and both preparers refuse a target
+      without — not a promise that the type could not keep
+    - `external_endpoint.go` - Endpoint resolution and discovery, the `databaseTarget` type, and
+      the *database* version comparator (see the note on `utils.go`)
+    - `external_capture.go` - The capture sequence: probe, edition/version gates, then the
+      capture workload. `externalCaptureOps` is the only function a transient object can come
+      from, so it is where a run that may not create one is refused (`infrahub-collect`, ADR-0003)
+    - `external_restore.go` - The restore sequence, which is the capture's mirror and not its
+      copy: one workload created at the gate and held for the run, the artifact staged where the
+      *server* can fetch it (FR-007), the seed statement in the form the server version accepts,
+      and the poll that decides whether the seed actually loaded (FR-021) — accepting the request
+      proves nothing
+    - `external_ca.go` - Carries the deployment's own certificate authority into the workload
+      that has to verify against it, once per workload
+    - `external_timeout.go` - Every bound and deadline the external path spends
+    - `transient_workload.go` - The stand-in pod and its credential Secret: manifest
+      construction, lifecycle, the stray reaper (FR-011) and the FR-028 exclusion. The
+      exclusion is read from the pod's own `transientLabelMarker` before its name, in that
+      order: a name test rests on `transientObjectPrefix`, and the fallbacks that reach
+      `withoutTransientPods` go on to match a name against a service, so a prefix containing a
+      service name would have them claim the pod rather than merely miss it
+
+11. **src/internal/app/kubernetes_*.go** - The Kubernetes-side questions the above rests on
+    - `kubernetes_ownership.go` - The single answer to "whose resource is this?": label
+      evidence, release prefixes, `deploymentClaimsResource`, `unanchoredNamePolicyFor`, and
+      `parseLabelledPods`, the one parser for both pod listings. Nothing outside this file may
+      *decide* ownership from a name — the acceptance test is that
+      `grep -rn 'nameMatchesService(' src/ | grep -v _test` returns only its definition in
+      `kubernetes_pod_match.go` and its call sites here. `labelledPod.Labels` keeps the four
+      service-label values the listing carried, because a label *selector* and a *declaration*
+      are two readings of the same fields: `podsServiceSelectorsWouldMatch` reproduces the
+      running check's four `<key>=<service>` queries out of them, in selector order, so those
+      queries are not issued. Ownership is deliberately not that reproduction — it also claims
+      a pod carrying a release prefix, and `IsRunning` answering true from one of those is a
+      stop and a scale to zero on evidence no selector produced
+    - `kubernetes_pod_match.go` - Pod phases and name shape: the field selectors, their
+      client-side halves, and `nameMatchesService`, which answers what a name *looks like* and
+      never what it belongs to
+    - `kubernetes_workloads.go` - Workload (Deployment/StatefulSet) resolution and scaling
+    - `environment_kubernetes.go` - The backend itself: exec/copy, pod resolution and its caches
+      (`dropPodCaches` is what a scale clears), the running check, `locateService`. The running
+      check costs one kubectl call: it reads one namespace listing, answers the selector tier
+      from that listing's own label fields and falls back to ownership only where no selector
+      would have matched. That one call failing *is* the undetermined status, and
+      `stopAppContainers` fails the run on it
 
 ### Key Design Patterns
 
@@ -283,8 +381,11 @@ The codebase uses explicit error wrapping with `fmt.Errorf` for context. All com
 - Plakar repository (local filesystem or S3 via integration backends) (002-plakar-integration)
 - Go 1.25.0 + cobra, viper, logrus; Docker/Kubernetes via `docker`/`kubectl` CLI shell-out through `CommandExecutor` — no client-go or Docker SDK (003-collect-tool)
 - Local filesystem bundle output under `--output-dir` (default `./infrahub_bundles`); no network egress beyond the target deployment (003-collect-tool)
+- Go 1.25.0 + no new modules; external databases reached from a transient in-namespace pod created via `kubectl` on stdin, so vendor tooling still runs in a container and the existing exec/stream/copy primitives are unchanged (007-external-database-backup)
+- Neo4j endpoint read from `INFRAHUB_DB_ADDRESS` (comma-separated `host[:port]`), `_PORT` (Bolt 7687, *not* the 6362 backup port), `_PROTOCOL`, `_TLS_*` (007-external-database-backup)
 
 ## Recent Changes
 
+- 007-external-database-backup: External Neo4j Enterprise / PostgreSQL backup and restore for Kubernetes — transient stand-in pod registered under the existing service names, endpoint discovery from in-namespace component environment, remote restore by seeding from an object-store URI
 - 003-collect-tool: Added `infrahub-collect` troubleshooting-bundle binary (collector framework, log/metrics primitives on both backends, key-name secret masking, bundle manifest)
 - 002-plakar-integration: Added kloset (Plakar core library), integration-fs (filesystem storage/exporter), cobra, logrus

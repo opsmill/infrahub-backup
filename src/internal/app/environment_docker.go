@@ -31,6 +31,10 @@ func (d *DockerBackend) Info() string {
 	return d.project
 }
 
+// RuntimeCommand names the tool this backend shells out to, so a run that found
+// neither runtime can say which ones it looked for (FR-018).
+func (*DockerBackend) RuntimeCommand() string { return "docker" }
+
 func (d *DockerBackend) Detect() error {
 	if err := d.executor.runCommandQuiet("docker", "--version"); err != nil {
 		// If user explicitly specified Docker project, this is a hard error
