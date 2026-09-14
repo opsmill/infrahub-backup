@@ -85,9 +85,16 @@ jobs:
           # returns only the first page, so a fragment in a large pull
           # request would go unseen and the check would fail a PR that has
           # one. Note the REST field is `.filename`, not `.path`.
+          #
+          # `.additions > 0` alone is not enough: it also matches a file
+          # whose status is `modified`, so a PR that merely appends a line
+          # to someone else's pre-existing fragment would pass without
+          # contributing a fragment of its own. Requiring
+          # `status == "added"` restricts the match to fragments the PR
+          # itself introduces.
           ADDED=$(gh api --paginate \
             "repos/${GITHUB_REPOSITORY}/pulls/${PR}/files?per_page=100" \
-            --jq '.[] | select(.additions > 0) | .filename' \
+            --jq '.[] | select(.status == "added" and .additions > 0) | .filename' \
             | { grep -E "${FRAGMENT}" || true; } \
             | { grep -v '^changelog/towncrier\.md\.template$' || true; })
 
