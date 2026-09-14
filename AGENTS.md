@@ -39,7 +39,9 @@ All three tools share common internal application logic but expose different com
 
 The changelog is assembled by [towncrier](https://towncrier.readthedocs.io/) from news fragments in
 `changelog/`, so every change carries its own entry instead of everyone editing `CHANGELOG.md`.
-Internal and tooling work goes under `housekeeping`. Add a fragment in the same PR as the change:
+Internal and tooling work goes under `housekeeping`. CI enforces this on pull requests targeting
+`main` (the `Changelog / News fragment present` check); a change that genuinely needs no entry
+opts out with the `ci/skip-changelog` label. Add a fragment in the same PR as the change:
 
 - `uv run towncrier create -c "Fixed the thing" 42.fixed.md` - one fragment per change, named
   `<issue>.<type>.md`. Without an issue or PR number, use a descriptive slug prefixed with `+`,

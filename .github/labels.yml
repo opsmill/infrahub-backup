@@ -57,3 +57,7 @@
 - name: duplicate
   color: cfd3d7
   description: This issue or pull request already exists
+
+- name: ci/skip-changelog
+  color: ededed
+  description: No changelog fragment required for this pull request
