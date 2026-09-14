@@ -48,14 +48,19 @@ jobs:
               ;;
           esac
 
-          # Dependabot applies ci/skip-changelog from .github/dependabot.yml,
-          # but only at creation time, so PRs opened before that config landed
-          # carry no label and this required check would block them forever.
-          # Its PRs are dependency bumps by construction; exempt the author as
-          # well. Compared as a string, not as a `case` pattern: `[bot]` in a
-          # glob is a character class and would not match the literal login.
-          # Only this one bot is exempt — humans still need a fragment, and
-          # update-infrahub-sdk.yml labels its own pull requests at creation.
+          # dependabot.yml labels its pull requests dependencies plus
+          # an ecosystem tag, not ci/skip-changelog, so the label
+          # check above never exempts it here — this author check is
+          # what does. Compared as a string, not as a `case` pattern:
+          # `[bot]` in a glob is a character class and would not
+          # match the literal login. Only this one bot is exempt —
+          # humans still need a fragment.
+          #
+          # The exemption is dormant today: every ecosystem in
+          # dependabot.yml sets open-pull-requests-limit: 0, so
+          # dependabot opens no pull requests here at all. It stays
+          # in place so raising that limit later does not
+          # immediately block every bump it opens.
           if [ "${AUTHOR}" = "dependabot[bot]" ]; then
             echo "Opened by ${AUTHOR} — dependency update, no fragment required."
             exit 0
