@@ -73,6 +73,20 @@ func initPlakarContext(cfg *PlakarConfig) (*kcontext.KContext, error) {
 	cacheMgr := caching.NewManager(pebble.Constructor(cacheDir))
 	kctx.SetCache(cacheMgr)
 
+	// The cache directory has to be set on the context as well as handed to the
+	// cache manager, because kloset reads it from two places for two different
+	// caches. The manager above serves the scan and packing caches; the
+	// repository's own state cache is derived from KContext.CacheDir directly
+	// (repository.stateCacheDir joins it with the cache version, "store" and
+	// the repository UUID). Left unset it is the empty string, and path.Join
+	// then produces a *relative* path — so every plakar create, restore and
+	// snapshot listing wrote a `2.0.0/store/<uuid>` tree into whatever
+	// directory the operator happened to run the tool from, and read the next
+	// run's state back only if they ran it from the same one. Neither
+	// --plakar-cache-dir nor the default under ~/.cache reached that cache at
+	// all.
+	kctx.CacheDir = cacheDir
+
 	logrus.Debugf("Initialized Plakar context (cache: %s)", cacheDir)
 	return kctx, nil
 }

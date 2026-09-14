@@ -213,3 +213,67 @@ def get_s3_backup_key(
     if not backup_keys:
         raise FileNotFoundError(f"No backup files found in s3://{bucket}/{prefix}")
     return backup_keys[-1]
+
+
+def read_backup_metadata(archive: str | Path) -> dict:
+    """The `backup_information.json` inside a tarball artifact, parsed.
+
+    Every claim spec 007 makes about where a database lived is recorded here rather than in
+    the tool's output, so the external suites read the artifact rather than trusting a log
+    line: metadata that says a database was external is what a later restore dispatches on.
+    """
+    import json
+    import tarfile
+
+    with tarfile.open(archive, "r:gz") as tar:
+        member = tar.extractfile("backup/backup_information.json")
+        if member is None:
+            raise AssertionError(f"{Path(archive).name} is missing backup/backup_information.json")
+        return json.loads(member.read())
+
+
+def start_cli(
+    binary: str,
+    args: list[str],
+    env: dict[str, str] | None = None,
+    log_path: str | Path | None = None,
+) -> tuple[subprocess.Popen, Path]:
+    """Start a CLI binary without waiting for it, streaming its combined output to a file.
+
+    Returns the process and that file. Cases that interrupt the tool part-way need both:
+    the file is what `wait_for_cli_output` watches, so "killed mid-capture" can be pinned to
+    the step it is meant to interrupt instead of to a sleep that a slow host turns into
+    "killed before it started" — which would assert nothing.
+    """
+    import tempfile
+
+    run_env = {**os.environ, **(env or {})}
+    if log_path is None:
+        handle_fd, log_path = tempfile.mkstemp(prefix="infrahub-cli-", suffix=".log")
+        os.close(handle_fd)
+    log_path = Path(log_path)
+
+    with log_path.open("w") as handle:
+        proc = subprocess.Popen(
+            [binary, *args],
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            env=run_env,
+        )
+    return proc, log_path
+
+
+def wait_for_cli_output(log_path: str | Path, marker: str, timeout: float = 300.0, interval: float = 0.5) -> str:
+    """Wait until a started CLI's output contains `marker`; return everything written so far."""
+    import time
+
+    path = Path(log_path)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        text = path.read_text(errors="replace") if path.exists() else ""
+        if marker in text:
+            return text
+        time.sleep(interval)
+    raise TimeoutError(f"{path} did not contain {marker!r} within {timeout}s")

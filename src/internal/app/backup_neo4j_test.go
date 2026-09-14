@@ -245,3 +245,91 @@ func TestRestoreNeo4jFailsWhenTheDestinationCannotBeCleared(t *testing.T) {
 		t.Errorf("a restore ran despite the destination not being cleared; calls: %v", backend.calls)
 	}
 }
+
+// TestRedactDatabaseRefusesAnExternalDatabase is F6. --redact rewrites the
+// database in place through `cypher-shell` in the `database` container, and it
+// ran unconditionally — so a run against an external database failed with "no
+// pods found for service database in namespace …", which is the exact
+// misdiagnosis FR-008's refusal was written to eliminate.
+func TestRedactDatabaseRefusesAnExternalDatabase(t *testing.T) {
+	backend := newGatedBackend()
+	backend.locations[serviceNeo4j] = EndpointLocationExternal
+	iops := newGatedOps(t, backend, BackendTarball)
+	iops.recordExternalSource(serviceNeo4j, &externalSource{
+		Endpoint: &DatabaseEndpoint{
+			Service:  serviceNeo4j,
+			Location: EndpointLocationExternal,
+			Hosts:    []HostPort{{Host: "neo4j.example", Port: 7687}},
+		},
+	})
+
+	err := iops.redactDatabase()
+	if err == nil {
+		t.Fatal("redactDatabase() = nil, want a refusal naming the database it cannot reach")
+	}
+	if !strings.Contains(err.Error(), "Nothing is missing from the deployment") {
+		t.Errorf("err = %v, want the message that stops an operator hunting a missing container", err)
+	}
+	if !strings.Contains(err.Error(), "no data was changed") {
+		t.Errorf("err = %v, want it to state that nothing was changed", err)
+	}
+	for _, call := range backend.execs {
+		if strings.HasPrefix(call, "cypher-shell") {
+			t.Errorf("redaction ran %q against a database with no container here", call)
+		}
+	}
+}
+
+// TestIsNeo4jClusterReadsWhatTheProbeObserved is the other half of F6: the
+// member count was already taken by the probe, before anything was stopped, so
+// asking again means exec'ing `cypher-shell` in a container that is not there.
+func TestIsNeo4jClusterReadsWhatTheProbeObserved(t *testing.T) {
+	external := func(members []observedMember) *InfrahubOps {
+		backend := newGatedBackend()
+		backend.locations[serviceNeo4j] = EndpointLocationExternal
+		iops := newGatedOps(t, backend, BackendTarball)
+		iops.recordExternalSource(serviceNeo4j, &externalSource{
+			Endpoint: &DatabaseEndpoint{Service: serviceNeo4j, Location: EndpointLocationExternal},
+			Facts:    probedFacts{Members: members},
+		})
+
+		return iops
+	}
+
+	t.Run("several observed members is a cluster", func(t *testing.T) {
+		clustered, err := external([]observedMember{{Address: "a"}, {Address: "b"}}).isNeo4jCluster()
+		if err != nil {
+			t.Fatalf("isNeo4jCluster failed: %v", err)
+		}
+		if !clustered {
+			t.Error("isNeo4jCluster() = false, want true for a database the probe saw two members of")
+		}
+	})
+
+	t.Run("one observed member is not", func(t *testing.T) {
+		iops := external([]observedMember{{Address: "a"}})
+		clustered, err := iops.isNeo4jCluster()
+		if err != nil {
+			t.Fatalf("isNeo4jCluster failed: %v", err)
+		}
+		if clustered {
+			t.Error("isNeo4jCluster() = true, want false for a single-member database")
+		}
+		for _, call := range iops.backend.(*gatedBackend).execs {
+			if strings.HasPrefix(call, "cypher-shell") {
+				t.Errorf("the cluster check ran %q against a database with no container here", call)
+			}
+		}
+	})
+
+	t.Run("an internal database keeps degrading on a failed query", func(t *testing.T) {
+		iops := newGatedOps(t, newGatedBackend(), BackendTarball)
+		clustered, err := iops.isNeo4jCluster()
+		if err != nil {
+			t.Fatalf("isNeo4jCluster failed: %v", err)
+		}
+		if clustered {
+			t.Error("isNeo4jCluster() = true, want the shipped assume-not-clustered reading of an unusable answer")
+		}
+	})
+}
