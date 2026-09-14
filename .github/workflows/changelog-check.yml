@@ -99,8 +99,7 @@ jobs:
           ADDED=$(gh api --paginate \
             "repos/${GITHUB_REPOSITORY}/pulls/${PR}/files?per_page=100" \
             --jq '.[] | select(.status == "added" and .additions > 0) | .filename' \
-            | { grep -E "${FRAGMENT}" || true; } \
-            | { grep -v '^changelog/towncrier\.md\.template$' || true; })
+            | { grep -E "${FRAGMENT}" || true; })
 
           if [ -z "${ADDED}" ]; then
             MSG="No news fragment found. Add one directly under changelog/,"
