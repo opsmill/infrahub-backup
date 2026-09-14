@@ -167,8 +167,12 @@ jobs:
       - name: Set up Python and uv
         uses: astral-sh/setup-uv@v7
 
-      - name: Install tini
-        run: apt-get update && apt-get install -y tini
+      - name: Install tini and the PostgreSQL client
+        # postgresql-client supplies pg_dump/pg_restore/psql. On Kubernetes the
+        # task-manager component runs the upstream connector in this process over a
+        # port-forward — there is no sibling runner borrowing the postgres image, as
+        # there is on Docker Compose — so the client has to be on the runner itself.
+        run: apt-get update && apt-get install -y tini postgresql-client
 
       - name: Build binaries (infrahub-backup, infrahub-taskmanager, infrahub-collect)
         run: make build

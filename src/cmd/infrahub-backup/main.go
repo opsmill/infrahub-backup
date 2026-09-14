@@ -82,6 +82,16 @@ func resolveRestoreInvocation(backend app.BackendType, args []string, latest, s3
 			return restoreRequest{}, fmt.Errorf("--s3 does not apply to the %s backend: the repository location comes from --repo, and a plakar restore already resolves the latest complete backup group", app.BackendPlakar)
 		}
 
+		// A positional argument cannot mean anything here — this backend selects what to
+		// restore with --backup-id / --snapshot — and it used to be dropped in silence.
+		// `restore --backend plakar --repo … 20260810_020000`, which the README itself
+		// documented, therefore restored the LATEST complete group instead of the named
+		// one: for an operator rolling back, that is a restore of the very state they
+		// were rolling back from.
+		if len(args) > 0 {
+			return restoreRequest{}, fmt.Errorf("the %s backend does not take a positional argument: %q would be ignored — name a backup group with --backup-id, a single component snapshot with --snapshot, or pass neither to restore the latest complete group", app.BackendPlakar, args[0])
+		}
+
 		// --latest is what this backend has always done without an argument, so it takes
 		// the same route rather than a parallel one that could drift from it (FR-004).
 		return restoreRequest{}, nil
@@ -225,6 +235,18 @@ func main() {
 			if err := resolveRetentionFlags(cmd, iops); err != nil {
 				return err
 			}
+			// Plakar uses native symmetric (passphrase) encryption; reject the
+			// tarball --encrypt-key flag and resolve/validate the passphrase
+			// before any repository is created.
+			if iops.Config().Backend == app.BackendPlakar {
+				if err := iops.PreparePlakarEncryption(
+					viper.GetBool("encrypt"),
+					viper.GetString("encrypt-key"),
+					viper.GetString("passphrase-file"),
+				); err != nil {
+					return err
+				}
+			}
 			return iops.CreateBackup(
 				viper.GetBool("force"),
 				viper.GetString("neo4jmetadata"),
@@ -305,6 +327,19 @@ func main() {
 			}
 			forceRestore, _ := cmd.Flags().GetBool("force")
 			options := resolveRestoreOptions()
+
+			// An encrypted repository cannot be opened without the passphrase, so it is
+			// resolved once the invocation is known to be valid and before either restore
+			// route runs — the repository is opened inside both. The same step rejects
+			// --decrypt-key, which belongs to the tarball backend and was previously
+			// accepted and dropped. For this backend resolveRestoreInvocation always
+			// reports an empty Archive, so the named-archive route below is the one plakar
+			// takes, and its own latest-group resolution handles choosing the snapshot.
+			if iops.Config().Backend == app.BackendPlakar {
+				if err := iops.PreparePlakarRestore(options.DecryptKey, viper.GetString("passphrase-file")); err != nil {
+					return err
+				}
+			}
 
 			if request.Latest {
 				return iops.RestoreLatestBackup(request.S3, restoreExcludeTaskManagerDB, restoreMigrateFormat, restoreSleepDuration, options.DecryptKey, forceRestore, options.ResetDeploymentID)
@@ -441,6 +476,9 @@ func main() {
 			if iops.Config().Plakar.RepoPath == "" {
 				return fmt.Errorf("--repo is required for snapshots list")
 			}
+			if err := iops.LoadPlakarPassphrase(viper.GetString("passphrase-file")); err != nil {
+				return err
+			}
 			jsonOutput := viper.GetString("log-format") == "json"
 			return iops.ListSnapshots(jsonOutput)
 		},
@@ -448,6 +486,9 @@ func main() {
 
 	snapshotsCmd.AddCommand(snapshotsListCmd)
 	rootCmd.AddCommand(snapshotsCmd)
+
+	// Hidden worker invoked inside the co-located runner (Deliverable B).
+	rootCmd.AddCommand(app.RunConnectorCommand())
 
 	if err := rootCmd.Execute(); err != nil {
 		logrus.Errorf("Command failed: %v", err)
