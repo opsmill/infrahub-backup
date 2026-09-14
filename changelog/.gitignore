@@ -1,0 +1,3 @@
+# Placeholder: keeps this directory in git once `towncrier build` has consumed every fragment.
+# The news fragments themselves are committed, so nothing here is ignored.
+!.gitignore

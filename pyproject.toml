@@ -24,6 +24,7 @@ dev = [
     "yamllint",
     "rumdl",
     "invoke",
+    "towncrier>=24.8.0",
 ]
 
 [tool.pytest.ini_options]
@@ -58,3 +59,51 @@ ignore_missing_imports = true
 # (manual numbering), MD060 table column style (flexible alignment).
 disable = ["MD013", "MD033", "MD041", "MD029", "MD060"]
 exclude = ["node_modules", "docs/node_modules", "specs", ".specify", ".claude"]
+
+[tool.towncrier]
+# No `package` key: the released artifacts are Go binaries versioned from git tags,
+# not this pyproject (which only describes the e2e test suite). Pass the release
+# version explicitly, e.g. `uv run towncrier build --version 2.4.0`.
+directory = "changelog"
+filename = "CHANGELOG.md"
+start_string = "<!-- towncrier release notes start -->\n"
+underlines = ["", "", ""]
+title_format = "## [{version}](https://github.com/opsmill/infrahub-backup/tree/v{version}) - {project_date}"
+issue_format = "[#{issue}](https://github.com/opsmill/infrahub-backup/issues/{issue})"
+orphan_prefix = "+"
+template = "changelog/towncrier.md.template"
+
+[[tool.towncrier.type]]
+directory = "security"
+name = "Security"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "removed"
+name = "Removed"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "deprecated"
+name = "Deprecated"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "added"
+name = "Added"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "changed"
+name = "Changed"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "fixed"
+name = "Fixed"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "housekeeping"
+name = "Housekeeping"
+showcontent = true
