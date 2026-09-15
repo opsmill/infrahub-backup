@@ -28,4 +28,4 @@ Each operational area is exposed as its own binary:
 
 Documentation for using the Infrahub Backup is available in the [infrahub-backup documentation](https://docs.infrahub.app/backup/)
 
-Documentation for using Infrahub Collect is available in the [infrahub-collect documentation](https://docs.infrahub.app/collect/)
+Documentation for using Infrahub Collect is available in the [infrahub-collect documentation](https://docs.infrahub.app/backup/collect)
