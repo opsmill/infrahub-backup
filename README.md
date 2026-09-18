@@ -24,12 +24,6 @@ Each operational area is exposed as its own binary:
 - `infrahub-backup` – create/restore backups, inspect environments, and show build metadata
 - `infrahub-collect` – collect read-only troubleshooting bundles (service logs, diagnostics, metrics) for support
 
-## Using the CLI
-
-Documentation for using the Infrahub Backup is available in the [infrahub-backup documentation](https://docs.infrahub.app/backup/)
-
-Documentation for using Infrahub Collect is available in the [infrahub-collect documentation](https://docs.infrahub.app/collect/)
-
 ## Encrypted Plakar backups
 
 The Plakar backend (`--backend plakar`) can write **encrypted at-rest** repositories
@@ -75,3 +69,9 @@ Notes:
 - `--encrypt-key` is the **tarball** backend's public-key (ECIES) flag; using it with
   `--backend plakar` is rejected — use `--encrypt` with a passphrase instead.
 - Repositories created without `--encrypt` stay plaintext and behave exactly as before.
+
+## Using the CLI
+
+Documentation for using the Infrahub Backup is available in the [infrahub-backup documentation](https://docs.infrahub.app/backup/)
+
+Documentation for using Infrahub Collect is available in the [infrahub-collect documentation](https://docs.infrahub.app/backup/collect)
