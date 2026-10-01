@@ -56,3 +56,5 @@ Thumbs.db
 
 # Spec-kit local state (records the active feature per checkout; not shared)
 .specify/feature.json
+# Local bug-analysis handoffs
+.bug-analysis-*.md
