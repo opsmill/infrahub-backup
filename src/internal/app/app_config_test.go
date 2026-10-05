@@ -1,6 +1,7 @@
 package app
 
 import (
+	"maps"
 	"strings"
 	"testing"
 )
@@ -490,6 +491,11 @@ func TestStatedPrefectSSLRootCert(t *testing.T) {
 			connStr: "host=pg.example.com port=6432 dbname=prefect sslrootcert='/certs/ca.crt'",
 			want:    "/certs/ca.crt",
 		},
+		{
+			name:    "the keyword form with a space in the quoted path",
+			connStr: "host=pg.example.com sslrootcert='/certs/my ca.crt' dbname=prefect",
+			want:    "/certs/my ca.crt",
+		},
 		{name: "a URL naming no authority", connStr: "postgres://prefect:pw@pg.example.com/prefect"},
 		{name: "nothing at all", connStr: ""},
 	}
@@ -512,4 +518,93 @@ func TestStatedPrefectSSLRootCert(t *testing.T) {
 			t.Errorf("ExternalDB.PostgresTLS.CAFile = %q, want the authority the deployment states", got)
 		}
 	})
+}
+
+// TestStatedKeywordFields pins the keyword/value form to libpq's reading of it.
+// It split on whitespace, so a quoted value holding a space was cut at the
+// space and a run discovered part of a certificate path or a host.
+func TestStatedKeywordFields(t *testing.T) {
+	tests := []struct {
+		name    string
+		connStr string
+		want    map[string]string
+		wantErr string
+	}{
+		{
+			name:    "plain values",
+			connStr: "host=pg.example.com port=6432 dbname=prefect",
+			want:    map[string]string{"host": "pg.example.com", "port": "6432", "dbname": "prefect"},
+		},
+		{
+			name:    "a quoted value with spaces",
+			connStr: "host=pg.example.com sslrootcert='/etc/ssl/my certs/ca.crt' port=6432",
+			want:    map[string]string{"host": "pg.example.com", "sslrootcert": "/etc/ssl/my certs/ca.crt", "port": "6432"},
+		},
+		{
+			name:    "whitespace around the equals sign",
+			connStr: "host = pg.example.com  port= 6432 dbname =prefect",
+			want:    map[string]string{"host": "pg.example.com", "port": "6432", "dbname": "prefect"},
+		},
+		{
+			name:    "escaped quote and backslash inside quotes",
+			connStr: `password='it\'s a \\ secret' host=db`,
+			want:    map[string]string{"password": `it's a \ secret`, "host": "db"},
+		},
+		{
+			name:    "escaped space outside quotes",
+			connStr: `sslrootcert=/certs/my\ ca.crt`,
+			want:    map[string]string{"sslrootcert": "/certs/my ca.crt"},
+		},
+		{
+			name:    "an empty quoted value",
+			connStr: "host='' port=5432",
+			want:    map[string]string{"host": "", "port": "5432"},
+		},
+		{
+			name:    "keywords are lower-cased",
+			connStr: "HOST=pg.example.com",
+			want:    map[string]string{"host": "pg.example.com"},
+		},
+		{name: "nothing at all", connStr: "   ", want: map[string]string{}},
+		{
+			name:    "an unterminated quote",
+			connStr: "host=pg.example.com sslrootcert='/etc/ssl/my certs/ca.crt",
+			wantErr: "unterminated quoted value",
+		},
+		{
+			name:    "a keyword with no equals sign",
+			connStr: "host=pg.example.com prefect",
+			wantErr: "missing",
+		},
+		{
+			name:    "a value with no keyword",
+			connStr: "=pg.example.com",
+			wantErr: "no keyword",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := statedKeywordFields(tt.connStr)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("statedKeywordFields(%q) = %v, %v; want an error containing %q", tt.connStr, got, err, tt.wantErr)
+				}
+
+				return
+			}
+			if err != nil {
+				t.Fatalf("statedKeywordFields(%q) error = %v, want nil", tt.connStr, err)
+			}
+			if !maps.Equal(got, tt.want) {
+				t.Errorf("statedKeywordFields(%q) = %v, want %v", tt.connStr, got, tt.want)
+			}
+		})
+	}
+
+	// A string libpq would refuse states nothing: a truncated path is worse
+	// than none, because the run would then verify against the wrong file.
+	if host, port, caFile := statedPrefectConnection("host=pg.example.com port=6432 sslrootcert='/etc/ssl/ca.crt"); host != "" || port != 0 || caFile != "" {
+		t.Errorf("statedPrefectConnection() = %q, %d, %q; want nothing stated for an unterminated quote", host, port, caFile)
+	}
 }

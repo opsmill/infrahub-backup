@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/sirupsen/logrus"
@@ -462,9 +463,17 @@ func statedPrefectConnection(connStr string) (host string, port int, caFile stri
 		return "", 0, ""
 	}
 	if !strings.Contains(trimmed, "://") {
-		host, port = statedKeywordEndpoint(trimmed)
+		fields, err := statedKeywordFields(trimmed)
+		if err != nil {
+			// A string libpq itself would refuse states nothing this run can
+			// trust: reading part of it would discover a truncated host or
+			// certificate path rather than the one the deployment uses.
+			logrus.Warnf("Could not read the task-manager database connection string: %v", err)
 
-		return host, port, statedKeywordValue(trimmed, "sslrootcert")
+			return "", 0, ""
+		}
+
+		return fields["host"], statedPort(fields["port"]), fields["sslrootcert"]
 	}
 
 	parsed, err := url.Parse(trimmed)
@@ -484,35 +493,89 @@ func statedPrefectConnection(connStr string) (host string, port int, caFile stri
 	return host, port, strings.TrimSpace(query.Get("sslrootcert"))
 }
 
-// statedKeywordEndpoint reads the keyword/value connection form —
-// `host=db.example.com port=5432 dbname=prefect`.
-func statedKeywordEndpoint(connStr string) (string, int) {
-	fields := statedKeywordFields(connStr)
-
-	return fields["host"], statedPort(fields["port"])
-}
-
-// statedKeywordValue is statedKeywordEndpoint for one keyword, so a second
-// setting read out of the same form does not bring a second copy of the parse
-// with it.
-func statedKeywordValue(connStr, key string) string {
-	return statedKeywordFields(connStr)[key]
-}
-
-// statedKeywordFields splits the keyword/value connection form into its
-// settings, lower-casing the keywords and stripping the quoting libpq allows
-// around a value.
-func statedKeywordFields(connStr string) map[string]string {
+// statedKeywordFields parses the keyword/value connection form —
+// `host=db.example.com port=5432 sslrootcert='/certs/my ca.crt'` — the way
+// libpq does: keywords are separated by whitespace, whitespace is allowed
+// around `=`, a value may be single-quoted to hold spaces, and a backslash
+// takes the next character literally, so `\'` and `\\` are a quote and a
+// backslash. Keywords are lower-cased.
+//
+// A string libpq would refuse is an error rather than a partial result: a
+// keyword with no `=` after it, or a quoted value that is never closed.
+func statedKeywordFields(connStr string) (map[string]string, error) {
 	fields := map[string]string{}
-	for _, field := range strings.Fields(connStr) {
-		key, value, found := strings.Cut(field, "=")
-		if !found {
-			continue
+	input := []rune(connStr)
+	i := 0
+
+	skipSpace := func() {
+		for i < len(input) && unicode.IsSpace(input[i]) {
+			i++
 		}
-		fields[strings.ToLower(strings.TrimSpace(key))] = strings.Trim(strings.TrimSpace(value), `'"`)
 	}
 
-	return fields
+	for {
+		skipSpace()
+		if i >= len(input) {
+			return fields, nil
+		}
+
+		keyStart := i
+		for i < len(input) && input[i] != '=' && !unicode.IsSpace(input[i]) {
+			i++
+		}
+		key := string(input[keyStart:i])
+		if key == "" {
+			return nil, fmt.Errorf("a value with no keyword before its \"=\" in the keyword/value connection string")
+		}
+
+		skipSpace()
+		if i >= len(input) || input[i] != '=' {
+			return nil, fmt.Errorf("missing \"=\" after %q in the keyword/value connection string", key)
+		}
+		i++
+		skipSpace()
+
+		var value strings.Builder
+		if i < len(input) && input[i] == '\'' {
+			i++
+			closed := false
+			for i < len(input) {
+				switch input[i] {
+				case '\\':
+					i++
+					if i < len(input) {
+						value.WriteRune(input[i])
+						i++
+					}
+				case '\'':
+					i++
+					closed = true
+				default:
+					value.WriteRune(input[i])
+					i++
+				}
+				if closed {
+					break
+				}
+			}
+			if !closed {
+				return nil, fmt.Errorf("unterminated quoted value for %q in the keyword/value connection string", key)
+			}
+		} else {
+			for i < len(input) && !unicode.IsSpace(input[i]) {
+				if input[i] == '\\' {
+					i++
+					if i >= len(input) {
+						break
+					}
+				}
+				value.WriteRune(input[i])
+				i++
+			}
+		}
+
+		fields[strings.ToLower(key)] = value.String()
+	}
 }
 
 // statedPort is parsePort for a value a connection string may simply not carry:
