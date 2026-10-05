@@ -1,0 +1,51 @@
+src/internal/app/app_config_test.go
+  s_46e73da0c90309::t_067554da004128 505-506
+src/internal/app/kubernetes_ownership.go
+  s_46e73da0c90309::t_7c67088b044cc6 113-115,117-127,134-140
+  s_06345c7791eb4e::t_db38a2192c6aed 141
+src/internal/app/environment_docker.go
+  s_46e73da0c90309::t_4c43440edec82e 471-478
+src/internal/app/restore_latest.go
+  s_46e73da0c90309::t_15d46dd9012fb1 255-263
+src/internal/app/external_backup_gate.go
+  s_46e73da0c90309::t_3df4d2a12e11f8 183-202
+  s_46e73da0c90309::t_43c243d5b3c258 89-95
+src/internal/app/backup_deployment.go
+  s_46e73da0c90309::t_72d4698218dc52 29-35,40-65,73
+src/internal/app/kubernetes_ownership_test.go
+  s_46e73da0c90309::t_7de735bd3edc77 171-178
+src/internal/app/plakar_restore.go
+  s_46e73da0c90309::t_fb8f36c97f17af 448-451,455-457
+  s_46e73da0c90309::t_909c1c26e56a86 429-439
+  s_46e73da0c90309::t_7fe411b105c72f 603-607
+  s_06345c7791eb4e::t_24c7cb3d03a08f 608-609
+src/internal/app/transient_workload.go
+  s_46e73da0c90309::t_8ca2ce680c67b3 1766-1775
+  s_46e73da0c90309::t_0e4542bc217a77 2069-2091
+  s_46e73da0c90309::t_5846f464dda33d 2039-2043
+  s_06345c7791eb4e::t_b8d17179530d39 2092-2093
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0a6eb71d7d8dab67988c684c53295be29a1ec0e4",
+  "prompts": {},
+  "sessions": {
+    "s_06345c7791eb4e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "13a0a049-a9b5-4717-b3ac-ed553d3e2d70",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Benoit Kohler <benoit@opsmill.com>"
+    },
+    "s_46e73da0c90309": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ef33f436-f116-464f-b06f-66a6f603369f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Benoit Kohler <benoit@opsmill.com>"
+    }
+  }
+}
