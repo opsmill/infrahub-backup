@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -317,6 +318,7 @@ func TestRestoreRefusesAnExternalDatabaseBeforeTouchingTheDeployment(t *testing.
 		backend := newGatedBackend()
 		backend.locations[serviceNeo4j] = EndpointLocationExternal
 		iops := newGatedOps(t, backend, BackendPlakar)
+		commitGroupSnapshot(t, iops, ComponentNeo4j)
 
 		// Through RestoreBackup, which delegates on its first line: the gate it
 		// carries is never reached on this backend, so RestorePlakarBackup
@@ -405,6 +407,145 @@ func TestRestoreRefusesAnExternalDatabaseBeforeTouchingTheDeployment(t *testing.
 		// performed must not take the deployment down on its way to saying so.
 		if len(backend.stopped) > 0 {
 			t.Errorf("services stopped = %v, want none", backend.stopped)
+		}
+	})
+}
+
+// commitGroupSnapshot commits one component snapshot of a single backup group
+// into the run's Plakar repository. A group holding only Neo4j is a complete
+// one, because it declares no component list to be measured against.
+func commitGroupSnapshot(t *testing.T, iops *InfrahubOps, component string) {
+	t.Helper()
+
+	if iops.config.Plakar.CacheDir == "" {
+		iops.config.Plakar.CacheDir = t.TempDir()
+	}
+
+	pathname, body := "/neo4j.dump", []byte("neo4j dump bytes")
+	if component == ComponentPostgres {
+		pathname, body = "/"+prefectDumpFilename, []byte("prefect dump bytes")
+	}
+
+	commitPlakarSnapshot(t, iops, []string{
+		TagBackupID + "=20260805_120000",
+		TagComponent + "=" + component,
+		TagNeo4jEdition + "=" + neo4jEditionCommunity,
+	}, pathname, body)
+}
+
+// TestEveryRestorePathGatesTheTaskManagerOnWhatItRestores is e200950's fix
+// carried to the two restore paths it did not reach. Each one gated the
+// task-manager database on --exclude-taskmanager alone, before the backup it
+// restores was read, so a backup without that database was refused, or given
+// a transient workload, for an external PostgreSQL the restore never writes.
+// Each now gates it on what the backup carries, and still before anything in
+// the deployment is stopped.
+func TestEveryRestorePathGatesTheTaskManagerOnWhatItRestores(t *testing.T) {
+	// assertPastTheGate is a run that was not refused on the task manager and
+	// stopped at the first step after the gate that asks the deployment
+	// anything: the running check, which unansweredStatusBackend fails.
+	assertPastTheGate := func(t *testing.T, err error) {
+		t.Helper()
+
+		if errors.Is(err, errExternalRestoreUnauthorised) {
+			t.Fatalf("restore = %v, want no authorisation asked for a database the backup does not carry", err)
+		}
+		if err == nil || !strings.Contains(err.Error(), "cannot determine whether") {
+			t.Fatalf("restore = %v, want the run past the gate and stopped at the running check", err)
+		}
+	}
+
+	assertRefusedUntouched := func(t *testing.T, backend *gatedBackend, err error) {
+		t.Helper()
+
+		if !errors.Is(err, errExternalRestoreUnauthorised) {
+			t.Fatalf("restore = %v, want the external task manager refused", err)
+		}
+		if len(backend.stopped) > 0 {
+			t.Errorf("services stopped = %v, want none", backend.stopped)
+		}
+	}
+
+	t.Run("plakar group without postgres is not gated on an external task manager", func(t *testing.T) {
+		backend := &unansweredStatusBackend{gatedBackend: newGatedBackend()}
+		backend.locations[serviceTaskManagerDB] = EndpointLocationExternal
+		iops := newGatedOps(t, backend, BackendPlakar)
+		commitGroupSnapshot(t, iops, ComponentNeo4j)
+
+		assertPastTheGate(t, iops.RestorePlakarBackup(false, false, 0, true, false))
+	})
+
+	t.Run("plakar group with postgres is gated on an external task manager", func(t *testing.T) {
+		backend := newGatedBackend()
+		backend.locations[serviceTaskManagerDB] = EndpointLocationExternal
+		iops := newGatedOps(t, backend, BackendPlakar)
+		commitGroupSnapshot(t, iops, ComponentNeo4j)
+		commitGroupSnapshot(t, iops, ComponentPostgres)
+
+		assertRefusedUntouched(t, backend, iops.RestorePlakarBackup(false, false, 0, true, false))
+	})
+
+	t.Run("plakar neo4j snapshot is not gated on an external task manager", func(t *testing.T) {
+		backend := &unansweredStatusBackend{gatedBackend: newGatedBackend()}
+		backend.locations[serviceTaskManagerDB] = EndpointLocationExternal
+		iops := newGatedOps(t, backend, BackendPlakar)
+		iops.config.Plakar.CacheDir = t.TempDir()
+		kctx, repo := newPlakarSnapshot(t, iops,
+			[]string{TagComponent + "=" + ComponentNeo4j, TagNeo4jEdition + "=" + neo4jEditionCommunity},
+			"/neo4j.dump", []byte("neo4j dump bytes"))
+
+		assertPastTheGate(t, iops.restoreSingleSnapshot(kctx, repo, "", false, false, false))
+	})
+
+	t.Run("plakar postgres snapshot is gated on an external task manager", func(t *testing.T) {
+		backend := newGatedBackend()
+		backend.locations[serviceTaskManagerDB] = EndpointLocationExternal
+		iops := newGatedOps(t, backend, BackendPlakar)
+		iops.config.Plakar.CacheDir = t.TempDir()
+		kctx, repo := newPlakarSnapshot(t, iops,
+			[]string{TagComponent + "=" + ComponentPostgres},
+			"/"+prefectDumpFilename, []byte("prefect dump bytes"))
+
+		assertRefusedUntouched(t, backend, iops.restoreSingleSnapshot(kctx, repo, "", false, false, false))
+	})
+
+	// The S3 leg of restore --latest cannot read the archive before it is
+	// downloaded, so it gates only Neo4j there and leaves the task manager to
+	// RestoreBackup, which reads the archive first.
+	newest := backupRef{Name: backupNameAt(retentionNow)}
+
+	t.Run("restore --latest --s3 downloads despite an external task manager", func(t *testing.T) {
+		backend := newGatedBackend()
+		backend.locations[serviceTaskManagerDB] = EndpointLocationExternal
+		iops := newGatedOps(t, backend, BackendTarball)
+		client := newFakeS3RestoreClient("prod", newest)
+
+		restored := 0
+		err := iops.restoreLatestFromS3(context.Background(), client, "", func(string) error {
+			restored++
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("restoreLatestFromS3() = %v, want nil", err)
+		}
+		if len(client.keys) != 1 || restored != 1 {
+			t.Errorf("downloads = %v, restores = %d, want the archive downloaded and handed to the restore", client.keys, restored)
+		}
+	})
+
+	t.Run("restore --latest --s3 refuses an external Neo4j before downloading", func(t *testing.T) {
+		backend := newGatedBackend()
+		backend.locations[serviceNeo4j] = EndpointLocationExternal
+		iops := newGatedOps(t, backend, BackendTarball)
+		client := newFakeS3RestoreClient("prod", newest)
+
+		err := iops.restoreLatestFromS3(context.Background(), client, "", func(string) error {
+			t.Fatal("the restore ran, want the run refused before the download")
+			return nil
+		})
+		assertRefusedUntouched(t, backend, err)
+		if len(client.keys) > 0 {
+			t.Errorf("downloads = %v, want none", client.keys)
 		}
 	})
 }

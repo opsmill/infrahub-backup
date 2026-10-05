@@ -215,21 +215,7 @@ func (iops *InfrahubOps) RestoreLatestBackup(s3 bool, excludeTaskManager bool, r
 		// downloaded is necessarily the one that was selected: there is no second
 		// configuration and no URI round-trip that could resolve a different bucket,
 		// prefix, or endpoint in between.
-		return restoreLatestFrom(ctx, newS3Location(client), decryptKey, func(ref backupRef) error {
-			// Where each database lives, before the object is pulled out of S3.
-			// RestoreBackup gates on the same question and would refuse the same run,
-			// but only after a multi-gigabyte download onto a host that then deletes it
-			// again — and a scheduled restore is exactly the caller that cannot watch
-			// that happen. The local leg needs no gate of its own: its archive is
-			// already on this host, so RestoreBackup's costs nothing extra. It is
-			// placed after the pool's own refusals so a mistyped bucket still reports
-			// the bucket (FR-006, FR-007).
-			if err := iops.prepareDatabaseRestore(!excludeTaskManager); err != nil {
-				return err
-			}
-
-			return downloadLatestS3Backup(ctx, client, iops.config.BackupDir, ref, restore)
-		})
+		return iops.restoreLatestFromS3(ctx, client, decryptKey, restore)
 	}
 
 	return restoreLatestFrom(ctx, newLocalLocation(iops.config.BackupDir), decryptKey, func(ref backupRef) error {
@@ -237,5 +223,39 @@ func (iops *InfrahubOps) RestoreLatestBackup(s3 bool, excludeTaskManager bool, r
 		// carries a base name, and joining it under the pool's own directory — the
 		// directory that was listed — is what turns it back into a path.
 		return restore(filepath.Join(iops.config.BackupDir, ref.Name))
+	})
+}
+
+// s3LatestClient is what the S3 leg of RestoreLatestBackup needs from one client: the
+// listing that selects the archive and the download that fetches it.
+type s3LatestClient interface {
+	s3Backend
+	s3RestoreClient
+}
+
+// restoreLatestFromS3 is the S3 leg of RestoreLatestBackup: select the newest object in
+// the bucket, settle where Neo4j lives, download the object and hand it to restore.
+func (iops *InfrahubOps) restoreLatestFromS3(ctx context.Context, client s3LatestClient, decryptKey string, restore func(path string) error) error {
+	return restoreLatestFrom(ctx, newS3Location(client), decryptKey, func(ref backupRef) error {
+		// Where Neo4j lives, before the object is pulled out of S3. RestoreBackup
+		// gates on the same question and would refuse the same run, but only after a
+		// multi-gigabyte download onto a host that then deletes it again — and a
+		// scheduled restore is exactly the caller that cannot watch that happen. The
+		// local leg needs no gate of its own: its archive is already on this host, so
+		// RestoreBackup's costs nothing extra. It is placed after the pool's own
+		// refusals so a mistyped bucket still reports the bucket (FR-006, FR-007).
+		//
+		// Only Neo4j, which every archive carries. Whether the task-manager database
+		// is written is the archive's to say, and its metadata is not readable until
+		// the object is on this host: gating it here would refuse, or create a
+		// workload for, an external PostgreSQL that an archive without it never
+		// touches. RestoreBackup gates it once the metadata is read, still before
+		// anything is stopped, and its second pass over Neo4j does nothing (see
+		// unpreparedExternalRestores).
+		if err := iops.prepareDatabaseRestore(false); err != nil {
+			return err
+		}
+
+		return downloadLatestS3Backup(ctx, client, iops.config.BackupDir, ref, restore)
 	})
 }

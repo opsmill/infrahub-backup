@@ -7,6 +7,7 @@ import (
 	"iter"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -37,18 +38,11 @@ func (iops *InfrahubOps) RestorePlakarBackup(excludeTaskManager bool, restoreMig
 		return err
 	}
 
-	// Where each database lives, before the repository is opened and long
-	// before anything is stopped. See prepareDatabaseRestore.
-	//
-	// It is also where a database outside the deployment gets the workload the
-	// restore runs in, so whatever this run creates is given back on every exit
-	// path from here on (FR-011). An all-internal deployment creates none and
-	// the call does nothing.
+	// A database outside the deployment gets the workload the restore runs in
+	// at the gate each restore mode below reaches, so whatever this run creates
+	// is given back on every exit path from here on (FR-011). An all-internal
+	// deployment creates none and the call does nothing.
 	defer iops.releaseTransientWorkloads()
-
-	if err := iops.prepareDatabaseRestore(!excludeTaskManager); err != nil {
-		return err
-	}
 
 	// Initialize Plakar context and repository
 	kctx, err := initPlakarContext(iops.config.Plakar)
@@ -100,6 +94,18 @@ func (iops *InfrahubOps) RestorePlakarBackup(excludeTaskManager bool, restoreMig
 		"status":     group.Status,
 		"components": len(group.Snapshots),
 	}).Info("Restoring from backup group")
+
+	// Where each database this restore writes lives, before anything is
+	// exported, probed or stopped. See prepareDatabaseRestore.
+	//
+	// It runs once the group is chosen, because the group decides which
+	// databases are written: one without a postgres snapshot writes only Neo4j,
+	// and must not be refused, or have a workload created, for an external
+	// PostgreSQL it never touches. Opening the repository and reading its
+	// snapshot tags changes nothing in the deployment.
+	if err := iops.prepareDatabaseRestore(groupCarriesTaskManager(group) && !excludeTaskManager); err != nil {
+		return err
+	}
 
 	return iops.restoreBackupGroup(kctx, repo, group, excludeTaskManager, restoreMigrateFormat, resetDeploymentID)
 }
@@ -217,13 +223,7 @@ func (iops *InfrahubOps) restoreBackupGroup(kctx *kcontext.KContext, repo *repos
 	}
 
 	// Determine task manager availability
-	taskManagerIncluded := false
-	for _, snap := range group.Snapshots {
-		if snap.Component == ComponentPostgres {
-			taskManagerIncluded = true
-			break
-		}
-	}
+	taskManagerIncluded := groupCarriesTaskManager(group)
 
 	shouldRestoreTaskManager := taskManagerIncluded && !excludeTaskManager
 	prefectPath := filepath.Join(backupDir, "prefect.dump")
@@ -338,6 +338,14 @@ func (iops *InfrahubOps) restoreBackupGroup(kctx *kcontext.KContext, repo *repos
 	return nil
 }
 
+// groupCarriesTaskManager reports whether a backup group holds a postgres
+// snapshot, which is the task-manager database a group restore writes.
+func groupCarriesTaskManager(group *BackupGroupInfo) bool {
+	return slices.ContainsFunc(group.Snapshots, func(snap SnapshotInfo) bool {
+		return snap.Component == ComponentPostgres
+	})
+}
+
 // extractNeo4jEnterpriseTar extracts the neo4j enterprise backup tar archive
 // (created by backupNeo4jEnterpriseStream) into databaseDir.
 // The tar contains files under an "infrahubops/" prefix which is stripped.
@@ -415,6 +423,14 @@ func (iops *InfrahubOps) restoreSingleSnapshot(kctx *kcontext.KContext, repo *re
 	component := tags[TagComponent]
 
 	logrus.Infof("Restoring single component: %s", component)
+
+	// Where each database this restore writes lives, before the edition probe
+	// and before anything is stopped. See prepareDatabaseRestore. It runs once
+	// the snapshot's component is read, because only a postgres snapshot writes
+	// the task-manager database.
+	if err := iops.prepareDatabaseRestore(component == ComponentPostgres && !excludeTaskManager); err != nil {
+		return err
+	}
 
 	// Detect Neo4j edition for restore
 	detectedEdition, detectionErr := iops.detectNeo4jEdition()

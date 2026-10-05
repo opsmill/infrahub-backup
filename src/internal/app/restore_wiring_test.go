@@ -226,6 +226,33 @@ func writeRestoreArchiveWith(t *testing.T, iops *InfrahubOps, includeTaskManager
 func newPlakarSnapshot(t *testing.T, iops *InfrahubOps, tags []string, pathname string, body []byte) (*kcontext.KContext, *repository.Repository) {
 	t.Helper()
 
+	commitPlakarSnapshot(t, iops, tags, pathname, body)
+
+	// Re-opened rather than handed back, because that is the only way the
+	// committed snapshot is listable — which is also what production does: a
+	// `create` run commits and exits, and a `restore` run opens the repository
+	// afresh.
+	kctx, err := initPlakarContext(iops.config.Plakar)
+	if err != nil {
+		t.Fatalf("initPlakarContext() = %v, want nil", err)
+	}
+	t.Cleanup(func() { closePlakarContext(kctx) })
+
+	repo, err := openRepo(kctx, iops.config.Plakar)
+	if err != nil {
+		t.Fatalf("openRepo() = %v, want nil", err)
+	}
+	t.Cleanup(func() { closeRepo(repo) })
+
+	return kctx, repo
+}
+
+// commitPlakarSnapshot commits one snapshot carrying the supplied tags and one
+// file into the run's own repository path, creating the repository on first
+// use, and closes the repository again so a restore run opens it afresh.
+func commitPlakarSnapshot(t *testing.T, iops *InfrahubOps, tags []string, pathname string, body []byte) {
+	t.Helper()
+
 	writeCtx, err := initPlakarContext(iops.config.Plakar)
 	if err != nil {
 		t.Fatalf("initPlakarContext() = %v, want nil", err)
@@ -259,24 +286,6 @@ func newPlakarSnapshot(t *testing.T, iops *InfrahubOps, tags []string, pathname 
 	builder.Close()
 	closeRepo(writeRepo)
 	closePlakarContext(writeCtx)
-
-	// Re-opened rather than handed back, because that is the only way the
-	// committed snapshot is listable — which is also what production does: a
-	// `create` run commits and exits, and a `restore` run opens the repository
-	// afresh.
-	kctx, err := initPlakarContext(iops.config.Plakar)
-	if err != nil {
-		t.Fatalf("initPlakarContext() = %v, want nil", err)
-	}
-	t.Cleanup(func() { closePlakarContext(kctx) })
-
-	repo, err := openRepo(kctx, iops.config.Plakar)
-	if err != nil {
-		t.Fatalf("openRepo() = %v, want nil", err)
-	}
-	t.Cleanup(func() { closeRepo(repo) })
-
-	return kctx, repo
 }
 
 // enterpriseNeo4jTar is the payload an enterprise Neo4j snapshot carries: an
