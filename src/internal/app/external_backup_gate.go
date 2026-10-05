@@ -86,7 +86,13 @@ func databaseServicesForBackup(includeTaskManager bool) []string {
 // location the target carried was established here and then asked for again by
 // what came next.
 func resolveDatabaseTargets(queries deploymentQueries, operation databaseOperation, includeTaskManager bool, auth ExternalRestoreAuth) (databaseTargets, error) {
-	services := databaseServicesForBackup(includeTaskManager)
+	return resolveDatabaseTargetsFor(queries, operation, databaseServicesForBackup(includeTaskManager), auth)
+}
+
+// resolveDatabaseTargetsFor is resolveDatabaseTargets for an explicit list of
+// databases, for the one restore that may write the task-manager database
+// without Neo4j: a single Plakar postgres snapshot.
+func resolveDatabaseTargetsFor(queries deploymentQueries, operation databaseOperation, services []string, auth ExternalRestoreAuth) (databaseTargets, error) {
 	targets := make(databaseTargets, 0, len(services))
 	for _, service := range services {
 		target, err := databaseTargetWith(queries, operation, service, auth)
@@ -174,7 +180,26 @@ func (iops *InfrahubOps) prepareDatabaseRestore(includeTaskManager bool) error {
 // queries, following prepareDatabaseCaptureWith's injection idiom so the gate is
 // testable without a cluster.
 func (iops *InfrahubOps) prepareDatabaseRestoreWith(queries deploymentQueries, includeTaskManager bool) error {
-	targets, err := resolveDatabaseTargets(queries, databaseRestore, includeTaskManager, iops.externalRestoreAuth())
+	return iops.prepareDatabaseRestoreOfWith(queries, databaseServicesForBackup(includeTaskManager))
+}
+
+// prepareDatabaseRestoreOf is prepareDatabaseRestore for exactly the databases
+// a restore writes. A single Plakar postgres snapshot writes the task-manager
+// database and never Neo4j, so it must not be refused, asked for an
+// authorisation, or given a workload for an external Neo4j it never touches.
+func (iops *InfrahubOps) prepareDatabaseRestoreOf(services []string) error {
+	queries, err := iops.deploymentQueries()
+	if err != nil {
+		return err
+	}
+
+	return iops.prepareDatabaseRestoreOfWith(queries, services)
+}
+
+// prepareDatabaseRestoreOfWith is prepareDatabaseRestoreOf against the supplied
+// queries.
+func (iops *InfrahubOps) prepareDatabaseRestoreOfWith(queries deploymentQueries, services []string) error {
+	targets, err := resolveDatabaseTargetsFor(queries, databaseRestore, services, iops.externalRestoreAuth())
 	if err != nil {
 		return err
 	}

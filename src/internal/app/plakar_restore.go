@@ -426,25 +426,35 @@ func (iops *InfrahubOps) restoreSingleSnapshot(kctx *kcontext.KContext, repo *re
 
 	// Where each database this restore writes lives, before the edition probe
 	// and before anything is stopped. See prepareDatabaseRestore. It runs once
-	// the snapshot's component is read, because only a postgres snapshot writes
-	// the task-manager database.
-	if err := iops.prepareDatabaseRestore(component == ComponentPostgres && !excludeTaskManager); err != nil {
+	// the snapshot's component is read, because the component is the one
+	// database this restore writes: a postgres snapshot writes the task-manager
+	// database and never Neo4j, so Neo4j is not gated for it.
+	writes := []string{}
+	switch {
+	case component == ComponentNeo4j:
+		writes = append(writes, serviceNeo4j)
+	case component == ComponentPostgres && !excludeTaskManager:
+		writes = append(writes, serviceTaskManagerDB)
+	}
+	if err := iops.prepareDatabaseRestoreOf(writes); err != nil {
 		return err
 	}
-
-	// Detect Neo4j edition for restore
-	detectedEdition, detectionErr := iops.detectNeo4jEdition()
-	editionInfo := NewNeo4jEditionInfo(detectedEdition, detectionErr)
 
 	// The edition tag is group metadata: buildSnapshotTags stamps it on every
 	// component's snapshot, as it does the version and the component list, so
 	// that any one snapshot identifies its group. It gates only the component
 	// it describes. Read for every component, it refused a Postgres-only
 	// restore on a Community server because the group's Neo4j had been
-	// Enterprise — an edition that restore never touches.
+	// Enterprise — an edition that restore never touches. The server is asked
+	// for its own edition only here for the same reason: a postgres snapshot
+	// leaves Neo4j ungated, and asking a database the restore never touches is
+	// a probe nothing reads.
 	var neo4jEdition string
 	if component == ComponentNeo4j {
 		if tagged := tags[TagNeo4jEdition]; tagged != "" {
+			detectedEdition, detectionErr := iops.detectNeo4jEdition()
+			editionInfo := NewNeo4jEditionInfo(detectedEdition, detectionErr)
+
 			resolvedEdition, err := editionInfo.ResolveRestoreEdition(tagged)
 			if err != nil {
 				return err
@@ -588,6 +598,13 @@ func (iops *InfrahubOps) restoreSingleSnapshot(kctx *kcontext.KContext, repo *re
 			return err
 		}
 		if err := iops.restorePostgreSQL(workDir); err != nil {
+			return err
+		}
+		// stopAppContainers took cache, message-queue and the task manager down
+		// too, and the restart below brings back only the server and the worker.
+		// The other branches restart these here; without it the success path
+		// hands `stopped` over and they stay at zero replicas.
+		if err := iops.restartDependencies(); err != nil {
 			return err
 		}
 

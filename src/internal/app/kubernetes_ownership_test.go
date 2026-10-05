@@ -168,6 +168,14 @@ func TestDeclaredServiceIn_ReadsTheKeyThatNamesAService(t *testing.T) {
 		t.Errorf("declaredServiceIn = %q, want no declaration for a co-hosted chart's own label", got)
 	}
 
+	// The Prefect chart's own `app.kubernetes.io/component: server` is not the
+	// Infrahub chart's shortened infrahub-server label: the task manager pod
+	// carries it beside `infrahub/service: task-manager`.
+	prefect := map[string]string{"app.kubernetes.io/component": "server", "infrahub/service": "task-manager"}
+	if got := declaredServiceIn(prefect); got != "task-manager" {
+		t.Errorf("declaredServiceIn(prefect server pod) = %q, want task-manager", got)
+	}
+
 	if got := declaredServiceIn(nil, map[string]string{"component": "task-manager-db"}); got != "task-manager-db" {
 		t.Errorf("declaredServiceIn = %q, want task-manager-db from the later key", got)
 	}

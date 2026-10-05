@@ -110,14 +110,34 @@ func serviceLabelValues(service string) []string {
 func declaredServiceIn(labelSets ...map[string]string) string {
 	for _, key := range serviceLabelKeys {
 		for _, labels := range labelSets {
-			if service := declaredServiceValue(labels[key]); service != "" {
-				return service
+			service := declaredServiceValue(labels[key])
+			if service == "" {
+				continue
 			}
+			// The shortened `server` is the chart's own form, and only the
+			// chart's own key carries it. On a generic key it is somebody
+			// else's vocabulary: the Prefect chart labels the task manager
+			// `app.kubernetes.io/component: server` beside
+			// `infrahub/service: task-manager`, and reading the first made the
+			// task manager declare itself infrahub-server.
+			if service == infrahubServerShortLabel && key != infrahubServiceLabelKey {
+				continue
+			}
+
+			return service
 		}
 	}
 
 	return ""
 }
+
+// infrahubServiceLabelKey is the label key the Infrahub chart itself declares
+// services with, and infrahubServerShortLabel the shortened value it gives
+// infrahub-server under that key.
+const (
+	infrahubServiceLabelKey  = "infrahub/service"
+	infrahubServerShortLabel = "server"
+)
 
 // declaredServiceValue returns value when it names a service in this
 // deployment's own vocabulary, and "" when it does not.

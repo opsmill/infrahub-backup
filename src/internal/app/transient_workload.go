@@ -1763,11 +1763,16 @@ func captureWorkloadSpec(cfg *Configuration, namespace, runID, service string, s
 // bound.
 //
 // The pod has to outlive all three, and it is created at the gate rather than
-// beside the operation — so its deadline also has to cover the extraction,
-// checksum validation and quiescing that happen in between. That is what the
-// margin is for on this arm, and it is the reason this role's deadline is the
-// widest of the three.
-const externalDBRestoreFullBoundCalls = 3
+// beside the operation — so its deadline also has to cover every full-bound
+// operation the run performs while it is held, not only the ones it hosts. A
+// Neo4j restore workload is held through the seed upload (stageNeo4jSeed opens
+// its own externalDBBound), the PostgreSQL dump copy and restore in the other
+// workload, up to two seed statements on a server older than the replace
+// floor, and the wait for the database to come online: six bounds. Counting
+// only its own three put the pod's deadline inside a run the tool still
+// considered healthy, so the cluster could remove it mid-wait. The extraction,
+// checksum validation and quiescing in between are what the margin is for.
+const externalDBRestoreFullBoundCalls = 6
 
 // externalDBRestoreDeadline is the restore workload's activeDeadlineSeconds:
 // the three operations it hosts each get the whole operation bound, on the same
@@ -2031,6 +2036,11 @@ func (k *KubernetesBackend) createTransientWorkloadWith(ops transientClusterOps,
 func (w *TransientWorkload) resolveJobPod(timeout time.Duration) error {
 	selector := "job-name=" + w.JobName
 	err := w.waitFor(timeout, "--for=create", "pod", "-l", selector)
+	if errorMentions(err, "unrecognized condition") {
+		// `--for=create` arrived in kubectl 1.31; an older client refuses the
+		// condition itself, so it is asked by polling instead.
+		err = w.pollForJobPod(timeout, selector)
+	}
 	if err != nil {
 		return fmt.Errorf("the transient %s Job %s did not create a pod within %s: %w", w.Service, w.JobName, timeout, err)
 	}
@@ -2054,6 +2064,31 @@ func (w *TransientWorkload) resolveJobPod(timeout time.Duration) error {
 	w.PodName = live[0]
 
 	return nil
+}
+
+// transientPodPollInterval is how often pollForJobPod asks whether the Job has
+// created its pod.
+const transientPodPollInterval = 2 * time.Second
+
+// pollForJobPod waits for the Job to create a pod by listing it, for a kubectl
+// that predates `kubectl wait --for=create`.
+func (w *TransientWorkload) pollForJobPod(timeout time.Duration, selector string) error {
+	deadline := time.Now().Add(timeout)
+
+	for {
+		listed, err := w.ops.query("kubectl", "get", "pods", "-l", selector, "-n", w.Namespace, "-o", "name")
+		if err == nil && len(nonEmptyLines(listed)) > 0 {
+			return nil
+		}
+
+		if sleepUntilNextPoll(deadline, transientPodPollInterval) {
+			if err != nil {
+				return err
+			}
+
+			return fmt.Errorf("no pod carrying %s appeared within %s", selector, timeout)
+		}
+	}
 }
 
 // waitUntilReady blocks until the pod can be exec'd into, and reports why it

@@ -468,6 +468,14 @@ func (d *DockerBackend) IsRunning(service string) (bool, error) {
 	cmd := d.composeArgs("ps", service)
 	output, err := d.executor.runCommand("docker", cmd...)
 	if err != nil {
+		// A service the compose project does not define is not running, which
+		// is what an optional service (task-manager-background-svc on an older
+		// stack) looks like. stopAppContainers fails the run on an error, so
+		// reporting this one as an error would refuse every backup and restore
+		// of such a stack.
+		if strings.Contains(output, "no such service") {
+			return false, nil
+		}
 		return false, err
 	}
 	return strings.Contains(output, "Up"), nil

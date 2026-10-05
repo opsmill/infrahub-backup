@@ -429,23 +429,6 @@ func (iops *InfrahubOps) applyPrefectEndpoint(connStr string) {
 	}
 }
 
-// statedPrefectSSLRootCert returns the certificate authority the connection
-// string names, and "" when it names none.
-//
-// It is the PostgreSQL half of what INFRAHUB_DB_TLS_CA_FILE is for Neo4j: the
-// anchor the deployment's own client verifies this server against, and so the
-// anchor the transient workload's client needs if it is to verify at all rather
-// than only encrypt. Read here rather than from pgx's parse of the URL for the
-// reason applyPrefectEndpoint reads the string itself — pgx loads the file at
-// parse time, from a path that exists inside the *deployment's* container and
-// not on the machine running this tool, so asking pgx for it turns a usable URL
-// into a parse failure.
-func statedPrefectSSLRootCert(connStr string) string {
-	_, _, caFile := statedPrefectConnection(connStr)
-
-	return caFile
-}
-
 // statedPrefectConnection returns what a connection string itself states — the
 // host and port the database is at, and the certificate authority it names —
 // and nothing else: an empty host means the string named none, not that the

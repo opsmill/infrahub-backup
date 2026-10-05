@@ -502,8 +502,8 @@ func TestStatedPrefectSSLRootCert(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := statedPrefectSSLRootCert(tt.connStr); got != tt.want {
-				t.Errorf("statedPrefectSSLRootCert(%q) = %q, want %q", tt.connStr, got, tt.want)
+			if _, _, got := statedPrefectConnection(tt.connStr); got != tt.want {
+				t.Errorf("statedPrefectConnection(%q) CA = %q, want %q", tt.connStr, got, tt.want)
 			}
 		})
 	}

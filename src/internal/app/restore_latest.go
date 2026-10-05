@@ -252,6 +252,15 @@ func (iops *InfrahubOps) restoreLatestFromS3(ctx context.Context, client s3Lates
 		// touches. RestoreBackup gates it once the metadata is read, still before
 		// anything is stopped, and its second pass over Neo4j does nothing (see
 		// unpreparedExternalRestores).
+		//
+		// The credentials are resolved first. This gate runs before RestoreBackup's
+		// DetectEnvironment, and the gate records the endpoint it prepares for the
+		// whole run: without this, a deployment that leaves INFRAHUB_DB_DATABASE (or
+		// the username) at Infrahub's default recorded an empty database name, which
+		// the seed statement then refused only after the deployment was quiesced.
+		if err := iops.fetchDatabaseCredentials(); err != nil {
+			return fmt.Errorf("could not fetch database credentials: %w", err)
+		}
 		if err := iops.prepareDatabaseRestore(false); err != nil {
 			return err
 		}
