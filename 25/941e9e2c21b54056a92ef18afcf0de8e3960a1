@@ -1,0 +1,30 @@
+src/internal/app/docker_service_ready.go
+  s_46e73da0c90309::t_f63ccb80986b22 88
+  s_46e73da0c90309::t_455ed1654066dd 1-87,89-180
+src/internal/app/plakar_restore.go
+  s_46e73da0c90309::t_5b143bdff5504c 324-325,500-501,619-620
+src/internal/app/backup.go
+  s_46e73da0c90309::t_5b143bdff5504c 798-799
+src/internal/app/docker_service_ready_test.go
+  s_46e73da0c90309::t_94d0b6b9eaa723 1-162
+src/internal/app/environment_docker.go
+  s_46e73da0c90309::t_bc69c7293c4e1a 453,462-475
+changelog/172.fixed.md
+  s_46e73da0c90309::t_0845a5159bf742 1
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "25941e9e2c21b54056a92ef18afcf0de8e3960a1",
+  "prompts": {},
+  "sessions": {
+    "s_46e73da0c90309": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ef33f436-f116-464f-b06f-66a6f603369f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Benoit Kohler <benoit@opsmill.com>"
+    }
+  }
+}
