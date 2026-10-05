@@ -1734,11 +1734,12 @@ const externalDBCaptureFullBoundCalls = 2
 // on a deployment that never set the flag, and negative — flooring the pod at
 // one second — on one that set it wrongly.
 //
-// One caller is outside what this can promise: the streaming capture pipes the
-// artifact out through ExecStreamPipe, which the tool bounds by an idle timeout
-// rather than by a duration, so a slow-but-progressing transfer can outlive any
-// deadline computed here. The deadline is a floor on that path, not a
-// guarantee.
+// The streaming capture pipes the artifact out through ExecStreamPipe rather
+// than copying it. That stream is held to the capture's bound as a whole, not
+// only to an idle timeout (execReadCloser.deadline), so it takes the place of
+// the copy in this count, and a slow transfer that is still progressing is
+// ended by the tool before the cluster removes the pod. A stream the pod's
+// removal does cut short fails its read rather than ending as if complete.
 func externalDBCaptureDeadline(cfg *Configuration) time.Duration {
 	return externalDBWorkloadDeadline(externalDBCaptureFullBoundCalls, externalDBBound(cfg))
 }

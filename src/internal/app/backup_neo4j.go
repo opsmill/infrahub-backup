@@ -118,24 +118,80 @@ func (iops *InfrahubOps) backupNeo4jCommunityStream() (func() (io.ReadCloser, er
 // is considered stalled if no data has been read.
 const defaultStreamIdleTimeout = 30 * time.Minute
 
-// execReadCloser wraps an exec stdout pipe with cleanup logic and idle timeout.
+// execReadCloser wraps an exec stdout pipe with cleanup logic, an idle timeout
+// and, optionally, a deadline on the whole stream.
+//
+// The consumer is kloset, which reads a record to EOF and then closes it with
+// its error discarded. So the outcome of the command producing the stream has
+// to be reported by Read, not by Close: a command that dies part-way through —
+// a transient pod removed at its activeDeadlineSeconds, a dump that fails — ends
+// its stdout like a command that finished, and an EOF taken at face value is a
+// truncated artifact stored as a complete one. On EOF, Read waits for the
+// command and returns its failure in place of the EOF, which kloset records as
+// a source error and commitComponentSnapshot refuses.
 type execReadCloser struct {
 	reader      io.ReadCloser
 	wait        func() error
 	cleanup     func()
 	closed      bool
-	timedOut    bool
 	idleTimeout time.Duration // 0 = no timeout
-	timer       *time.Timer   // reusable timer for idle timeout
+	timer       *time.Timer   // reusable timer for idle timeout and deadline
+
+	// deadline is when the stream must have ended, or the zero time for none.
+	// It exists for a producer that runs in a pod with its own
+	// activeDeadlineSeconds: the idle timeout cannot stop a slow transfer that
+	// keeps making progress, so without this the cluster, not the tool, would
+	// be what ends the stream.
+	deadline time.Time
+
+	// failure is the error every Read returns once the stream has failed.
+	failure error
+
+	// waited records that wait has been called, and waitErr what it returned:
+	// wait is cmd.Wait, which may be called once.
+	waited  bool
+	waitErr error
 }
 
 var errStreamIdleTimeout = fmt.Errorf("stream idle timeout")
 
+// errStreamDeadline is what a Read returns once the stream has run past its
+// deadline.
+var errStreamDeadline = fmt.Errorf("stream deadline exceeded")
+
 func (e *execReadCloser) Read(p []byte) (int, error) {
-	if e.timedOut {
-		return 0, errStreamIdleTimeout
+	if e.failure != nil {
+		return 0, e.failure
 	}
-	if e.idleTimeout <= 0 {
+
+	n, err := e.read(p)
+	if errors.Is(err, io.EOF) {
+		if waitErr := e.finish(); waitErr != nil {
+			e.failure = fmt.Errorf("the stream ended because the command producing it failed, so what was read is incomplete: %w", waitErr)
+
+			return n, e.failure
+		}
+	}
+
+	return n, err
+}
+
+// read is one Read of the underlying pipe, under the idle timeout and the
+// deadline, whichever is nearer.
+func (e *execReadCloser) read(p []byte) (int, error) {
+	limit := e.idleTimeout
+	deadlineIsNearer := false
+	if !e.deadline.IsZero() {
+		remaining := time.Until(e.deadline)
+		if remaining <= 0 {
+			return 0, e.fail(fmt.Errorf("%w: the stream did not end within its bound", errStreamDeadline))
+		}
+		if limit <= 0 || remaining < limit {
+			limit = remaining
+			deadlineIsNearer = true
+		}
+	}
+	if limit <= 0 {
 		return e.reader.Read(p)
 	}
 
@@ -151,7 +207,7 @@ func (e *execReadCloser) Read(p []byte) (int, error) {
 
 	// Lazily create the timer on first use, reset on subsequent calls
 	if e.timer == nil {
-		e.timer = time.NewTimer(e.idleTimeout)
+		e.timer = time.NewTimer(limit)
 	} else {
 		if !e.timer.Stop() {
 			select {
@@ -159,18 +215,41 @@ func (e *execReadCloser) Read(p []byte) (int, error) {
 			default:
 			}
 		}
-		e.timer.Reset(e.idleTimeout)
+		e.timer.Reset(limit)
 	}
 
 	select {
 	case res := <-ch:
 		return res.n, res.err
 	case <-e.timer.C:
-		e.timedOut = true
-		// Close the underlying reader to unblock the goroutine
-		e.reader.Close()
-		return 0, fmt.Errorf("stream idle timeout after %v with no data", e.idleTimeout)
+		if deadlineIsNearer {
+			return 0, e.fail(fmt.Errorf("%w: the stream did not end within its bound", errStreamDeadline))
+		}
+
+		return 0, e.fail(fmt.Errorf("%w after %v with no data", errStreamIdleTimeout, e.idleTimeout))
 	}
+}
+
+// fail records err as the stream's outcome and closes the underlying reader,
+// which unblocks a Read still in flight and tells the producer to stop.
+func (e *execReadCloser) fail(err error) error {
+	e.failure = err
+	e.reader.Close()
+
+	return err
+}
+
+// finish waits for the producing command, once.
+func (e *execReadCloser) finish() error {
+	if e.waited {
+		return e.waitErr
+	}
+	e.waited = true
+	if e.wait != nil {
+		e.waitErr = e.wait()
+	}
+
+	return e.waitErr
 }
 
 func (e *execReadCloser) Close() error {
@@ -184,14 +263,17 @@ func (e *execReadCloser) Close() error {
 		e.timer.Stop()
 	}
 
-	// Close the reader first (may signal EOF to the process)
+	// Close the reader first (may signal EOF to the process). Once the command
+	// has been waited for, its pipe is already closed and the error from closing
+	// it again says nothing about the stream.
+	alreadyWaited := e.waited
 	readErr := e.reader.Close()
+	if alreadyWaited {
+		readErr = nil
+	}
 
 	// Wait for the process to finish
-	var waitErr error
-	if e.wait != nil {
-		waitErr = e.wait()
-	}
+	waitErr := e.finish()
 
 	// Run cleanup
 	if e.cleanup != nil {
@@ -1431,5 +1513,17 @@ func (iops *InfrahubOps) streamNeo4jEnterpriseExternal(backupMetadata string) (i
 		return nil, fmt.Errorf("failed to start the external neo4j enterprise stream: %w", err)
 	}
 
-	return &execReadCloser{reader: stdout, wait: wait, idleTimeout: defaultStreamIdleTimeout, cleanup: teardown}, nil
+	// The capture workload's deadline budgets a whole operation bound for the
+	// artifact to leave the pod (externalDBCaptureFullBoundCalls), and on this
+	// path the stream is how it leaves. Bounding the stream by the same amount
+	// keeps the tool's own deadline ahead of the cluster's, so a slow transfer
+	// that is still progressing is stopped and reported by the tool rather
+	// than cut short by the pod being removed.
+	return &execReadCloser{
+		reader:      stdout,
+		wait:        wait,
+		idleTimeout: defaultStreamIdleTimeout,
+		deadline:    time.Now().Add(capture.Bound),
+		cleanup:     teardown,
+	}, nil
 }

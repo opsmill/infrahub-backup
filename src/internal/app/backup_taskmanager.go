@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sirupsen/logrus"
 )
@@ -175,7 +176,16 @@ func (iops *InfrahubOps) streamTaskManagerDBExternal() (io.ReadCloser, error) {
 		return nil, fmt.Errorf("failed to start the external postgres stream from %s: %w", capture.Endpoint.endpointTarget(), err)
 	}
 
-	return &execReadCloser{reader: stdout, wait: wait, idleTimeout: defaultStreamIdleTimeout, cleanup: capture.Release}, nil
+	// Bounded by the capture's own bound, which the capture workload's deadline
+	// budgets for, so that the tool rather than the cluster ends a transfer that
+	// is slow but still progressing (see streamNeo4jEnterpriseExternal).
+	return &execReadCloser{
+		reader:      stdout,
+		wait:        wait,
+		idleTimeout: defaultStreamIdleTimeout,
+		deadline:    time.Now().Add(capture.Bound),
+		cleanup:     capture.Release,
+	}, nil
 }
 
 // backupTaskManagerDBExternal takes the dump from a server outside the

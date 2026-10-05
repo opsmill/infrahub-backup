@@ -2,11 +2,13 @@ package app
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // neo4jScriptedBackend answers the queries the Neo4j backup and restore paths make against
@@ -332,4 +334,105 @@ func TestIsNeo4jClusterReadsWhatTheProbeObserved(t *testing.T) {
 			t.Error("isNeo4jCluster() = true, want the shipped assume-not-clustered reading of an unusable answer")
 		}
 	})
+}
+
+// A producer that dies part-way through ends its stdout like one that
+// finished. kloset reads to EOF and discards Close's error, so the failure has
+// to come out of Read, or a truncated stream is stored as a complete one.
+func TestExecReadCloser_EOFFromAFailedCommandIsAReadError(t *testing.T) {
+	podRemoved := errors.New("command terminated with exit code 137")
+	waits := 0
+	stream := &execReadCloser{
+		reader:      io.NopCloser(strings.NewReader("partial")),
+		wait:        func() error { waits++; return podRemoved },
+		idleTimeout: time.Second,
+	}
+
+	data, err := io.ReadAll(stream)
+	if !errors.Is(err, podRemoved) {
+		t.Fatalf("ReadAll error = %v, want it to carry the command's failure", err)
+	}
+	if string(data) != "partial" {
+		t.Fatalf("ReadAll data = %q, want %q", data, "partial")
+	}
+	if closeErr := stream.Close(); !errors.Is(closeErr, podRemoved) {
+		t.Fatalf("Close error = %v, want the command's failure", closeErr)
+	}
+	if waits != 1 {
+		t.Fatalf("wait called %d times, want 1", waits)
+	}
+}
+
+func TestExecReadCloser_EOFFromASucceededCommandIsEOF(t *testing.T) {
+	waits := 0
+	cleaned := false
+	stream := &execReadCloser{
+		reader:      io.NopCloser(strings.NewReader("complete")),
+		wait:        func() error { waits++; return nil },
+		cleanup:     func() { cleaned = true },
+		idleTimeout: time.Second,
+		deadline:    time.Now().Add(time.Minute),
+	}
+
+	data, err := io.ReadAll(stream)
+	if err != nil || string(data) != "complete" {
+		t.Fatalf("ReadAll = %q, %v; want %q, nil", data, err, "complete")
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatalf("Close error = %v, want nil", err)
+	}
+	if waits != 1 || !cleaned {
+		t.Fatalf("waits = %d, cleaned = %v; want 1, true", waits, cleaned)
+	}
+}
+
+// A transfer that keeps making progress never trips the idle timeout. The
+// deadline is what ends it, so that the tool and not the transient pod's
+// activeDeadlineSeconds decides when it is over.
+func TestExecReadCloser_DeadlineEndsASlowButProgressingStream(t *testing.T) {
+	pr, pw := io.Pipe()
+	go func() {
+		for {
+			if _, err := pw.Write([]byte("x")); err != nil {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+
+	stream := &execReadCloser{
+		reader:      pr,
+		wait:        func() error { return nil },
+		idleTimeout: time.Minute,
+		deadline:    time.Now().Add(150 * time.Millisecond),
+	}
+
+	data, err := io.ReadAll(stream)
+	if !errors.Is(err, errStreamDeadline) {
+		t.Fatalf("ReadAll error = %v, want errStreamDeadline", err)
+	}
+	if len(data) == 0 {
+		t.Fatal("the stream was making progress, so some data should have been read before the deadline")
+	}
+	if _, err := stream.Read(make([]byte, 1)); !errors.Is(err, errStreamDeadline) {
+		t.Fatalf("Read after the deadline = %v, want errStreamDeadline", err)
+	}
+	_ = stream.Close()
+}
+
+func TestExecReadCloser_IdleTimeoutStillApplies(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer pw.Close()
+
+	stream := &execReadCloser{
+		reader:      pr,
+		wait:        func() error { return nil },
+		idleTimeout: 50 * time.Millisecond,
+		deadline:    time.Now().Add(time.Minute),
+	}
+
+	if _, err := stream.Read(make([]byte, 1)); !errors.Is(err, errStreamIdleTimeout) {
+		t.Fatalf("Read error = %v, want errStreamIdleTimeout", err)
+	}
+	_ = stream.Close()
 }
