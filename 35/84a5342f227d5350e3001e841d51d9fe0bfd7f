@@ -1,0 +1,34 @@
+specs/archive/007-external-database-backup/opsmill-implement-report.md
+  s_46e73da0c90309::t_7bc5a7192cbcfc 37-39
+.github/workflows/ci.yml
+  s_46e73da0c90309::t_6d299c88600b36 58
+Makefile
+  s_46e73da0c90309::t_6d299c88600b36 10-11,81
+specs/archive/007-external-database-backup/plan.md
+  s_46e73da0c90309::t_6d299c88600b36 5
+  s_46e73da0c90309::t_ae33d1a6653abb 113
+src/internal/app/cli_test.go
+  s_46e73da0c90309::t_6d299c88600b36 23
+specs/archive/007-external-database-backup/critiques/critique-20260902-1330.md
+  s_46e73da0c90309::t_f601a243769720 107-112
+specs/archive/007-external-database-backup/spec.md
+  s_46e73da0c90309::t_9f675eacf9b9cd 299-301
+  s_46e73da0c90309::t_c826e96fc4473d 60
+  s_46e73da0c90309::t_d5ea82d9a4f903 56
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3584a5342f227d5350e3001e841d51d9fe0bfd7f",
+  "prompts": {},
+  "sessions": {
+    "s_46e73da0c90309": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ef33f436-f116-464f-b06f-66a6f603369f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Benoit Kohler <benoit@opsmill.com>"
+    }
+  }
+}
