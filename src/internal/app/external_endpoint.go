@@ -511,8 +511,9 @@ const (
 
 	// databaseInspect reads where a database lives and says so, and is the only
 	// operation that moves no data and creates nothing. It exists so that
-	// `environment detect` resolves locations through resolveDatabaseTargets
-	// like every other path rather than through a second resolver of its own —
+	// `environment detect` resolves locations through databaseTargetWith, the
+	// constructor every other path reaches through resolveDatabaseTargets,
+	// rather than through a second resolver of its own —
 	// and so that its failures name the report rather than a backup the
 	// operator did not ask for. `infrahub-collect` runs it, so it must stay one
 	// that creates no workload (ADR-0003).
@@ -804,14 +805,22 @@ func (iops *InfrahubOps) reportDatabaseLocationsWith(queries deploymentQueries) 
 	// either one, and an operator diagnosing a deployment wants the whole
 	// picture rather than the part some later --exclude-task-manager would have
 	// covered.
-	targets, err := resolveDatabaseTargets(queries, databaseInspect, true, ExternalRestoreAuth{})
-	if err != nil {
-		logrus.Warnf("Could not establish where the databases live: %v", err)
+	//
+	// Each database is resolved on its own, through the same constructor
+	// resolveDatabaseTargets calls, rather than through resolveDatabaseTargets
+	// itself. That function stops at the first database it cannot locate, which
+	// is right for a run — nothing may be stopped once one location is unknown —
+	// and wrong here: a query that failed for one database says nothing about
+	// the other, and the operator diagnosing the failure needs whatever the
+	// deployment could still answer.
+	for _, service := range databaseServicesForBackup(true) {
+		target, err := databaseTargetWith(queries, databaseInspect, service, ExternalRestoreAuth{})
+		if err != nil {
+			logrus.Warnf("Database %s: could not establish where it lives: %v", service, err)
 
-		return nil
-	}
+			continue
+		}
 
-	for _, target := range targets {
 		if target.Location != EndpointLocationExternal {
 			logrus.Infof("Database %s: runs in this deployment", target.Service)
 

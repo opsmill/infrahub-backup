@@ -1406,8 +1406,8 @@ func TestWorkloadPermissionErrorLeavesOtherFailuresAlone(t *testing.T) {
 // reaches for first: `environment detect` has to say, per database, whether it
 // runs in the deployment and where an external one was resolved to.
 //
-// It asserts through the same resolveDatabaseTargets every other path uses, and
-// on the operation it uses it with: databaseInspect is what keeps the report
+// It asserts through the same constructor every other path reaches through
+// resolveDatabaseTargets, and on the operation it uses it with: databaseInspect is what keeps the report
 // from creating anything, which is what `infrahub-collect` depends on
 // (ADR-0003), and what keeps a failure from naming a backup nobody asked for.
 func TestReportDatabaseLocations(t *testing.T) {
@@ -1482,8 +1482,45 @@ func TestReportDatabaseLocations(t *testing.T) {
 		if strings.Contains(logged, "does not run in this deployment") {
 			t.Errorf("an unanswered query was reported as a database outside the deployment (FR-002):\n%s", logged)
 		}
-		if !strings.Contains(logged, "Could not establish where the databases live") {
-			t.Errorf("the report is silent about the query it could not answer:\n%s", logged)
+		for _, service := range []string{serviceNeo4j, serviceTaskManagerDB} {
+			if want := "Database " + service + ": could not establish where it lives"; !strings.Contains(logged, want) {
+				t.Errorf("the report is silent about the query it could not answer for %s:\n%s", service, logged)
+			}
+		}
+	})
+
+	t.Run("one unanswered location query does not hide the other database", func(t *testing.T) {
+		// A run stops at the first database it cannot locate, because nothing
+		// may be stopped once one location is unknown. The report must not:
+		// a failed query for one database says nothing about the other, and
+		// the operator diagnosing it needs what the deployment could answer.
+		iops := mixedTopologyOps()
+		queries := deploymentQueries{
+			locate: func(service string) (EndpointLocation, error) {
+				if service == serviceNeo4j {
+					return "", errors.New(`pods is forbidden: cannot list resource "pods"`)
+				}
+
+				return EndpointLocationInternal, nil
+			},
+			discover: func(string) error { return nil },
+		}
+
+		var reportErr error
+		logged := captureLogrus(t, func() {
+			reportErr = iops.reportDatabaseLocationsWith(queries)
+		})
+		if reportErr != nil {
+			t.Fatalf("reportDatabaseLocationsWith() error = %v; a diagnostic must still report what it could", reportErr)
+		}
+
+		for _, want := range []string{
+			"Database " + serviceNeo4j + ": could not establish where it lives",
+			"Database " + serviceTaskManagerDB + ": runs in this deployment",
+		} {
+			if !strings.Contains(logged, want) {
+				t.Errorf("the report does not state %q:\n%s", want, logged)
+			}
 		}
 	})
 
