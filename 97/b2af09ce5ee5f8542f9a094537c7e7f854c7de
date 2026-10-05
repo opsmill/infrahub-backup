@@ -1,0 +1,21 @@
+tests/e2e/conftest.py
+  s_46e73da0c90309::t_52e053fe7f7a62 17,158-161
+tests/helpers/utils.py
+  s_46e73da0c90309::t_3f841e7eda6c04 33-65
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "97b2af09ce5ee5f8542f9a094537c7e7f854c7de",
+  "prompts": {},
+  "sessions": {
+    "s_46e73da0c90309": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ef33f436-f116-464f-b06f-66a6f603369f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Benoit Kohler <benoit@opsmill.com>"
+    }
+  }
+}
