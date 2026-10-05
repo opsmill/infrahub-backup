@@ -99,7 +99,9 @@ def collect_binary() -> str:
 def minio_docker(request: pytest.FixtureRequest) -> dict:
     """Start a MinIO container using testcontainers for S3 testing."""
     container = (
-        DockerContainer("minio/minio:RELEASE.2025-09-07T16-13-09Z")
+        # minio/minio is no longer published on Docker Hub or quay.io; pgsty/minio is a
+        # community build of the same server, so the command and health endpoint are unchanged.
+        DockerContainer("pgsty/minio:RELEASE.2026-08-04T00-00-00Z")
         .with_exposed_ports(9000)
         .with_env("MINIO_ROOT_USER", "minioadmin")
         .with_env("MINIO_ROOT_PASSWORD", "minioadmin")
