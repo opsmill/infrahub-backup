@@ -1250,8 +1250,8 @@ func TestFailureMessageContract(t *testing.T) {
 			row:           "deployment query denied",
 			err:           newTestKubernetesBackend().undeterminedLocation(serviceNeo4j, refused),
 			wantCondition: []string{"failed to determine whether", "could not be queried", "is forbidden"},
-			wantResource:  []string{serviceNeo4j, "namespace infrahub", "pods in namespace infrahub"},
-			wantAction:    []string{"get and list on pods", "--k8s-namespace"},
+			wantResource:  []string{serviceNeo4j, "namespace infrahub", "deployments and statefulsets in namespace infrahub"},
+			wantAction:    []string{"get and list on pods, deployments and statefulsets", "--k8s-namespace"},
 			// FR-002. The contract states this row negatively because the two
 			// readings have opposite remedies: an operator told the database is
 			// absent configures an external one they do not have.

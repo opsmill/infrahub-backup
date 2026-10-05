@@ -323,7 +323,13 @@ func TestLocateServiceWith(t *testing.T) {
 	})
 
 	t.Run("an empty match means the database is external", func(t *testing.T) {
-		run := func(name string, args ...string) (string, error) { return "", nil }
+		run := func(name string, args ...string) (string, error) {
+			if isWorkloadListing(args) {
+				return emptyWorkloadListing, nil
+			}
+
+			return "", nil
+		}
 		location, err := newTestKubernetesBackend().locateServiceWith(run, serviceNeo4j)
 		if err != nil {
 			t.Fatalf("locateServiceWith failed: %v", err)
@@ -507,6 +513,16 @@ func isServiceSelectorQuery(args []string) bool {
 	return serviceSelectorOf(args) != ""
 }
 
+// emptyWorkloadListing is `kubectl get <kind> -o json` for a namespace that
+// holds none of that kind.
+const emptyWorkloadListing = `{"items":[]}`
+
+// isWorkloadListing reports whether a recorded kubectl call lists a workload
+// kind rather than pods.
+func isWorkloadListing(args []string) bool {
+	return slices.Contains(workloadKinds, resourceOf(args))
+}
+
 // labelBlindCluster is the namespace shape every false positive shares: no pod
 // declares itself as the service, and the full-namespace listing holds a pod
 // whose *name* names it. Label-selected listings answer empty; the unselected
@@ -516,6 +532,12 @@ func labelBlindCluster(pods ...labelledPod) (podRunner, *int) {
 	run := func(_ string, args ...string) (string, error) {
 		if isServiceSelectorQuery(args) {
 			return "", nil
+		}
+		if isWorkloadListing(args) {
+			// The namespace holds no workloads. A failed workload listing is
+			// an unanswered location question (FR-002), so the fake answers
+			// it rather than leaving it to fail.
+			return emptyWorkloadListing, nil
 		}
 		fallbackCalls++
 
@@ -907,10 +929,11 @@ func TestLocateServiceWithReadsOwnershipNotLabelsAlone(t *testing.T) {
 		}
 	})
 
-	t.Run("a workload listing that fails does not make the run fail", func(t *testing.T) {
-		// The pods answered, so the decision is the one they support. Turning
-		// a kubectl failure on additive evidence into an abort would break
-		// deployments the previous behaviour served.
+	t.Run("a workload listing that fails is an error, not external", func(t *testing.T) {
+		// No pod claims the service, so the workloads are what decide whether
+		// a scaled-down database is still here. Without them that is
+		// unanswered, and FR-002 names permission denied as a failure to
+		// query, never as evidence that the database is external.
 		run := func(_ string, args ...string) (string, error) {
 			switch {
 			case isServiceSelectorQuery(args):
@@ -923,11 +946,14 @@ func TestLocateServiceWithReadsOwnershipNotLabelsAlone(t *testing.T) {
 		}
 
 		location, err := newTestKubernetesBackend().locateServiceWith(run, serviceNeo4j)
-		if err != nil {
-			t.Fatalf("locateServiceWith failed: %v", err)
+		if err == nil {
+			t.Fatalf("locateServiceWith = %q with no error despite the workload listing being forbidden, want error", location)
 		}
-		if location != EndpointLocationExternal {
-			t.Errorf("location = %q, want %q", location, EndpointLocationExternal)
+		if !strings.Contains(err.Error(), "forbidden") {
+			t.Errorf("error = %v, want the workload listing's failure carried through", err)
+		}
+		if location != "" {
+			t.Errorf("location = %q, want the zero value alongside an error", location)
 		}
 	})
 
@@ -1017,6 +1043,9 @@ func TestLocateServiceWithAsksForPodsThatFailedToo(t *testing.T) {
 	listings := [][]string{}
 	run := func(_ string, args ...string) (string, error) {
 		listings = append(listings, args)
+		if isWorkloadListing(args) {
+			return emptyWorkloadListing, nil
+		}
 
 		return "", nil
 	}
@@ -1141,7 +1170,7 @@ func TestResolutionIssuesOneNamespaceListing(t *testing.T) {
 		if resourceOf(args) != "pods" {
 			// The workload listings the location decision adds; not a pod
 			// listing and not what this memo holds.
-			return "", nil
+			return emptyWorkloadListing, nil
 		}
 		if isServiceSelectorQuery(args) {
 			selectorQueries++

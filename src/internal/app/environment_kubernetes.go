@@ -770,7 +770,7 @@ func (k *KubernetesBackend) undeterminedLocation(service string, cause error) er
 	return fmt.Errorf(
 		"failed to determine whether %s runs in namespace %s: %w: %w. "+
 			"This is the query failing, not evidence that the database is absent — the run stops here rather than treating %s as a database outside the deployment (FR-002). "+
-			"If the query was refused, the identity this tool runs as needs get and list on pods in namespace %s; "+
+			"If the query was refused, the identity this tool runs as needs get and list on pods, deployments and statefulsets in namespace %s; "+
 			"otherwise check that --k8s-namespace names the right namespace and that the API server is reachable",
 		service, k.namespace, errLocationUndetermined, cause, service, k.namespace)
 }
@@ -932,11 +932,12 @@ func (k *KubernetesBackend) seedPodCache(service string, candidates []labelledPo
 //
 // Workloads are read as well as pods, and that is what answers the shapes with
 // no pod to look at — a StatefulSet scaled to zero, a pod evicted between two
-// listings. A workload listing that fails adds no evidence and is not an error:
-// without it the decision is exactly the one the pods already support, so a
-// namespace whose Deployments cannot be listed is answered as before rather
-// than failed. The pod listing is different — it is the answer, not an addition
-// to it — so a failure there is reported (FR-002).
+// listings. They are read only once no pod declares the service, which is
+// exactly when they decide the answer: from there, a workload listing that
+// fails leaves "is a scaled-down database here?" unanswered, and reading that
+// as "external" is the reinterpretation FR-002 forbids — permission denied is
+// named there as a failure to query, not as evidence. So a failure on either
+// listing is reported.
 func (k *KubernetesBackend) deploymentClaimsService(run podRunner, service string) (bool, error) {
 	listed, err := k.namespacePodListing(run, completedPodFieldSelector)
 	if err != nil {
@@ -952,7 +953,10 @@ func (k *KubernetesBackend) deploymentClaimsService(run podRunner, service strin
 		}
 	}
 
-	workloads := k.listAllWorkloadsWith(run)
+	workloads, err := k.listAllWorkloadsWith(run)
+	if err != nil {
+		return false, err
+	}
 	for _, workload := range workloads {
 		if declaresService(declaredServiceIn(workload.SelectorLabels, workload.TemplateLabels), service) {
 			logrus.Debugf("Service %s runs in namespace %s: workload %s declares it", service, k.namespace, workload.Name)
@@ -993,22 +997,20 @@ func (k *KubernetesBackend) deploymentClaimsService(run podRunner, service strin
 	return false, nil
 }
 
-// listAllWorkloadsWith lists every Deployment and StatefulSet in the namespace,
-// skipping a kind it could not read. See deploymentClaimsService for why a
-// failure here is skipped rather than reported.
-func (k *KubernetesBackend) listAllWorkloadsWith(run podRunner) []kubernetesWorkload {
+// listAllWorkloadsWith lists every Deployment and StatefulSet in the namespace.
+// A kind it could not read is an error, not an empty kind: see
+// deploymentClaimsService for why (FR-002).
+func (k *KubernetesBackend) listAllWorkloadsWith(run podRunner) ([]kubernetesWorkload, error) {
 	workloads := []kubernetesWorkload{}
 	for _, kind := range workloadKinds {
 		listed, err := k.listWorkloadsWith(run, kind)
 		if err != nil {
-			logrus.Debugf("Could not list %s in namespace %s while locating a service: %v", kind, k.namespace, err)
-
-			continue
+			return nil, fmt.Errorf("failed to list %s in namespace %s: %w", kind, k.namespace, err)
 		}
 		workloads = append(workloads, listed...)
 	}
 
-	return workloads
+	return workloads, nil
 }
 
 // podListingArgs builds a pod listing that reports each pod's phase, with the
