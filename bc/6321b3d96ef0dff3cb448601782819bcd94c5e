@@ -1,0 +1,25 @@
+src/internal/app/docker_service_ready_test.go
+  s_46e73da0c90309::t_be94c853b60c9d 63,70,91,96,105,108,119,126,163-203
+src/internal/app/command_executor.go
+  s_46e73da0c90309::t_e9e2176767074b 112-115,123-125
+  s_46e73da0c90309::t_9f42d44d3ba8f0 126
+src/internal/app/docker_service_ready.go
+  s_46e73da0c90309::t_e9e2176767074b 4,81-84,87-88,93,95-99,115,130-134,136,141-145,147,163-166,171-181
+  s_46e73da0c90309::t_3d065fdbdfa482 182-183
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "bc6321b3d96ef0dff3cb448601782819bcd94c5e",
+  "prompts": {},
+  "sessions": {
+    "s_46e73da0c90309": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ef33f436-f116-464f-b06f-66a6f603369f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Benoit Kohler <benoit@opsmill.com>"
+    }
+  }
+}
