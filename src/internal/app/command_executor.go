@@ -109,12 +109,20 @@ func (ce *CommandExecutor) runCommandContext(ctx context.Context, timeout time.D
 	defer cancel()
 
 	cmd := exec.CommandContext(cctx, name, args...)
+	// Killing the command does not close the output pipe that a child it
+	// spawned still holds (the docker CLI runs `compose` as a plugin child), so
+	// without a bound on that wait the call outlives its timeout.
+	cmd.WaitDelay = commandWaitDelay
 	output, err := cmd.CombinedOutput()
 	if err != nil && errors.Is(cctx.Err(), context.DeadlineExceeded) {
 		return strings.TrimSpace(string(output)), &timeoutError{timeout: timeout}
 	}
 	return strings.TrimSpace(string(output)), err
 }
+
+// commandWaitDelay is how long runCommandContext waits for a killed command's
+// output pipe to close before it abandons it.
+const commandWaitDelay = 2 * time.Second
 
 // runCommandSeparateContext is the timeout-bounded variant of runCommand that
 // keeps the command's output streams apart: stdout is returned first, stderr

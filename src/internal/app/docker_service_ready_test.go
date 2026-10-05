@@ -60,14 +60,14 @@ func TestWaitForDockerServiceReadyWaitsThroughARestart(t *testing.T) {
 		{runningWithHealth("healthy", 0)},
 	}
 	calls, starts := 0, 0
-	observe := func() ([]dockerContainerState, error) {
+	observe := func(time.Duration) ([]dockerContainerState, error) {
 		r := readings[calls]
 		if calls < len(readings)-1 {
 			calls++
 		}
 		return r, nil
 	}
-	start := func() error { starts++; return nil }
+	start := func(time.Duration) error { starts++; return nil }
 
 	if err := waitForDockerServiceReady("database", observe, start, time.Minute, time.Millisecond); err != nil {
 		t.Fatalf("waitForDockerServiceReady = %v, want nil", err)
@@ -88,12 +88,12 @@ func TestWaitForDockerServiceReadyNeedsConsecutiveReadings(t *testing.T) {
 		{runningWithHealth("healthy", 0)},
 	}
 	calls := 0
-	observe := func() ([]dockerContainerState, error) {
+	observe := func(time.Duration) ([]dockerContainerState, error) {
 		r := readings[calls]
 		calls++
 		return r, nil
 	}
-	if err := waitForDockerServiceReady("database", observe, func() error { return nil }, time.Minute, time.Millisecond); err != nil {
+	if err := waitForDockerServiceReady("database", observe, func(time.Duration) error { return nil }, time.Minute, time.Millisecond); err != nil {
 		t.Fatalf("waitForDockerServiceReady = %v, want nil", err)
 	}
 	if calls != 4 {
@@ -102,10 +102,10 @@ func TestWaitForDockerServiceReadyNeedsConsecutiveReadings(t *testing.T) {
 }
 
 func TestWaitForDockerServiceReadyTimesOutWithLastState(t *testing.T) {
-	observe := func() ([]dockerContainerState, error) {
+	observe := func(time.Duration) ([]dockerContainerState, error) {
 		return []dockerContainerState{runningWithHealth("unhealthy", 20)}, nil
 	}
-	err := waitForDockerServiceReady("database", observe, func() error { return nil }, 20*time.Millisecond, time.Millisecond)
+	err := waitForDockerServiceReady("database", observe, func(time.Duration) error { return nil }, 20*time.Millisecond, time.Millisecond)
 	if err == nil {
 		t.Fatal("waitForDockerServiceReady = nil, want a timeout error")
 	}
@@ -116,14 +116,14 @@ func TestWaitForDockerServiceReadyTimesOutWithLastState(t *testing.T) {
 
 func TestWaitForDockerServiceReadyRetriesObserveErrors(t *testing.T) {
 	calls := 0
-	observe := func() ([]dockerContainerState, error) {
+	observe := func(time.Duration) ([]dockerContainerState, error) {
 		calls++
 		if calls == 1 {
 			return nil, errors.New("no such container")
 		}
 		return []dockerContainerState{runningWithHealth("healthy", 0)}, nil
 	}
-	if err := waitForDockerServiceReady("database", observe, func() error { return nil }, time.Minute, time.Millisecond); err != nil {
+	if err := waitForDockerServiceReady("database", observe, func(time.Duration) error { return nil }, time.Minute, time.Millisecond); err != nil {
 		t.Fatalf("waitForDockerServiceReady = %v, want nil", err)
 	}
 }
@@ -158,5 +158,46 @@ func TestDockerBackendStartIncludesComposeOutput(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "container infrahub-database-1 exited (0)") {
 			t.Fatalf("%s error = %v, want it to carry the compose output", name, err)
 		}
+	}
+}
+
+// A docker call that hangs must not hold the wait past its bound: each call
+// gets only the time left, and the error names the call that ran out.
+func TestDockerBackendWaitServiceReadyBoundsHungDockerCalls(t *testing.T) {
+	bin := t.TempDir()
+	// Not `exec sleep`: the sleep is a child that keeps the output pipe open
+	// after the killed shell, as the compose plugin does under the docker CLI.
+	script := "#!/bin/sh\nsleep 30\n"
+	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte(script), 0o755); err != nil {
+		t.Fatalf("writing fake docker = %v", err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	d := NewDockerBackend(&Configuration{}, NewCommandExecutor())
+	began := time.Now()
+	err := d.WaitServiceReady("database", 300*time.Millisecond)
+	if elapsed := time.Since(began); elapsed > 10*time.Second {
+		t.Fatalf("WaitServiceReady returned after %s, want it bounded by its timeout", elapsed)
+	}
+	if err == nil || !strings.Contains(err.Error(), "docker compose ps database") || !strings.Contains(err.Error(), "timed out after") {
+		t.Fatalf("error = %v, want a timeout naming docker compose ps", err)
+	}
+}
+
+func TestDockerBackendStartWithinBoundsHungStart(t *testing.T) {
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
+		t.Fatalf("writing fake docker = %v", err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	d := NewDockerBackend(&Configuration{}, NewCommandExecutor())
+	began := time.Now()
+	err := d.startWithin(300*time.Millisecond, "database")
+	if elapsed := time.Since(began); elapsed > 10*time.Second {
+		t.Fatalf("startWithin returned after %s, want it bounded by its limit", elapsed)
+	}
+	if err == nil || !strings.Contains(err.Error(), "docker compose start database") || !strings.Contains(err.Error(), "timed out after") {
+		t.Fatalf("error = %v, want a timeout naming docker compose start", err)
 	}
 }

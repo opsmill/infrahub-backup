@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -77,17 +78,25 @@ func dockerReadiness(states []dockerContainerState) (ready bool, needsStart bool
 // timeout passes. A container that exited and that its restart policy does not
 // bring back is started once per such reading, because `docker compose start`
 // of a dependent refuses an exited dependency instead of starting it.
+//
+// observe and start each receive the time left before the deadline and must
+// not run past it: a Docker CLI or daemon that hangs would otherwise hold the
+// wait past its bound, because the deadline is only checked between readings.
 func waitForDockerServiceReady(
 	service string,
-	observe func() ([]dockerContainerState, error),
-	start func() error,
+	observe func(limit time.Duration) ([]dockerContainerState, error),
+	start func(limit time.Duration) error,
 	timeout, interval time.Duration,
 ) error {
 	deadline := time.Now().Add(timeout)
 	confirmed := 0
-	var last string
+	last := "not read"
 	for {
-		states, err := observe()
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return fmt.Errorf("%s did not become healthy within %s (last state: %s)", service, timeout, last)
+		}
+		states, err := observe(remaining)
 		if err != nil {
 			confirmed = 0
 			last = err.Error()
@@ -103,7 +112,7 @@ func waitForDockerServiceReady(
 			case needsStart:
 				confirmed = 0
 				logrus.Infof("Starting %s, which is %s...", service, detail)
-				if err := start(); err != nil {
+				if err := start(time.Until(deadline)); err != nil {
 					last = fmt.Sprintf("%s; start failed: %v", detail, err)
 				}
 			default:
@@ -118,18 +127,24 @@ func waitForDockerServiceReady(
 }
 
 // serviceContainerStates reads the State of every container of one compose
-// service, stopped ones included.
-func (d *DockerBackend) serviceContainerStates(service string) ([]dockerContainerState, error) {
-	output, err := d.executor.runCommand("docker", d.composeArgs("ps", "-a", "-q", service)...)
+// service, stopped ones included. Every docker call it makes, together, ends
+// within limit; a call cut short returns an error naming that call.
+func (d *DockerBackend) serviceContainerStates(service string, limit time.Duration) ([]dockerContainerState, error) {
+	deadline := time.Now().Add(limit)
+	output, err := d.executor.runCommandContext(context.Background(), limit, "docker", d.composeArgs("ps", "-a", "-q", service)...)
 	if err != nil {
-		return nil, composeLifecycleError(output, err)
+		return nil, fmt.Errorf("docker compose ps %s: %w", service, composeLifecycleError(output, err))
 	}
 	ids := strings.Fields(output)
 	states := make([]dockerContainerState, 0, len(ids))
 	for _, id := range ids {
-		out, err := d.executor.runCommand("docker", "inspect", "--format", "{{json .State}}", id)
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, fmt.Errorf("docker inspect %s: %w", id, &timeoutError{timeout: limit})
+		}
+		out, err := d.executor.runCommandContext(context.Background(), remaining, "docker", "inspect", "--format", "{{json .State}}", id)
 		if err != nil {
-			return nil, composeLifecycleError(out, err)
+			return nil, fmt.Errorf("docker inspect %s: %w", id, composeLifecycleError(out, err))
 		}
 		var st dockerContainerState
 		if err := json.Unmarshal([]byte(out), &st); err != nil {
@@ -145,10 +160,25 @@ func (d *DockerBackend) serviceContainerStates(service string) ([]dockerContaine
 func (d *DockerBackend) WaitServiceReady(service string, timeout time.Duration) error {
 	return waitForDockerServiceReady(
 		service,
-		func() ([]dockerContainerState, error) { return d.serviceContainerStates(service) },
-		func() error { return d.Start(service) },
+		func(limit time.Duration) ([]dockerContainerState, error) {
+			return d.serviceContainerStates(service, limit)
+		},
+		func(limit time.Duration) error { return d.startWithin(limit, service) },
 		timeout, dockerServiceReadyPollInterval,
 	)
+}
+
+// startWithin is Start bounded by limit: a `docker compose start` still
+// running when limit passes is killed and reported as timed out.
+func (d *DockerBackend) startWithin(limit time.Duration, service string) error {
+	if limit <= 0 {
+		return fmt.Errorf("docker compose start %s: %w", service, &timeoutError{timeout: limit})
+	}
+	output, err := d.executor.runCommandContext(context.Background(), limit, "docker", d.composeArgs("start", service)...)
+	if err != nil {
+		return fmt.Errorf("docker compose start %s: %w", service, composeLifecycleError(output, err))
+	}
+	return nil
 }
 
 // startAppServicesAfterRestore brings infrahub-server and task-worker back at
