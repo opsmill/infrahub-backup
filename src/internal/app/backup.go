@@ -616,21 +616,11 @@ func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager boo
 		return err
 	}
 
-	// Where each database lives, before the edition is misdiagnosed, before
-	// transient data is wiped and before anything is scaled to zero. The
-	// discovery this gate's successor needs reads `env` out of infrahub-server
-	// and task-manager, so it cannot run any later than this: stopAppContainers
-	// has scaled both to zero by then.
-	//
-	// It is also where a database outside the deployment gets the workload the
-	// restore runs in, so the workloads this run created are given back on
+	// A database outside the deployment gets the workload the restore runs in
+	// at the gate below, so the workloads this run created are given back on
 	// every exit path from here on (FR-011). An all-internal deployment created
 	// none and the call does nothing.
 	defer iops.releaseTransientWorkloads()
-
-	if err := iops.prepareDatabaseRestore(!excludeTaskManager); err != nil {
-		return err
-	}
 
 	workDir, err := os.MkdirTemp("", "infrahub_restore_*")
 	if err != nil {
@@ -684,6 +674,30 @@ func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager boo
 		return err
 	}
 
+	// Determine task manager database availability
+	taskManagerIncluded := slices.Contains(metadata.Components, "task-manager-db")
+	if !taskManagerIncluded {
+		if _, ok := metadata.Checksums["prefect.dump"]; ok {
+			taskManagerIncluded = true
+		}
+	}
+	shouldRestoreTaskManager := taskManagerIncluded && !excludeTaskManager
+
+	// Where each database this restore writes lives, before the edition is
+	// misdiagnosed, before transient data is wiped and before anything is
+	// scaled to zero. The discovery this gate's successor needs reads `env` out
+	// of infrahub-server and task-manager, so it cannot run any later than
+	// this: stopAppContainers has scaled both to zero by then.
+	//
+	// It runs after the metadata is read, because the archive decides which
+	// databases are written: an archive without the task-manager database
+	// writes only Neo4j, and must not be refused, or have a workload created,
+	// for an external PostgreSQL it never touches. Extracting and reading the
+	// archive is local work and changes nothing in the deployment.
+	if err := iops.prepareDatabaseRestore(shouldRestoreTaskManager); err != nil {
+		return err
+	}
+
 	// Detect Neo4j edition for restore
 	detectedEdition, detectionErr := iops.detectNeo4jEdition()
 	editionInfo := NewNeo4jEditionInfo(detectedEdition, detectionErr)
@@ -694,21 +708,11 @@ func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager boo
 	}
 	editionInfo.LogDetection("restore")
 
-	// Determine task manager database availability
-	taskManagerIncluded := slices.Contains(metadata.Components, "task-manager-db")
-	if !taskManagerIncluded {
-		if _, ok := metadata.Checksums["prefect.dump"]; ok {
-			taskManagerIncluded = true
-		}
-	}
-
 	// Validate checksums for all backup files
 	if err := validateBackupChecksums(workDir, &metadata, excludeTaskManager); err != nil {
 		return err
 	}
 
-	// Determine if we should restore task manager database
-	shouldRestoreTaskManager := taskManagerIncluded && !excludeTaskManager
 	prefectPath := filepath.Join(workDir, "backup", prefectDumpFilename)
 	prefectExists := fileExists(prefectPath)
 	validatePrefect := shouldRestoreTaskManager && prefectExists

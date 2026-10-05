@@ -1,11 +1,8 @@
 package app
 
 import (
-	"compress/gzip"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -74,6 +71,15 @@ func (b *gatedBackend) Start(services ...string) error {
 	b.started = append(b.started, services...)
 
 	return nil
+}
+
+// unansweredStatusBackend is a gatedBackend whose running check never answers.
+type unansweredStatusBackend struct {
+	*gatedBackend
+}
+
+func (b *unansweredStatusBackend) IsRunning(service string) (bool, error) {
+	return false, errors.New("status query not answered")
 }
 
 var (
@@ -242,26 +248,12 @@ func TestRestoreRefusesAnExternalDatabaseBeforeTouchingTheDeployment(t *testing.
 	// A gzip stream with nothing restorable in it. The archive has to get past
 	// the format sniff, and then never be extracted: the refusal comes before
 	// anything is read out of it.
+	// A real archive, because the gate reads which databases the restore
+	// writes from the archive's own metadata.
 	writeArchive := func(t *testing.T, iops *InfrahubOps) string {
 		t.Helper()
 
-		path := filepath.Join(iops.config.BackupDir, backupNameAt(retentionNow))
-		file, err := os.Create(path)
-		if err != nil {
-			t.Fatalf("creating the archive = %v, want nil", err)
-		}
-		writer := gzip.NewWriter(file)
-		if _, err := writer.Write([]byte("not a real archive")); err != nil {
-			t.Fatalf("writing the archive = %v, want nil", err)
-		}
-		if err := writer.Close(); err != nil {
-			t.Fatalf("closing the gzip stream = %v, want nil", err)
-		}
-		if err := file.Close(); err != nil {
-			t.Fatalf("closing the archive = %v, want nil", err)
-		}
-
-		return path
+		return writeRestoreArchive(t, iops)
 	}
 
 	assertRefused := func(t *testing.T, backend *gatedBackend, err error) {
@@ -337,7 +329,7 @@ func TestRestoreRefusesAnExternalDatabaseBeforeTouchingTheDeployment(t *testing.
 		backend.locations[serviceTaskManagerDB] = EndpointLocationExternal
 		iops := newGatedOps(t, backend, BackendTarball)
 
-		err := iops.RestoreBackup(writeArchive(t, iops), false, false, 0, "", true, false)
+		err := iops.RestoreBackup(writeRestoreArchiveWith(t, iops, true), false, false, 0, "", true, false)
 		if !errors.Is(err, errExternalRestoreUnauthorised) {
 			t.Fatalf("RestoreBackup() = %v, want the refusal", err)
 		}
@@ -346,6 +338,28 @@ func TestRestoreRefusesAnExternalDatabaseBeforeTouchingTheDeployment(t *testing.
 		}
 		if len(backend.stopped) > 0 {
 			t.Errorf("services stopped = %v, want none", backend.stopped)
+		}
+	})
+
+	// The archive decides which databases a restore writes. One without the
+	// task-manager database writes only Neo4j, so an external PostgreSQL is
+	// not this run's concern: refusing it for want of an authorisation, or
+	// creating a workload for it, would fail a Neo4j-only restore over a
+	// database it never touches.
+	t.Run("an external task manager is not gated when the archive omits it", func(t *testing.T) {
+		backend := &unansweredStatusBackend{gatedBackend: newGatedBackend()}
+		backend.locations[serviceTaskManagerDB] = EndpointLocationExternal
+		iops := newGatedOps(t, backend, BackendTarball)
+
+		// The status query fails, so a run that gets past the gate stops at
+		// the first step after it that asks the deployment anything, rather
+		// than waiting out the quiesce window.
+		err := iops.RestoreBackup(writeRestoreArchive(t, iops), false, false, 0, "", true, false)
+		if errors.Is(err, errExternalRestoreUnauthorised) {
+			t.Fatalf("RestoreBackup() = %v, want no authorisation asked for a database the archive does not carry", err)
+		}
+		if err == nil || !strings.Contains(err.Error(), "cannot determine whether") {
+			t.Fatalf("RestoreBackup() = %v, want the run past the gate and stopped at the running check", err)
 		}
 	})
 

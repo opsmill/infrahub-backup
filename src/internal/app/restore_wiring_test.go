@@ -158,6 +158,15 @@ func newRestoringOps(t *testing.T, backend *restoringBackend) *InfrahubOps {
 func writeRestoreArchive(t *testing.T, iops *InfrahubOps) string {
 	t.Helper()
 
+	return writeRestoreArchiveWith(t, iops, false)
+}
+
+// writeRestoreArchiveWith is writeRestoreArchive with the task-manager database
+// optionally carried as well: a prefect.dump beside the Neo4j dump, its
+// checksum, and the task-manager-db component in the metadata.
+func writeRestoreArchiveWith(t *testing.T, iops *InfrahubOps, includeTaskManager bool) string {
+	t.Helper()
+
 	staging := t.TempDir()
 	backupDir := filepath.Join(staging, "backup")
 	databaseDir := filepath.Join(backupDir, neo4jBackupDirName)
@@ -168,9 +177,17 @@ func writeRestoreArchive(t *testing.T, iops *InfrahubOps) string {
 		t.Fatalf("writing the dump = %v, want nil", err)
 	}
 
+	components := []string{"database"}
+	if includeTaskManager {
+		if err := os.WriteFile(filepath.Join(backupDir, prefectDumpFilename), []byte("prefect dump bytes"), 0o600); err != nil {
+			t.Fatalf("writing the task-manager dump = %v, want nil", err)
+		}
+		components = append(components, "task-manager-db")
+	}
+
 	// Computed from the files on disk, so the archive is one the restore's own
 	// validation accepts rather than one it is told to accept.
-	checksums, err := calculateBackupChecksums(backupDir, true)
+	checksums, err := calculateBackupChecksums(backupDir, !includeTaskManager)
 	if err != nil {
 		t.Fatalf("calculateBackupChecksums() = %v, want nil", err)
 	}
@@ -181,7 +198,7 @@ func writeRestoreArchive(t *testing.T, iops *InfrahubOps) string {
 		CreatedAt:       retentionNow.Format(backupNameTimestampLayout),
 		ToolVersion:     "test",
 		InfrahubVersion: "1.0.0",
-		Components:      []string{"database"},
+		Components:      components,
 		Checksums:       checksums,
 		Neo4jEdition:    neo4jEditionCommunity,
 	}
