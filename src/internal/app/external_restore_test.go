@@ -590,6 +590,11 @@ func TestRestoreWorkloadSpec(t *testing.T) {
 	if want := externalDBRestoreFullBoundCalls * externalDBBound(cfg); spec.Deadline <= want {
 		t.Errorf("deadline = %v, want more than the %v of bounded work it hosts", spec.Deadline, want)
 	}
+	// The deployment-ID reset runs through this pod after the database is
+	// online; the pod must outlive every attempt of it as well.
+	if want := externalDBRestoreFullBoundCalls*externalDBBound(cfg) + resetDeploymentIDBudget(cfg) + externalDBWorkloadReadyTimeout; spec.Deadline <= want {
+		t.Errorf("deadline = %v, want more than the %v of bounded work it hosts, including the deployment-ID reset", spec.Deadline, want)
+	}
 	if spec.Deadline <= externalDBCaptureDeadline(cfg) {
 		t.Errorf("deadline = %v, want it to exceed a capture's %v: this pod is created at the gate and held for the whole run",
 			spec.Deadline, externalDBCaptureDeadline(cfg))

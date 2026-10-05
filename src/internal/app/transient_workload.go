@@ -1776,9 +1776,25 @@ const externalDBRestoreFullBoundCalls = 6
 
 // externalDBRestoreDeadline is the restore workload's activeDeadlineSeconds:
 // the three operations it hosts each get the whole operation bound, on the same
-// construction as its siblings (see externalDBWorkloadDeadline).
+// construction as its siblings (see externalDBWorkloadDeadline), plus the
+// deployment-ID reset.
+//
+// The reset is not one of the full-bound operations: it runs after the database
+// is online, through this workload when Neo4j is external, under the probe
+// bound and retried. It is counted on its own, at its worst case, because the
+// margin is sized for the short steps between operations and the reset's
+// retries alone can exceed it — a pod removed there turns a restore that has
+// already completed into a failure.
 func externalDBRestoreDeadline(cfg *Configuration) time.Duration {
-	return externalDBWorkloadDeadline(externalDBRestoreFullBoundCalls, externalDBBound(cfg))
+	return externalDBWorkloadDeadline(externalDBRestoreFullBoundCalls, externalDBBound(cfg)) + resetDeploymentIDBudget(cfg)
+}
+
+// resetDeploymentIDBudget is the longest resetDeploymentID can run against an
+// external database: every attempt reaching its bound, with the retry delay
+// between attempts.
+func resetDeploymentIDBudget(cfg *Configuration) time.Duration {
+	return resetDeploymentIDMaxAttempts*externalDBProbeBound(cfg) +
+		(resetDeploymentIDMaxAttempts-1)*resetDeploymentIDRetryDelay
 }
 
 // restoreWorkloadSpec is the spec for the workload a restore into an external
