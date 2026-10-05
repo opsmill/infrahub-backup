@@ -306,3 +306,50 @@ func TestASingleSnapshotRestoreReadsTheEditionForTheComponentItRestores(t *testi
 		}
 	})
 }
+
+// commandImporter streams a real process's stdout through execReadCloser, the
+// way the Neo4j and PostgreSQL stream factories do. A fake pipe would miss what
+// broke here: waiting for the command closes its pipe, and kloset reads once
+// more after the EOF.
+func commandImporter(pathname, script string) *StreamingImporter {
+	fi := objects.NewFileInfo(pathname, 0, 0644, time.Now(), 0, 0, 0, 0, 0)
+
+	return NewStreamingImporter("test-host", pathname, fi, func() (io.ReadCloser, error) {
+		stdout, wait, err := (&CommandExecutor{}).runCommandPipe("sh", "-c", script)
+		if err != nil {
+			return nil, err
+		}
+
+		return &execReadCloser{reader: stdout, wait: wait, idleTimeout: defaultStreamIdleTimeout}, nil
+	})
+}
+
+func TestCommitComponentSnapshotFromARealCommand(t *testing.T) {
+	t.Run("a command that exits cleanly is kept", func(t *testing.T) {
+		iops := newPlakarOps(t)
+		repo, done := openPlakarRepo(t, iops)
+		defer done()
+
+		mac, err := iops.commitComponentSnapshot(repo, ComponentNeo4j, commandImporter("/neo4j-backup.tar", "head -c 3000000 /dev/urandom"), &snapshot.BuilderOptions{Name: "real_command_ok"})
+		if err != nil {
+			t.Fatalf("commitComponentSnapshot() = %v, want the snapshot kept: the command completed", err)
+		}
+		if mac == objects.NilMac {
+			t.Fatal("mac is nil, want a committed snapshot")
+		}
+	})
+
+	t.Run("a command that fails after writing is refused", func(t *testing.T) {
+		iops := newPlakarOps(t)
+		repo, done := openPlakarRepo(t, iops)
+		defer done()
+
+		mac, err := iops.commitComponentSnapshot(repo, ComponentNeo4j, commandImporter("/neo4j-backup.tar", "head -c 300000 /dev/urandom; exit 1"), &snapshot.BuilderOptions{Name: "real_command_failed"})
+		if err == nil || !strings.Contains(err.Error(), "will not be kept") {
+			t.Fatalf("commitComponentSnapshot() = %v, want the snapshot refused: the command failed", err)
+		}
+		if mac != objects.NilMac {
+			t.Errorf("mac = %x, want none", mac[:8])
+		}
+	})
+}

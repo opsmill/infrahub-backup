@@ -163,6 +163,12 @@ func (e *execReadCloser) Read(p []byte) (int, error) {
 	if e.failure != nil {
 		return 0, e.failure
 	}
+	// Waiting for the command closed its pipe, and kloset reads once more after
+	// an EOF: reading the closed pipe would report "file already closed" and
+	// turn a stream that completed into one kloset records as failed.
+	if e.waited {
+		return 0, io.EOF
+	}
 
 	n, err := e.read(p)
 	if errors.Is(err, io.EOF) {
