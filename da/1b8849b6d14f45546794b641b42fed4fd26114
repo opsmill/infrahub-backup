@@ -1,0 +1,19 @@
+tests/e2e/conftest.py
+  s_46e73da0c90309::t_8fb162e2f6067b 158-161
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "da1b8849b6d14f45546794b641b42fed4fd26114",
+  "prompts": {},
+  "sessions": {
+    "s_46e73da0c90309": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ef33f436-f116-464f-b06f-66a6f603369f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Benoit Kohler <benoit@opsmill.com>"
+    }
+  }
+}
