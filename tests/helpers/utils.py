@@ -35,11 +35,14 @@ async def wait_for_database_query(
     token: str,
     timeout: float = 300.0,
     interval: float = 5.0,
+    consecutive: int = 3,
 ) -> None:
     """Poll a GraphQL query that reads the database until it answers without errors.
 
     The server answers /api/config and /api/schema before it can reach its database
-    again, so neither proves a test's first mutation will succeed.
+    again, so neither proves a test's first mutation will succeed. One good answer is
+    not enough either: the server's workers reconnect one at a time, so the read must
+    succeed `consecutive` times in a row.
     """
     import asyncio
     import time
@@ -47,6 +50,7 @@ async def wait_for_database_query(
     query = {"query": "query { BuiltinTag(limit: 1) { count } }"}
     headers = {"X-INFRAHUB-KEY": token}
     last = "no response"
+    streak = 0
     start = time.time()
     async with httpx.AsyncClient() as client:
         while time.time() - start < timeout:
@@ -54,13 +58,39 @@ async def wait_for_database_query(
                 resp = await client.post(f"{url}/graphql", json=query, headers=headers, timeout=10)
                 body = resp.json()
                 if resp.status_code == 200 and not body.get("errors"):
-                    return
+                    streak += 1
+                    if streak >= consecutive:
+                        return
+                    await asyncio.sleep(1)
+                    continue
                 last = f"{resp.status_code} {body.get('errors')}"
             except (httpx.HTTPError, ValueError) as exc:
                 last = repr(exc)
+            streak = 0
             await asyncio.sleep(interval)
     msg = f"{url}/graphql could not read the database after {timeout}s (last: {last})"
     raise TimeoutError(msg)
+
+
+async def _retry_while_database_unavailable(operation, timeout: float = 180.0, interval: float = 5.0):
+    """Run `operation()`, retrying while Infrahub answers that it cannot reach its database.
+
+    That 503 means the request did nothing, so running it again is safe. It still shows up
+    briefly after the database pod is replaced, even once a read has succeeded.
+    """
+    import asyncio
+    import time
+
+    from infrahub_sdk.exceptions import GraphQLError
+
+    start = time.time()
+    while True:
+        try:
+            return await operation()
+        except GraphQLError as exc:
+            if "Unable to connect to the database" not in str(exc) or time.time() - start > timeout:
+                raise
+            await asyncio.sleep(interval)
 
 
 async def seed_infrahub_data(infrahub_url: str, token: str) -> dict:
@@ -75,8 +105,12 @@ async def seed_infrahub_data(infrahub_url: str, token: str) -> dict:
     client = InfrahubClient(config=config)
 
     tag_name = f"e2e-backup-test-{uuid.uuid4().hex[:8]}"
-    tag = await client.create(kind="BuiltinTag", name=tag_name)
-    await tag.save()
+
+    async def create() -> None:
+        tag = await client.create(kind="BuiltinTag", name=tag_name)
+        await tag.save()
+
+    await _retry_while_database_unavailable(create)
 
     return {"tag_name": tag_name}
 
@@ -89,7 +123,9 @@ async def verify_infrahub_data(infrahub_url: str, token: str, expected: dict) ->
     config = InfrahubConfig(address=infrahub_url, api_token=token)
     client = InfrahubClient(config=config)
 
-    tag = await client.get(kind="BuiltinTag", name__value=expected["tag_name"])
+    tag = await _retry_while_database_unavailable(
+        lambda: client.get(kind="BuiltinTag", name__value=expected["tag_name"])
+    )
     assert tag.name.value == expected["tag_name"], f"Expected tag '{expected['tag_name']}' but got '{tag.name.value}'"
 
 
@@ -101,8 +137,8 @@ async def modify_infrahub_data(infrahub_url: str, token: str, data: dict) -> Non
     config = InfrahubConfig(address=infrahub_url, api_token=token)
     client = InfrahubClient(config=config)
 
-    tag = await client.get(kind="BuiltinTag", name__value=data["tag_name"])
-    await tag.delete()
+    tag = await _retry_while_database_unavailable(lambda: client.get(kind="BuiltinTag", name__value=data["tag_name"]))
+    await _retry_while_database_unavailable(tag.delete)
 
     # Verify deletion
     tags = await client.all(kind="BuiltinTag")
