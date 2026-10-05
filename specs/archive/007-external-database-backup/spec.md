@@ -53,11 +53,11 @@ verify Infrahub serves the pre-backup data. Delivers the entire value of the fea
 
 1. **Given** a deployment whose Neo4j Enterprise database runs outside the cluster and whose
    PostgreSQL runs inside it, **When** the operator takes a backup, **Then** the tool reports
-   which endpoint each database was read from before reading any data, and produces a single
+   which endpoints each database is read from before reading any data, and produces a single
    backup artefact covering both databases.
 2. **Given** a deployment whose Neo4j Enterprise and PostgreSQL databases both run outside the
    cluster, **When** the operator takes a backup, **Then** both databases are captured and the
-   artefact records, per database, the endpoint it came from.
+   artefact records, per database, the endpoints supplied for it (FR-005).
 3. **Given** a backup artefact taken from external databases and an operator who has explicitly
    authorised restore into externally-managed databases, **When** the operator restores it,
    **Then** Infrahub workloads are quiesced first, both databases are restored, the workloads
@@ -296,8 +296,9 @@ utilities installed, take and restore a backup with no cluster-side workload cre
 - **Transient backup workload**: a short-lived execution context the tool creates inside the
   deployment for the sole purpose of reaching an external database endpoint. Owned by exactly one
   run, identifiable as belonging to that run, and guaranteed not to outlive it.
-- **Backup artefact** (existing): gains, per database, the endpoint it was read from, whether
-  that endpoint was a replication follower, and whether the capture is complete.
+- **Backup artefact** (existing): gains, per database, the endpoints supplied for it, each
+  member's role as observed at capture time, and whether the capture is complete. It does not
+  record which member served the capture (FR-005).
 - **Restore authorisation** (new): an explicit operator grant permitting destructive restore into
   a database the deployment does not manage. Separate from the existing restore override.
 

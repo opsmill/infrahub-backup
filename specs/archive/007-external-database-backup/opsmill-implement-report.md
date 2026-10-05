@@ -34,7 +34,9 @@ The run continued past the report below, and three things in it are now out of d
    (Phase 2W, §9). That retired most of T073's risk, found one critical defect, corrected two
    documentation claims, and proved T072's topology can be built on a laptop.
 
-Open tasks are now **8**, all of them e2e or `[INFRA]`.
+Open tasks after these items were **8**, all of them e2e or `[INFRA]`. The residual ledgers
+(T152–T155) and the findings from the cluster run (T156–T161) were added afterwards, which brings
+the total to the **18** stated in the header.
 
 ---
 

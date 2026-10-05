@@ -7,7 +7,8 @@ SRC_ROOT=./src
 VERSION?=
 LDFLAGS=-ldflags "-X main.version=$(VERSION) -s -w"
 # cockroachdb/swiss (transitive dep of pebble cache) needs this tag for Go 1.26+
-GO_TAGS=-tags untested_go_version
+GO_BUILD_TAGS=untested_go_version
+GO_TAGS=-tags $(GO_BUILD_TAGS)
 # golangci-lint must be a v2 to read .golangci.yaml (version: "2"), and must be
 # built by a toolchain at least as new as the one in use — an older binary
 # cannot read the compiler's export data and fails every package on typecheck.
@@ -77,7 +78,7 @@ test-coverage: ## Run tests with coverage
 
 lint: ## Run golangci-lint
 	@echo "Running linter..."
-	@golangci-lint run --build-tags untested_go_version
+	@golangci-lint run --build-tags $(GO_BUILD_TAGS)
 
 fmt: ## Format Go code
 	@echo "Formatting code..."

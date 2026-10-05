@@ -2,7 +2,7 @@
 
 **Branch**: `007-external-database-backup` | **Date**: 2026-09-02 | **Spec**: [spec.md](./spec.md)
 
-**Input**: Feature specification from `/specs/007-external-database-backup/spec.md`
+**Input**: Feature specification from `/specs/archive/007-external-database-backup/spec.md`
 
 ## Summary
 
@@ -110,7 +110,7 @@ applied.
 ### Documentation (this feature)
 
 ```text
-specs/007-external-database-backup/
+specs/archive/007-external-database-backup/
 ├── plan.md                             # This file
 ├── spec.md                             # Feature specification
 ├── research.md                         # Phase 0 output
