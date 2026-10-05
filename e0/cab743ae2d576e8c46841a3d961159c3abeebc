@@ -1,0 +1,33 @@
+src/internal/app/restore_latest.go
+  s_46e73da0c90309::t_0d1102f2b8772d 218
+  s_46e73da0c90309::t_41eea2c9e36c8e 228-261
+src/internal/app/plakar_restore.go
+  s_46e73da0c90309::t_ffceee3744c211 341-348
+  s_46e73da0c90309::t_a5bbddec60ab29 98-109
+  s_46e73da0c90309::t_df16003948ca5c 41-44
+  s_46e73da0c90309::t_f4b8eee7cbdef4 10
+  s_46e73da0c90309::t_58e7b8eacdb743 427-434
+  s_46e73da0c90309::t_cad8c128d14d65 226
+src/internal/app/external_backup_gate_test.go
+  s_46e73da0c90309::t_6bd4f284b8c97c 321
+  s_46e73da0c90309::t_7f20c8c0162e42 414-552
+  s_46e73da0c90309::t_3c0ee884c0db4b 4
+src/internal/app/restore_wiring_test.go
+  s_46e73da0c90309::t_238c88e8f92888 229-255
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e0cab743ae2d576e8c46841a3d961159c3abeebc",
+  "prompts": {},
+  "sessions": {
+    "s_46e73da0c90309": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ef33f436-f116-464f-b06f-66a6f603369f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Benoit Kohler <benoit@opsmill.com>"
+    }
+  }
+}
