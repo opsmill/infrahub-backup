@@ -25,6 +25,9 @@ type gatedBackend struct {
 	// locateErr fails the location query, standing in for a cluster that did
 	// not answer.
 	locateErr error
+	// cypherErr fails every cypher-shell call, standing in for a database
+	// that did not answer a query.
+	cypherErr error
 
 	stopped []string
 	started []string
@@ -53,6 +56,9 @@ func (b *gatedBackend) Exec(service string, command []string, opts *ExecOptions)
 	b.execs = append(b.execs, strings.Join(command, " "))
 
 	if len(command) > 0 && command[0] == "cypher-shell" {
+		if b.cypherErr != nil {
+			return "", b.cypherErr
+		}
 		// The edition probe. Community is what an absent container's failed
 		// probe defaults to, and it is the branch that stops Infrahub — so a
 		// gate that fired late would be visible here as stopped services.

@@ -325,13 +325,27 @@ func TestIsNeo4jClusterReadsWhatTheProbeObserved(t *testing.T) {
 	})
 
 	t.Run("an internal database keeps degrading on a failed query", func(t *testing.T) {
-		iops := newGatedOps(t, newGatedBackend(), BackendTarball)
+		backend := newGatedBackend()
+		backend.cypherErr = errors.New("Connection refused")
+		iops := newGatedOps(t, backend, BackendTarball)
 		clustered, err := iops.isNeo4jCluster()
 		if err != nil {
 			t.Fatalf("isNeo4jCluster failed: %v", err)
 		}
 		if clustered {
-			t.Error("isNeo4jCluster() = true, want the shipped assume-not-clustered reading of an unusable answer")
+			t.Error("isNeo4jCluster() = true, want the shipped assume-not-clustered reading of a failed query")
+		}
+		// The query has to have been issued and failed: without that, a false
+		// answer is the parse of a successful one, and the failure branch this
+		// subtest is named for goes unexercised.
+		queried := false
+		for _, call := range backend.execs {
+			if strings.Contains(call, "SHOW SERVERS") {
+				queried = true
+			}
+		}
+		if !queried {
+			t.Errorf("the cluster query was never issued against the internal database; execs = %v", backend.execs)
 		}
 	})
 }
