@@ -321,10 +321,8 @@ func (iops *InfrahubOps) restoreBackupGroup(kctx *kcontext.KContext, repo *repos
 		}
 	}
 
-	// Restart all services
-	logrus.Info("Restarting Infrahub services...")
-	if err := iops.StartServices("infrahub-server", "task-worker"); err != nil {
-		return fmt.Errorf("failed to restart infrahub services: %w", err)
+	if err := iops.startAppServicesAfterRestore(); err != nil {
+		return err
 	}
 
 	// The deployment is back, so the deferred failure-path restart has nothing
@@ -499,9 +497,8 @@ func (iops *InfrahubOps) restoreSingleSnapshot(kctx *kcontext.KContext, repo *re
 			}
 		}
 
-		logrus.Info("Restarting Infrahub services...")
-		if err := iops.StartServices("infrahub-server", "task-worker"); err != nil {
-			return fmt.Errorf("failed to restart infrahub services: %w", err)
+		if err := iops.startAppServicesAfterRestore(); err != nil {
+			return err
 		}
 
 		iops.reportAppContainersRunning(stopped)
@@ -619,10 +616,8 @@ func (iops *InfrahubOps) restoreSingleSnapshot(kctx *kcontext.KContext, repo *re
 		return fmt.Errorf("unknown component type in snapshot: %s", component)
 	}
 
-	// Restart services
-	logrus.Info("Restarting Infrahub services...")
-	if err := iops.StartServices("infrahub-server", "task-worker"); err != nil {
-		return fmt.Errorf("failed to restart infrahub services: %w", err)
+	if err := iops.startAppServicesAfterRestore(); err != nil {
+		return err
 	}
 
 	iops.reportAppContainersRunning(stopped)

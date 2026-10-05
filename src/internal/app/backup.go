@@ -795,10 +795,8 @@ func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager boo
 		}
 	}
 
-	// Restart all services
-	logrus.Info("Restarting Infrahub services...")
-	if err := iops.StartServices("infrahub-server", "task-worker"); err != nil {
-		return fmt.Errorf("failed to restart infrahub services: %w", err)
+	if err := iops.startAppServicesAfterRestore(); err != nil {
+		return err
 	}
 
 	// The deployment is back, so the deferred failure-path restart has nothing

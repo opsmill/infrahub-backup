@@ -450,8 +450,7 @@ func (d *DockerBackend) Start(services ...string) error {
 	}
 	args := append([]string{"start"}, services...)
 	cmd := d.composeArgs(args...)
-	_, err := d.executor.runCommand("docker", cmd...)
-	return err
+	return composeLifecycleError(d.executor.runCommand("docker", cmd...))
 }
 
 func (d *DockerBackend) Stop(services ...string) error {
@@ -460,7 +459,20 @@ func (d *DockerBackend) Stop(services ...string) error {
 	}
 	args := append([]string{"stop"}, services...)
 	cmd := d.composeArgs(args...)
-	_, err := d.executor.runCommand("docker", cmd...)
+	return composeLifecycleError(d.executor.runCommand("docker", cmd...))
+}
+
+// composeLifecycleError carries what `docker compose start|stop` printed into
+// the error it returns. Compose explains a refusal only in its output — "dependency
+// failed to start: container ... exited (0)" — and an exit status alone left a
+// failed restore reporting nothing but "exit status 1".
+func composeLifecycleError(output string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if output = strings.TrimSpace(output); output != "" {
+		return fmt.Errorf("%w: %s", err, output)
+	}
 	return err
 }
 
