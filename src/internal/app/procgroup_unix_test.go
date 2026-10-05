@@ -5,6 +5,7 @@ package app
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -38,10 +39,11 @@ func TestDockerBackendStartWithinKillsChildrenOnTimeout(t *testing.T) {
 	if convErr != nil {
 		t.Fatalf("parsing child pid %q = %v", raw, convErr)
 	}
-	// The killed child is reaped by init once its shell is gone; allow for that.
+	// The killed child is reaped by whichever process adopts it, and until then it
+	// is a zombie that kill(pid, 0) still finds; what matters is that it no longer runs.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+		if !processExecuting(pid) {
 			return
 		}
 		if time.Now().After(deadline) {
@@ -50,4 +52,19 @@ func TestDockerBackendStartWithinKillsChildrenOnTimeout(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+// processExecuting reports whether pid is a process that is still running: gone
+// (ESRCH) and zombie (killed, not yet reaped) both count as not running.
+func processExecuting(pid int) bool {
+	if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+		return false
+	}
+	out, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return false // ps exits non-zero once the pid is gone
+	}
+	state := strings.TrimSpace(string(out))
+
+	return state != "" && !strings.HasPrefix(state, "Z")
 }
