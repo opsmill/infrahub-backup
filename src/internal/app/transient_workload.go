@@ -2088,11 +2088,21 @@ const transientPodPollInterval = 2 * time.Second
 
 // pollForJobPod waits for the Job to create a pod by listing it, for a kubectl
 // that predates `kubectl wait --for=create`.
+//
+// Each listing runs under what is left of the timeout rather than the control
+// bound. A listing started just before the deadline under its own bound could
+// return well after it, which would both stretch the wait past its timeout and
+// accept a pod that appeared after the wait should have ended.
 func (w *TransientWorkload) pollForJobPod(timeout time.Duration, selector string) error {
 	deadline := time.Now().Add(timeout)
 
 	for {
-		listed, err := w.ops.query("kubectl", "get", "pods", "-l", selector, "-n", w.Namespace, "-o", "name")
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return fmt.Errorf("no pod carrying %s appeared within %s", selector, timeout)
+		}
+
+		listed, err := w.ops.queryWithin(remaining)("kubectl", "get", "pods", "-l", selector, "-n", w.Namespace, "-o", "name")
 		if err == nil && len(nonEmptyLines(listed)) > 0 {
 			return nil
 		}

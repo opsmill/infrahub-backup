@@ -2396,3 +2396,60 @@ func TestTransientExclusionSurvivesARenamedPrefix(t *testing.T) {
 		}
 	})
 }
+
+// TestPollForJobPodBoundsEachListingByRemainingTime pins that the fallback for
+// a kubectl without `--for=create` runs every listing under what is left of
+// the wait, not under an independent bound that could carry it past the
+// deadline and accept a pod found after the wait should have ended.
+func TestPollForJobPodBoundsEachListingByRemainingTime(t *testing.T) {
+	const timeout = time.Minute
+
+	var bounds []time.Duration
+	calls := 0
+	w := &TransientWorkload{
+		Namespace: "infrahub",
+		ops: transientClusterOps{
+			query: func(string, ...string) (string, error) {
+				t.Error("the poll used the independently bounded query, want queryWithin with the remaining time")
+
+				return "", nil
+			},
+			queryWithin: func(bound time.Duration) podRunner {
+				bounds = append(bounds, bound)
+
+				return func(string, ...string) (string, error) {
+					calls++
+					if calls < 2 {
+						return "", nil
+					}
+
+					return "pod/infrahub-restore-abc123-x", nil
+				}
+			},
+		},
+	}
+
+	if err := w.pollForJobPod(timeout, "job-name=j"); err != nil {
+		t.Fatalf("pollForJobPod() = %v, want the pod found", err)
+	}
+	if len(bounds) != 2 {
+		t.Fatalf("listings = %d, want 2", len(bounds))
+	}
+	for i, bound := range bounds {
+		if bound <= 0 || bound > timeout {
+			t.Errorf("listing %d bound = %v, want within (0, %v]", i, bound, timeout)
+		}
+	}
+	if bounds[1] >= bounds[0] {
+		t.Errorf("bounds = %v, want the second listing given less time than the first", bounds)
+	}
+
+	// With no time left, no listing is issued at all.
+	bounds = nil
+	if err := w.pollForJobPod(0, "job-name=j"); err == nil {
+		t.Error("pollForJobPod(0) = nil, want the wait reported as expired")
+	}
+	if len(bounds) != 0 {
+		t.Errorf("listings after the deadline = %d, want none", len(bounds))
+	}
+}
