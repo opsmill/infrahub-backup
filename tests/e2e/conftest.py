@@ -14,7 +14,7 @@ from kr8s.asyncio.objects import Service as AsyncService
 from testcontainers.core.container import DockerContainer
 
 from tests.conftest import _dump_namespace_logs
-from tests.helpers.utils import wait_for_http
+from tests.helpers.utils import wait_for_database_query, wait_for_http
 
 PROJECT_ROOT = Path(__file__).parent.resolve().parents[1]
 
@@ -155,10 +155,10 @@ async def portforward_infrahub(kubeconfig_path: str, namespace: str):
     async with service.portforward(remote_port=8000, local_port="auto") as local_port:
         url = f"http://localhost:{local_port}"
         await wait_for_http(f"{url}/api/config", timeout=300.0, interval=5.0)
-        # /api/config answers before the server can reach its database again (after a
-        # restore or the database pod reset between tests); the schema needs the database,
-        # and it is the first thing a test's SDK call fetches.
-        await wait_for_http(f"{url}/api/schema?branch=main", timeout=300.0, interval=5.0)
+        # /api/config (and even /api/schema) answer before the server can reach its
+        # database again after a restore or the database pod reset between tests, so wait
+        # for a query that reads the database.
+        await wait_for_database_query(url, INFRAHUB_ADMIN_TOKEN)
         yield url
 
 

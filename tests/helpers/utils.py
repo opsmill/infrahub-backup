@@ -30,6 +30,39 @@ async def wait_for_http(
     raise TimeoutError(msg)
 
 
+async def wait_for_database_query(
+    url: str,
+    token: str,
+    timeout: float = 300.0,
+    interval: float = 5.0,
+) -> None:
+    """Poll a GraphQL query that reads the database until it answers without errors.
+
+    The server answers /api/config and /api/schema before it can reach its database
+    again, so neither proves a test's first mutation will succeed.
+    """
+    import asyncio
+    import time
+
+    query = {"query": "query { BuiltinTag(limit: 1) { count } }"}
+    headers = {"X-INFRAHUB-KEY": token}
+    last = "no response"
+    start = time.time()
+    async with httpx.AsyncClient() as client:
+        while time.time() - start < timeout:
+            try:
+                resp = await client.post(f"{url}/graphql", json=query, headers=headers, timeout=10)
+                body = resp.json()
+                if resp.status_code == 200 and not body.get("errors"):
+                    return
+                last = f"{resp.status_code} {body.get('errors')}"
+            except (httpx.HTTPError, ValueError) as exc:
+                last = repr(exc)
+            await asyncio.sleep(interval)
+    msg = f"{url}/graphql could not read the database after {timeout}s (last: {last})"
+    raise TimeoutError(msg)
+
+
 async def seed_infrahub_data(infrahub_url: str, token: str) -> dict:
     """Create a BuiltinTag in Infrahub for backup/restore verification.
 
