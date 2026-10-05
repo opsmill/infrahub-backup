@@ -1,0 +1,23 @@
+src/internal/app/app_config.go
+  s_46e73da0c90309::t_6d98e1ccbafa6f 10,527-529
+  s_46e73da0c90309::t_d4cfaf5f375ef6 466-474,476,496-508,510-514,516-520,522-526,530-574,577-578
+src/internal/app/app_config_test.go
+  s_46e73da0c90309::t_881fe56a135d97 4,494-498,522-609
+  s_46e73da0c90309::t_5d41017be21f00 610
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3881bb08ff8fe47b8252c8083ec2501851c21133",
+  "prompts": {},
+  "sessions": {
+    "s_46e73da0c90309": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ef33f436-f116-464f-b06f-66a6f603369f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Benoit Kohler <benoit@opsmill.com>"
+    }
+  }
+}
