@@ -131,7 +131,7 @@ func waitForDockerServiceReady(
 // within limit; a call cut short returns an error naming that call.
 func (d *DockerBackend) serviceContainerStates(service string, limit time.Duration) ([]dockerContainerState, error) {
 	deadline := time.Now().Add(limit)
-	output, err := d.executor.runCommandContext(context.Background(), limit, "docker", d.composeArgs("ps", "-a", "-q", service)...)
+	output, err := d.executor.runCommandContextKillGroup(context.Background(), limit, "docker", d.composeArgs("ps", "-a", "-q", service)...)
 	if err != nil {
 		return nil, fmt.Errorf("docker compose ps %s: %w", service, composeLifecycleError(output, err))
 	}
@@ -142,7 +142,7 @@ func (d *DockerBackend) serviceContainerStates(service string, limit time.Durati
 		if remaining <= 0 {
 			return nil, fmt.Errorf("docker inspect %s: %w", id, &timeoutError{timeout: limit})
 		}
-		out, err := d.executor.runCommandContext(context.Background(), remaining, "docker", "inspect", "--format", "{{json .State}}", id)
+		out, err := d.executor.runCommandContextKillGroup(context.Background(), remaining, "docker", "inspect", "--format", "{{json .State}}", id)
 		if err != nil {
 			return nil, fmt.Errorf("docker inspect %s: %w", id, composeLifecycleError(out, err))
 		}
@@ -174,7 +174,7 @@ func (d *DockerBackend) startWithin(limit time.Duration, service string) error {
 	if limit <= 0 {
 		return fmt.Errorf("docker compose start %s: %w", service, &timeoutError{timeout: limit})
 	}
-	output, err := d.executor.runCommandContext(context.Background(), limit, "docker", d.composeArgs("start", service)...)
+	output, err := d.executor.runCommandContextKillGroup(context.Background(), limit, "docker", d.composeArgs("start", service)...)
 	if err != nil {
 		return fmt.Errorf("docker compose start %s: %w", service, composeLifecycleError(output, err))
 	}

@@ -105,10 +105,28 @@ func formatCommandTimeout(d time.Duration) string {
 // is killed once timeout elapses (or ctx is cancelled) and the returned error
 // is a *timeoutError when the timeout expired.
 func (ce *CommandExecutor) runCommandContext(ctx context.Context, timeout time.Duration, name string, args ...string) (string, error) {
+	return ce.runBounded(ctx, timeout, false, name, args...)
+}
+
+// runCommandContextKillGroup is runCommandContext for a command whose
+// children must not outlive its timeout: the command runs in a process group
+// of its own and the whole group is killed when the timeout expires, so a
+// `docker compose start` reported as timed out has stopped. On Windows only
+// the command itself is killed. The command no longer receives the
+// terminal's Ctrl-C, so it is kept to the bounded docker calls of the
+// database readiness wait rather than applied to every bounded command.
+func (ce *CommandExecutor) runCommandContextKillGroup(ctx context.Context, timeout time.Duration, name string, args ...string) (string, error) {
+	return ce.runBounded(ctx, timeout, true, name, args...)
+}
+
+func (ce *CommandExecutor) runBounded(ctx context.Context, timeout time.Duration, killGroup bool, name string, args ...string) (string, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(cctx, name, args...)
+	if killGroup {
+		killProcessGroupOnCancel(cmd)
+	}
 	// Killing the command does not close the output pipe that a child it
 	// spawned still holds (the docker CLI runs `compose` as a plugin child), so
 	// without a bound on that wait the call outlives its timeout.
@@ -120,7 +138,7 @@ func (ce *CommandExecutor) runCommandContext(ctx context.Context, timeout time.D
 	return strings.TrimSpace(string(output)), err
 }
 
-// commandWaitDelay is how long runCommandContext waits for a killed command's
+// commandWaitDelay is how long runBounded waits for a killed command's
 // output pipe to close before it abandons it.
 const commandWaitDelay = 2 * time.Second
 
