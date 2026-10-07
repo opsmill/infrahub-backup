@@ -269,3 +269,33 @@ func TestRunCommandSeparateContext_Timeout(t *testing.T) {
 		t.Fatalf("error = %v (%T), want *timeoutError", err, err)
 	}
 }
+
+func TestWithCommandOutput(t *testing.T) {
+	exitErr := errors.New("exit status 1")
+
+	t.Run("no output keeps the error unchanged", func(t *testing.T) {
+		if got := withCommandOutput(exitErr, ""); got != exitErr {
+			t.Errorf("withCommandOutput = %v, want the original error", got)
+		}
+	})
+
+	t.Run("appends the error line kubectl printed", func(t *testing.T) {
+		output := "Defaulted container \"neo4j\" out of: neo4j, init\nError from server (Forbidden): pods \"db-0\" is forbidden"
+		got := withCommandOutput(exitErr, output)
+		want := `exit status 1: Error from server (Forbidden): pods "db-0" is forbidden`
+		if got.Error() != want {
+			t.Errorf("withCommandOutput = %q, want %q", got.Error(), want)
+		}
+		if !errors.Is(got, exitErr) {
+			t.Errorf("withCommandOutput does not wrap the original error: %v", got)
+		}
+	})
+
+	t.Run("a timeout stays detectable", func(t *testing.T) {
+		got := withCommandOutput(&timeoutError{timeout: collectTransferTimeout}, "error: partial transfer")
+		var timeout *timeoutError
+		if !errors.As(got, &timeout) {
+			t.Fatalf("withCommandOutput hid the *timeoutError: %v", got)
+		}
+	})
+}

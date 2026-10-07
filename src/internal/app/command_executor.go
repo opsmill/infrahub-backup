@@ -64,6 +64,19 @@ func (ce *CommandExecutor) runCommand(name string, args ...string) (string, erro
 	return strings.TrimSpace(string(output)), err
 }
 
+// withCommandOutput appends a failed command's actionable output line (see
+// commandErrorLine) to its error, so what kubectl or docker reported — for
+// example an RBAC Forbidden from the API server — reaches the caller instead of
+// only the exit status. The original error stays wrapped, so a *timeoutError is
+// still found by errors.As.
+func withCommandOutput(err error, output string) error {
+	line := commandErrorLine(output)
+	if line == "" {
+		return err
+	}
+	return fmt.Errorf("%w: %s", err, line)
+}
+
 // timeoutError marks a command that exceeded its allotted execution time. Its
 // message is exactly "timed out after <duration>" so orchestrators can surface
 // it verbatim (e.g. as a bundle manifest failure reason).
