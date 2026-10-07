@@ -19,7 +19,7 @@ Before installing Infrahub Collect, ensure you have:
 **For Kubernetes deployments:**
 
 - Administrative or sudo access on your system
-- kubectl configured with permissions to read pod logs and execute commands in pods (`pods/log` and `pods/exec`) in the Infrahub namespace
+- kubectl configured with the permissions listed in [Kubernetes permissions for Infrahub Collect](./kubernetes-permissions.mdx) for the Infrahub namespace
 
 **If building from source:**
 
@@ -169,6 +169,8 @@ infrahub-collect environment detect
 ```
 
 If these commands succeed, installation is complete.
+
+On Kubernetes, `environment list` searches all namespaces. If your role is limited to the Infrahub namespace, it reports no deployments; run `infrahub-collect environment detect --k8s-namespace=<namespace>` instead.
 
 ## Related resources
 

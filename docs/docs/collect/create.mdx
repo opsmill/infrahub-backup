@@ -5,7 +5,7 @@ title: Collect a troubleshooting bundle
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 
-Collect a troubleshooting bundle from an Infrahub deployment and share it with OpsMill support. Collection is read-only and safe to run at any time, including while the instance is degraded. See [Infrahub Collect](./index.mdx) for what a bundle contains and how secrets are masked. The same command produces the same bundle on Docker Compose and Kubernetes.
+Collect a troubleshooting bundle from an Infrahub deployment and share it with OpsMill support. A default collection never stops, restarts, or scales any service, so you can run it at any time, including while the instance is degraded. See [Infrahub Collect](./index.mdx) for what a bundle contains, what a collection changes in your deployment, and how secrets are masked. The same command produces the same bundle on Docker Compose and Kubernetes.
 
 ## Prerequisites
 
@@ -23,7 +23,8 @@ Before collecting a bundle:
 
 - The `infrahub-collect` binary is installed ([installation guide](./install.mdx))
 - `kubectl` is configured with access to the cluster running Infrahub
-- Your role can read pod logs and execute commands in pods (`pods/log` and `pods/exec`); no write or scale permissions are needed
+- Your kubectl credentials have the permissions listed in [Kubernetes permissions for Infrahub Collect](./kubernetes-permissions.mdx). A default collection needs read access to pods, container logs, workloads, and pod metrics, and `create` on `pods/exec`. `--benchmark` and `--include-backup` need more permissions.
+- If your role is limited to the Infrahub namespace, you pass `--k8s-namespace` on every command, because namespace auto-detection lists pods in all namespaces
 
 </TabItem>
 </Tabs>
@@ -70,7 +71,7 @@ If a single namespace contains Infrahub, run:
 infrahub-collect create
 ```
 
-To target a specific namespace:
+Auto-detection lists pods in all namespaces, which requires a ClusterRole. To target a specific namespace, or if your role is limited to the Infrahub namespace, name the namespace:
 
 ```bash
 infrahub-collect create --k8s-namespace=infrahub-prod
@@ -187,7 +188,7 @@ Support often asks for a backup alongside logs so they can reproduce your issue 
 infrahub-collect create --include-backup
 ```
 
-This runs the standard `infrahub-backup` logic and records the backup in the bundle manifest.
+This runs the standard `infrahub-backup` logic and records the backup in the bundle manifest. On Kubernetes, the backup needs permission to scale workloads, which a default collection does not use. See [Additional permissions for `--include-backup`](./kubernetes-permissions.mdx#additional-permissions-for---include-backup).
 
 :::warning
 Unlike log collection, the backup step follows the normal backup behavior for your deployment, which can include stopping application containers while the snapshot is taken. Plan for a short interruption, or skip `--include-backup` and create the backup separately during a maintenance window.
@@ -226,6 +227,8 @@ infrahub-collect create --benchmark
 
 The benchmark requires downloading the OpsMill benchmark container image and measures whether the host meets Infrahub's resource requirements — disk IOPS, memory, and single-core CPU — rather than generating load against your instance. If the image cannot be pulled — for example in an air-gapped environment — the benchmark is skipped with a warning and the rest of the collection completes normally.
 
+The benchmark runs in a container (Docker Compose) or a pod (Kubernetes) that the tool creates and deletes afterwards. On Kubernetes, creating and deleting that pod needs permissions that a default collection does not use. See [Additional permissions for `--benchmark`](./kubernetes-permissions.mdx#additional-permissions-for---benchmark).
+
 ## Troubleshoot collection
 
 ### No deployment detected
@@ -240,7 +243,9 @@ On Docker Compose, confirm the project is running with `docker compose ls`; the 
 
 ### Permission denied on Kubernetes
 
-Log collection needs the `pods/log` permission and the status collectors need `pods/exec`. If your role lacks one of them, the affected collectors are recorded as failed in the manifest. Ask your cluster administrator for read access to both — collection needs no write or scale permissions.
+When the Kubernetes API server refuses a request, the affected collectors are recorded as failed in the manifest and the rest of the collection continues. The refusal, which names the resource and the verb, appears in the collector reason in the manifest or in a `<name>.err.txt` file in the bundle. Compare it with [Kubernetes permissions for Infrahub Collect](./kubernetes-permissions.mdx), which lists every permission a collection uses and what fails without each one, and ask your cluster administrator for the missing permission.
+
+If the command stops with `insufficient permissions to list pods across namespaces`, your role is limited to one namespace. Pass `--k8s-namespace` or set `INFRAHUB_K8S_NAMESPACE`.
 
 ### Docker or kubectl not found
 
