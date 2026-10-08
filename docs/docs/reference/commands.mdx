@@ -330,6 +330,7 @@ infrahub-collect create [flags]
 | `--include-backup` | Also create a backup using the standard backup behavior | `false` | `INFRAHUB_INCLUDE_BACKUP` |
 | `--include-queries` | Include database query logs (may contain customer data) | `false` | `INFRAHUB_INCLUDE_QUERIES` |
 | `--benchmark` | Run the OpsMill benchmark and include its results (requires image download; skipped with a warning if unavailable) | `false` | `INFRAHUB_BENCHMARK` |
+| `--telemetry-days <n>` | Number of days of Infrahub product-telemetry snapshots to export; a value of `0` or less uses the default | `30` | `INFRAHUB_TELEMETRY_DAYS` |
 
 **Examples:**
 
@@ -348,6 +349,9 @@ infrahub-collect create --include-backup
 
 # Performance investigation with benchmark
 infrahub-collect create --benchmark
+
+# Export 90 days of telemetry snapshots instead of 30
+infrahub-collect create --telemetry-days=90
 ```
 
 **Output:**
@@ -365,6 +369,7 @@ A single archive named `support_bundle_<timestamp>.tar.gz` in the output directo
 | Task-worker state | Prefect worker status, one directory per replica |
 | Task-manager state | Work pools, work queues, recent flow runs, events, and automations |
 | Server info | Versions, installed packages, API information/configuration/schema, masked environment variables |
+| Telemetry export | Infrahub product-telemetry snapshots for the last `--telemetry-days` days, exported with `infrahubctl telemetry export` in the `task-worker` container; written without masking; skipped when the export produces no file |
 | Container metrics | Resource usage via `docker compose stats` or `kubectl top` |
 | Backup (opt-in) | Backup produced by the standard backup behavior (`--include-backup`) |
 | Benchmark (opt-in) | OpsMill benchmark results (`--benchmark`) |
