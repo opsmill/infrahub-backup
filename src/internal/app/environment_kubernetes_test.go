@@ -1,11 +1,62 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// installFakeCLI puts an executable shell script named name first on PATH for
+// the duration of the test, so a backend's real CommandExecutor runs it in
+// place of kubectl or docker.
+func installFakeCLI(t *testing.T, name, script string) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"+script), 0755); err != nil {
+		t.Fatalf("failed to write fake %s: %v", name, err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestKubernetesCopy_KeepsKubectlError checks that a refused `kubectl cp`
+// reports what the API server said, not only "exit status 1", in every copy
+// primitive: the bounded one the collectors use and the two shared with the
+// backup tool.
+func TestKubernetesCopy_KeepsKubectlError(t *testing.T) {
+	const forbidden = `Error from server (Forbidden): pods "infrahub-database-0" is forbidden: User "collector" cannot create resource "pods/exec" in API group "" in the namespace "infrahub"`
+	// Pod lookups succeed; every copy is refused.
+	installFakeCLI(t, "kubectl", `case "$1" in
+get) echo infrahub-database-0 ;;
+cp) echo '`+forbidden+`' >&2; exit 1 ;;
+esac
+`)
+	k := NewKubernetesBackend(&Configuration{}, NewCommandExecutor())
+	k.namespace = "infrahub"
+	dest := filepath.Join(t.TempDir(), "neo4j.log")
+
+	copies := map[string]func() error{
+		"CopyFromContext": func() error {
+			return k.CopyFromContext(context.Background(), collectTransferTimeout, "database", "/logs/neo4j.log", dest)
+		},
+		"CopyFrom": func() error { return k.CopyFrom("database", "/logs/neo4j.log", dest) },
+		"CopyTo":   func() error { return k.CopyTo("database", dest, "/tmp/neo4j.log") },
+	}
+	for name, copyFn := range copies {
+		t.Run(name, func(t *testing.T) {
+			err := copyFn()
+			if err == nil {
+				t.Fatal("copy succeeded, want the refused kubectl cp to fail")
+			}
+			if want := "exit status 1: " + forbidden; err.Error() != want {
+				t.Errorf("error = %q, want %q", err.Error(), want)
+			}
+		})
+	}
+}
 
 func TestSplitHelmChartLabel(t *testing.T) {
 	tests := []struct {

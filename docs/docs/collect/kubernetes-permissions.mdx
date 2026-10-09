@@ -1,0 +1,178 @@
+---
+title: Kubernetes permissions for Infrahub Collect
+---
+
+On Kubernetes, `infrahub-collect` runs on your workstation or a CI runner and sends requests to the Kubernetes API server with the credentials in your kubeconfig. Use this page to create a Role for those credentials, or to review the access before you approve running the tool.
+
+A default collection reads pods, container logs, workload labels, and pod metrics, and runs commands inside containers. It creates, changes, and deletes no Kubernetes objects. Two opt-in flags need more access: `--benchmark` creates and deletes a pod, and `--include-backup` can scale workloads down and up.
+
+## Permissions for a default collection
+
+A default collection is `infrahub-collect create` without `--benchmark` or `--include-backup`. It uses these permissions in the Infrahub namespace:
+
+| API group | Resource | Verbs | What `infrahub-collect` uses it for |
+|---|---|---|---|
+| core (`""`) | `pods` | `get`, `list` | Finds the pods of each Infrahub service and reads the restart count of each container |
+| core (`""`) | `pods/log` | `get` | Reads container logs, and the logs of the previous container when a container restarted |
+| core (`""`) | `pods/exec` | `create` | Runs status commands inside containers, and copies files into and out of containers (`kubectl cp` runs through the same exec API) |
+| `apps` | `deployments`, `statefulsets` | `list` | Reads the Helm chart name, chart version, and release name from the labels and annotations that Helm adds to workloads |
+| `metrics.k8s.io` | `pods` | `list` | Reads the CPU and memory usage of each pod, as `kubectl top pods` does |
+
+`infrahub-collect` reads the Helm chart information from workload labels, not from the Helm release Secret, so it needs no access to Secrets.
+
+The `metrics.k8s.io` API is served by metrics-server. If the cluster does not run metrics-server, only the metrics collector is recorded as failed.
+
+### What fails when a default permission is missing
+
+When the API server refuses a request, `infrahub-collect` records the affected collectors as failed in the bundle manifest and continues with the other collectors. The exception is `list` on `pods`, without which the tool cannot find the Infrahub pods.
+
+- Without `list` on `pods`, the command stops before it collects anything.
+- Without `get` on `pods`, the log collectors and the status collectors are recorded as failed, because the tool cannot read container restart counts or open exec sessions.
+- Without `get` on `pods/log`, every log collector (`logs/<service>`) is recorded as failed.
+- Without `create` on `pods/exec`, the database log, message queue, cache, task worker, task manager, server, and telemetry collectors are recorded as failed.
+- Without `list` on `deployments` and `statefulsets`, the collection completes, but the manifest has no `helm` or `edition` field.
+- Without `list` on `pods` in `metrics.k8s.io`, the metrics collector is recorded as failed.
+
+### Exec sessions with kubectl 1.31 and later
+
+kubectl 1.31 and later first opens an exec session over the WebSocket protocol, and the API server authorizes that request as `get` on `pods/exec`. If the Role grants only `create`, the API server refuses that request and kubectl opens the session again over the older SPDY protocol, which the API server authorizes as `create`. The command succeeds either way, and your API server audit log can show the refused requests. To let kubectl use WebSocket directly, grant both `create` and `get` on `pods/exec`. The same applies to `pods/attach`, which `--benchmark` uses.
+
+### What `create` on `pods/exec` allows
+
+`create` on `pods/exec` lets the credentials run any command in any container of the namespace, including commands that print the passwords and tokens stored in environment variables. Kubernetes RBAC cannot limit this permission to specific commands. `infrahub-collect` uses it to run these programs:
+
+- In the `database` container: `ls`, and file copies from the Neo4j log directory
+- In the `message-queue` container: `rabbitmqctl` list and status commands
+- In the `cache` container: `redis-cli` commands that read server information, clients, configuration, and the slow log
+- In the `task-worker` containers, or in the `task-manager` container when no task worker runs: `prefect` list and status commands, `true` (to confirm that commands can run before the telemetry export), `infrahubctl telemetry export`, `printenv INFRAHUB_INTERNAL_ADDRESS`, and a Python script that reads recent Prefect events
+- In the `infrahub-server` container: `env`, and Python commands that read the Infrahub version, the installed packages, and responses from the Infrahub API
+
+Environment variables and configuration values whose key names contain `password`, `secret`, `token`, or `key` are masked before they are written to the bundle. See [Review before sharing](./index.mdx#review-before-sharing).
+
+## Files a default collection writes inside containers
+
+A default collection does not stop, restart, or scale any workload, and creates, changes, and deletes no Kubernetes objects. It writes two temporary files inside a container through `pods/exec` and deletes them before it finishes. [What a collection changes in your deployment](./index.mdx#what-a-collection-changes-in-your-deployment) lists the files.
+
+## Namespace detection requires access to all namespaces
+
+Without `--k8s-namespace` or the `INFRAHUB_K8S_NAMESPACE` environment variable, `infrahub-collect` finds the Infrahub namespace by listing the pods labeled `app.kubernetes.io/name=infrahub` in all namespaces. That requires `list` on `pods` in every namespace, which only a ClusterRole can grant.
+
+With a Role that is limited to the Infrahub namespace:
+
+- `infrahub-collect create` and `infrahub-collect environment detect` stop with `insufficient permissions to list pods across namespaces; try specifying --k8s-namespace explicitly`. Pass `--k8s-namespace` on every command, or set `INFRAHUB_K8S_NAMESPACE`.
+- `infrahub-collect environment list` always searches all namespaces, so it reports `No Infrahub deployments detected`. Use `infrahub-collect environment detect --k8s-namespace=<namespace>` to confirm that the tool can reach the deployment.
+
+## Additional permissions for `--benchmark`
+
+`--benchmark` creates a pod named `infrahub-collect-benchmark-<collection ID>` in the Infrahub namespace from the `registry.opsmill.io/opsmill/bench` image, or from the image set in the `INFRAHUB_BENCHMARK_IMAGE` environment variable. `infrahub-collect` waits for the pod to start, reads its output while it runs, and deletes the pod afterwards, including when the benchmark times out. The node that runs the pod must be able to pull the image.
+
+| API group | Resource | Verbs | What `infrahub-collect` uses it for |
+|---|---|---|---|
+| core (`""`) | `pods` | `create`, `watch`, `delete` | Creates the benchmark pod, waits for it to start, and deletes it |
+| core (`""`) | `pods/attach` | `create` | Reads the benchmark output while the pod runs |
+
+- Without `create` on `pods`, the benchmark collector is recorded as skipped, and the reason names the refused permission.
+- Without `watch` on `pods`, the benchmark runs, but kubectl writes its own error messages into the benchmark output in the bundle.
+- Without `create` on `pods/attach`, kubectl reads the pod logs instead, and the benchmark output can be missing from the bundle.
+- Without `delete` on `pods`, the benchmark pod remains in the namespace after the collection, in the `Completed` state. Delete it with `kubectl delete pod <pod name> -n <namespace>`.
+
+## Additional permissions for `--include-backup`
+
+`--include-backup` runs the same backup as `infrahub-backup create`. On Kubernetes, the backup:
+
+- runs commands inside the `database` and `task-manager-db` containers, writes the database dumps to a temporary location inside them, copies the dumps out, and deletes them
+- with Infrahub Community, which runs Neo4j Community, scales the running `infrahub-server`, `task-worker`, `task-manager`, `task-manager-background-svc`, `cache`, and `message-queue` workloads to zero replicas before the dump and back to their previous replica count afterwards, so Infrahub is unavailable during the backup
+- with Infrahub Community, also copies a helper program into the `database` container and stops Neo4j for the dump, after which the `database` container restarts once
+
+| API group | Resource | Verbs | What `infrahub-collect` uses it for |
+|---|---|---|---|
+| `apps` | `deployments`, `statefulsets` | `get` | Reads the replica count of each workload before scaling it down |
+| `apps` | `deployments/scale`, `statefulsets/scale` | `patch` | Scales workloads down and up, as `kubectl scale` does |
+
+`kubectl scale` changes the replica count through the `scale` subresource. A Role that grants `patch` on `deployments` and `statefulsets`, but not on `deployments/scale` and `statefulsets/scale`, does not allow it: the backup collector is recorded as failed when the tool tries to scale down the first workload, and no workload is scaled.
+
+## Role manifest for Infrahub Collect
+
+This Role grants the permissions for a default collection in the `infrahub` namespace. The commented rules add the permissions for `--benchmark` and `--include-backup`; remove the comment markers only for the flags you plan to use.
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: infrahub-collect
+  namespace: infrahub
+rules:
+  # Default collection
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create", "get"]  # "get" lets kubectl 1.31+ use WebSocket without a fallback
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["list"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["list"]
+  # --benchmark
+  # - apiGroups: [""]
+  #   resources: ["pods"]
+  #   verbs: ["create", "watch", "delete"]
+  # - apiGroups: [""]
+  #   resources: ["pods/attach"]
+  #   verbs: ["create", "get"]
+  # --include-backup
+  # - apiGroups: ["apps"]
+  #   resources: ["deployments", "statefulsets"]
+  #   verbs: ["get"]
+  # - apiGroups: ["apps"]
+  #   resources: ["deployments/scale", "statefulsets/scale"]
+  #   verbs: ["patch"]
+```
+
+Bind the Role to the user, group, or ServiceAccount that runs `infrahub-collect`:
+
+```bash
+kubectl create rolebinding infrahub-collect -n infrahub --role=infrahub-collect --user=<user name>
+```
+
+## Check the permissions before a collection
+
+Run these commands with the credentials that `infrahub-collect` will use. Each command prints `yes` when the permission is granted:
+
+```bash
+kubectl auth can-i list pods -n infrahub
+kubectl auth can-i get pods -n infrahub
+kubectl auth can-i get pods --subresource=log -n infrahub
+kubectl auth can-i create pods --subresource=exec -n infrahub
+kubectl auth can-i list deployments.apps -n infrahub
+kubectl auth can-i list statefulsets.apps -n infrahub
+kubectl auth can-i list pods.metrics.k8s.io -n infrahub
+```
+
+For `--benchmark` and `--include-backup`, also check the permissions those flags add:
+
+```bash
+# --benchmark
+kubectl auth can-i create pods -n infrahub
+kubectl auth can-i watch pods -n infrahub
+kubectl auth can-i delete pods -n infrahub
+kubectl auth can-i create pods --subresource=attach -n infrahub
+# --include-backup
+kubectl auth can-i get deployments.apps -n infrahub
+kubectl auth can-i get statefulsets.apps -n infrahub
+kubectl auth can-i patch deployments.apps --subresource=scale -n infrahub
+kubectl auth can-i patch statefulsets.apps --subresource=scale -n infrahub
+```
+
+`kubectl auth can-i list pods --all-namespaces` prints `no` for a Role that is limited to one namespace. In that case, pass `--k8s-namespace` to every `infrahub-collect` command.
+
+## Related resources
+
+- [Collect a troubleshooting bundle](./create.mdx)
+- [Install Infrahub Collect](./install.mdx)
+- [Back up Infrahub on Kubernetes](../backup/kubernetes-backup.mdx)

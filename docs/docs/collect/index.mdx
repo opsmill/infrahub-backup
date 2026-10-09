@@ -4,15 +4,27 @@ title: Infrahub Collect
 
 Use Infrahub Collect to gather everything OpsMill support needs to investigate an issue — service logs, diagnostic status, configuration, and metrics — into a single local archive. Run it when support asks for logs, or to attach diagnostic data to a support request. The same command produces the same bundle on Docker Compose and Kubernetes.
 
-## Safe to run at any time
+## What a collection changes in your deployment
 
-Collection is strictly read-only. Unlike `infrahub-backup create`, the collect command never stops, restarts, or scales any container or pod, so it is safe to run against a production instance at any time — including while the instance is degraded. If a service is down, collection continues with the rest and records the failure in the manifest. A partial bundle is still a useful bundle — a degraded instance is precisely when you need one.
+A default collection, without `--benchmark` or `--include-backup`, reads logs and status from your deployment. Unlike `infrahub-backup create`, it never stops, restarts, or scales any container or pod, so you can run it against a production instance at any time, including while the instance is degraded. If a service is down, collection continues with the rest and records the failure in the manifest. A partial bundle is still a useful bundle — a degraded instance is precisely when you need one.
+
+A default collection writes two temporary files inside a container and deletes each one when the collector that wrote it finishes, including when that collector fails:
+
+- `/tmp/infrahubops_collect_prefect_events.py` in a `task-worker` container, or in the `task-manager` container when no task worker runs. This is a script that reads recent Prefect events, because the Prefect CLI has no command that prints events and exits.
+- `/tmp/infrahubops_telemetry_export.json` in a `task-worker` container. `infrahubctl telemetry export` writes this file, and `infrahub-collect` copies it into the bundle.
+
+Two opt-in flags change more than that:
+
+- `--benchmark` creates a container (Docker Compose) or a pod (Kubernetes) from the OpsMill benchmark image and deletes it after the benchmark.
+- `--include-backup` runs the standard backup, which can stop the Infrahub services while the snapshot is taken.
+
+On Kubernetes, each of these modes needs different permissions. See [Kubernetes permissions for Infrahub Collect](./kubernetes-permissions.mdx).
 
 The binary is self-contained. By default, collection works offline: it uses your existing Docker or kubectl access and performs no network access beyond the deployment itself. The one exception is the opt-in `--benchmark`, which downloads a benchmark image.
 
 ## Collect or back up?
 
-A troubleshooting bundle contains diagnostics for support to read; a [backup](../backup/create.mdx) is a restorable snapshot of your data. They are separate operations with different safety profiles — collection is read-only, while a backup can stop containers while the snapshot is taken. When support asks for both, run `infrahub-collect create --include-backup` to produce them in one run.
+A troubleshooting bundle contains diagnostics for support to read; a [backup](../backup/create.mdx) is a restorable snapshot of your data. They are separate operations with different safety profiles — a default collection never stops containers, while a backup can stop containers while the snapshot is taken. When support asks for both, run `infrahub-collect create --include-backup` to produce them in one run.
 
 ## What a bundle contains
 

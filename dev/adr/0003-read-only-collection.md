@@ -20,9 +20,13 @@ Two deliberate exceptions, both operating on the **tool's own** transient resour
 ## Consequences
 
 - Safe to run against a live or degraded production instance without risk of an outage attributable to the tool.
-- Kubernetes RBAC for the tool needs only read/exec verbs — no write or scale permissions.
+- Kubernetes RBAC for a default collection needs only read verbs plus `create` on `pods/exec` — no permission to create, delete, or scale workloads. The two exceptions above need more: `--benchmark` creates, watches, attaches to, and deletes its own pod, and `--include-backup` patches the `deployments/scale` and `statefulsets/scale` subresources. `docs/docs/collect/kubernetes-permissions.mdx` lists the exact permissions.
 - Interrupt handling is simpler: there is no workload state to restore on SIGINT, only a staging directory to clean up.
 
 ## Alternatives Considered
 
 - **Reuse the backup tool's stop/collect/start pattern for consistency** — rejected: it would make the tool unsafe for its core (production, degraded) use case and require elevated permissions.
+
+## Corrections
+
+- 2026-10-07 ([#170](https://github.com/opsmill/infrahub-backup/issues/170)): the second Consequences bullet originally read "Kubernetes RBAC for the tool needs only read/exec verbs — no write or scale permissions." That held only for a default collection and omitted the permissions the two exceptions need. The decision is unchanged.

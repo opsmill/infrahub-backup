@@ -1,10 +1,41 @@
 package app
 
 import (
+	"context"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+// TestDockerCopy_KeepsDockerError checks that a failed `docker compose cp`
+// reports what docker said, not only "exit status 1", in every copy primitive.
+func TestDockerCopy_KeepsDockerError(t *testing.T) {
+	const notRunning = `Error response from daemon: container 4f2a is not running`
+	installFakeCLI(t, "docker", `echo '`+notRunning+`' >&2; exit 1
+`)
+	d := NewDockerBackend(&Configuration{}, NewCommandExecutor())
+	dest := filepath.Join(t.TempDir(), "neo4j.log")
+
+	copies := map[string]func() error{
+		"CopyFromContext": func() error {
+			return d.CopyFromContext(context.Background(), collectTransferTimeout, "database", "/logs/neo4j.log", dest)
+		},
+		"CopyFrom": func() error { return d.CopyFrom("database", "/logs/neo4j.log", dest) },
+		"CopyTo":   func() error { return d.CopyTo("database", dest, "/tmp/neo4j.log") },
+	}
+	for name, copyFn := range copies {
+		t.Run(name, func(t *testing.T) {
+			err := copyFn()
+			if err == nil {
+				t.Fatal("copy succeeded, want the failed docker compose cp to fail")
+			}
+			if want := "exit status 1: " + notRunning; err.Error() != want {
+				t.Errorf("error = %q, want %q", err.Error(), want)
+			}
+		})
+	}
+}
 
 func TestParseComposePSContainers(t *testing.T) {
 	tests := []struct {

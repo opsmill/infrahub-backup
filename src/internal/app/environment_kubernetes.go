@@ -147,8 +147,8 @@ func (k *KubernetesBackend) CopyTo(service, src, dest string) error {
 		return err
 	}
 	target := fmt.Sprintf("%s/%s:%s", k.namespace, pod, dest)
-	if _, err := k.executor.runCommand("kubectl", "cp", src, target); err != nil {
-		return err
+	if output, err := k.executor.runCommand("kubectl", "cp", src, target); err != nil {
+		return withCommandOutput(err, output)
 	}
 	return nil
 }
@@ -159,8 +159,8 @@ func (k *KubernetesBackend) CopyFrom(service, src, dest string) error {
 		return err
 	}
 	source := fmt.Sprintf("%s/%s:%s", k.namespace, pod, src)
-	if _, err := k.executor.runCommand("kubectl", "cp", source, dest); err != nil {
-		return err
+	if output, err := k.executor.runCommand("kubectl", "cp", source, dest); err != nil {
+		return withCommandOutput(err, output)
 	}
 	return nil
 }
@@ -437,8 +437,8 @@ func (k *KubernetesBackend) CopyFromContext(ctx context.Context, timeout time.Du
 		return err
 	}
 	source := fmt.Sprintf("%s/%s:%s", k.namespace, pod, src)
-	if _, err := k.executor.runCommandContext(ctx, timeout, "kubectl", "cp", source, dest); err != nil {
-		return err
+	if output, err := k.executor.runCommandContext(ctx, timeout, "kubectl", "cp", source, dest); err != nil {
+		return withCommandOutput(err, output)
 	}
 	return nil
 }

@@ -52,8 +52,10 @@ const telemetryStartDateLayout = "2006-01-02"
 // The export producing nothing is not a bundle defect — a deployment may have
 // no telemetry snapshots in the window, or run an Infrahub version without the
 // telemetry API — so a failing export degrades to skipped (like --benchmark),
-// with the CLI's own output preserved for support. Only a local staging error
-// (creating the directory, copying the file out) marks the collector failed.
+// with the CLI's own output preserved for support. The collector is marked
+// failed only when the container cannot run commands at all (see
+// telemetryProbeCommand) or on a staging error (creating the directory,
+// copying the file out).
 func telemetryCollector() collector {
 	return collector{
 		name: "telemetry",
@@ -72,6 +74,14 @@ func telemetryStartDate(now time.Time, days int) string {
 	return now.UTC().AddDate(0, 0, -days).Format(telemetryStartDateLayout)
 }
 
+// telemetryProbeCommand is a no-op run in the telemetry service container
+// before the export. It separates "the command could not be run" (an exec the
+// API server refused, a stopped container), which marks the collector failed,
+// from "infrahubctl ran and produced no export", which marks it skipped.
+// kubectl exits 1 in both cases, so the export's own error cannot tell them
+// apart.
+var telemetryProbeCommand = []string{"true"}
+
 // telemetryExportCommand builds the infrahubctl invocation that exports
 // snapshots from startDate onward to the in-container path. Only --start-date
 // is bounded: there are no future snapshots, so "from startDate" is exactly
@@ -88,6 +98,13 @@ func collectTelemetry(cc *collectContext) error {
 	dir := filepath.Join(cc.bundleDir, telemetryBundleDir)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create %s directory: %w", telemetryBundleDir, err)
+	}
+
+	// A failing export is skipped, but a container the tool cannot run commands
+	// in is an access or runtime failure like any other collector's, so it is
+	// checked first and recorded as failed.
+	if output, err := cc.execDump(telemetryService, telemetryProbeCommand); err != nil {
+		return fmt.Errorf("cannot run commands in the %s container: %w", telemetryService, withCommandOutput(err, output))
 	}
 
 	startDate := telemetryStartDate(time.Now(), cc.opts.TelemetryDays)

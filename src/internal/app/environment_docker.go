@@ -412,8 +412,8 @@ func (d *DockerBackend) ExecWritePipe(service string, command []string, opts *Ex
 func (d *DockerBackend) CopyTo(service, src, dest string) error {
 	target := fmt.Sprintf("%s:%s", service, dest)
 	cmd := d.composeArgs("cp", "-a", src, target)
-	if _, err := d.executor.runCommand("docker", cmd...); err != nil {
-		return err
+	if output, err := d.executor.runCommand("docker", cmd...); err != nil {
+		return withCommandOutput(err, output)
 	}
 	return nil
 }
@@ -421,8 +421,8 @@ func (d *DockerBackend) CopyTo(service, src, dest string) error {
 func (d *DockerBackend) CopyFrom(service, src, dest string) error {
 	source := fmt.Sprintf("%s:%s", service, src)
 	cmd := d.composeArgs("cp", source, dest)
-	if _, err := d.executor.runCommand("docker", cmd...); err != nil {
-		return err
+	if output, err := d.executor.runCommand("docker", cmd...); err != nil {
+		return withCommandOutput(err, output)
 	}
 	return nil
 }
@@ -434,8 +434,8 @@ func (d *DockerBackend) CopyFrom(service, src, dest string) error {
 func (d *DockerBackend) CopyFromContext(ctx context.Context, timeout time.Duration, service, src, dest string) error {
 	source := fmt.Sprintf("%s:%s", service, src)
 	cmd := d.composeArgs("cp", source, dest)
-	if _, err := d.executor.runCommandContext(ctx, timeout, "docker", cmd...); err != nil {
-		return err
+	if output, err := d.executor.runCommandContext(ctx, timeout, "docker", cmd...); err != nil {
+		return withCommandOutput(err, output)
 	}
 	return nil
 }
