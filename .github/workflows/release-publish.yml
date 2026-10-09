@@ -42,6 +42,8 @@ jobs:
           BRANCH=$(
             gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" \
               --jq '[.[] | select(.merged_at != null)
+                      | select(.user.login == "opsmill-bot")
+                      | select(.head.repo.full_name == env.GITHUB_REPOSITORY)
                       | .head.ref
                       | select(startswith("release/v"))] | first // empty'
           )

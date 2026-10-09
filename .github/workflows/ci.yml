@@ -214,6 +214,8 @@ jobs:
         run: uv run --no-sync ruff check
       - name: Run type checks
         run: uv run --no-sync mypy .
+      - name: Test release label checker
+        run: python -m unittest tests.test_release_labels
 
   yaml-lint:
     if: needs.files-changed.outputs.yaml == 'true'
