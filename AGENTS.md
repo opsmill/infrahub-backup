@@ -38,10 +38,10 @@ All three tools share common internal application logic but expose different com
 ### Changelog
 
 The changelog is assembled by [towncrier](https://towncrier.readthedocs.io/) from news fragments in
-`changelog/`, so every change carries its own entry instead of everyone editing `CHANGELOG.md`.
-Internal and tooling work goes under `housekeeping`. The pull-request fragment check is
-currently muted, in line with the other ecosystem repositories. Add a fragment in the
-same PR as the change when it belongs in the release notes:
+`changelog/`, so changes included in release notes carry their own entries instead of editing
+`CHANGELOG.md`. Internal and tooling work included in release notes goes under `housekeeping`.
+The pull-request fragment check is currently muted, in line with the other ecosystem repositories.
+Add a fragment in the same PR as the change when it belongs in the release notes:
 
 - `uv run towncrier create -c "Fixed the thing" 42.fixed.md` - one fragment per change, named
   `<issue>.<type>.md`. Without an issue or PR number, use a descriptive slug prefixed with `+`,
