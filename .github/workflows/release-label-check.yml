@@ -52,4 +52,4 @@ jobs:
           --labels-json "${PR_LABELS_JSON}"
           --head-ref "${PR_HEAD_REF}"
           --repository "${REPOSITORY}"
-          --title "${PR_TITLE}"
+          --title="${PR_TITLE}"
