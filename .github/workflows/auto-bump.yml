@@ -162,9 +162,15 @@ jobs:
 
           from packaging.version import Version
 
-          current = Version(os.environ["CURRENT"])
+          current_raw = os.environ["CURRENT"]
           version = Version(os.environ["VERSION"])
 
+          # An explicit first release has no current tag to compare against.
+          # The duplicate-tag guard below still runs in that case.
+          if not current_raw:
+              sys.exit(0)
+
+          current = Version(current_raw)
           if version == current:
               print(
                   f"::error::{version} is already the current version —"
