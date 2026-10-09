@@ -178,6 +178,19 @@ func (iops *InfrahubOps) RestoreLatestBackup(s3 bool, excludeTaskManager bool, r
 		return fmt.Errorf("selecting the latest backup from a pool does not apply to the %s backend: its repository already resolves the latest snapshot, so restore without --latest", BackendPlakar)
 	}
 
+	// This entry point calls the restore gate itself — the S3 leg does, before
+	// pulling an object a refusal would make pointless — so it creates
+	// transient workloads of its own and owes them the same single exit path
+	// every other entry point provides (FR-011).
+	//
+	// It is not enough that RestoreBackup defers one too. Two things happen
+	// before the run ever gets there: the download can fail, and the second
+	// database's preparation can fail after the first has already been
+	// recorded. Neither reaches RestoreBackup, and both leave a Pod and a
+	// Secret behind. It is safe alongside RestoreBackup's own defer, which
+	// finds nothing left to give back.
+	defer iops.releaseTransientWorkloads()
+
 	// The one restore this entry point performs, wherever the archive came from: every
 	// parameter travels through untouched, so both legs inherit the same validation,
 	// decryption, and container guarantees.
@@ -202,9 +215,7 @@ func (iops *InfrahubOps) RestoreLatestBackup(s3 bool, excludeTaskManager bool, r
 		// downloaded is necessarily the one that was selected: there is no second
 		// configuration and no URI round-trip that could resolve a different bucket,
 		// prefix, or endpoint in between.
-		return restoreLatestFrom(ctx, newS3Location(client), decryptKey, func(ref backupRef) error {
-			return downloadLatestS3Backup(ctx, client, iops.config.BackupDir, ref, restore)
-		})
+		return iops.restoreLatestFromS3(ctx, client, decryptKey, restore)
 	}
 
 	return restoreLatestFrom(ctx, newLocalLocation(iops.config.BackupDir), decryptKey, func(ref backupRef) error {
@@ -212,5 +223,48 @@ func (iops *InfrahubOps) RestoreLatestBackup(s3 bool, excludeTaskManager bool, r
 		// carries a base name, and joining it under the pool's own directory — the
 		// directory that was listed — is what turns it back into a path.
 		return restore(filepath.Join(iops.config.BackupDir, ref.Name))
+	})
+}
+
+// s3LatestClient is what the S3 leg of RestoreLatestBackup needs from one client: the
+// listing that selects the archive and the download that fetches it.
+type s3LatestClient interface {
+	s3Backend
+	s3RestoreClient
+}
+
+// restoreLatestFromS3 is the S3 leg of RestoreLatestBackup: select the newest object in
+// the bucket, settle where Neo4j lives, download the object and hand it to restore.
+func (iops *InfrahubOps) restoreLatestFromS3(ctx context.Context, client s3LatestClient, decryptKey string, restore func(path string) error) error {
+	return restoreLatestFrom(ctx, newS3Location(client), decryptKey, func(ref backupRef) error {
+		// Where Neo4j lives, before the object is pulled out of S3. RestoreBackup
+		// gates on the same question and would refuse the same run, but only after a
+		// multi-gigabyte download onto a host that then deletes it again — and a
+		// scheduled restore is exactly the caller that cannot watch that happen. The
+		// local leg needs no gate of its own: its archive is already on this host, so
+		// RestoreBackup's costs nothing extra. It is placed after the pool's own
+		// refusals so a mistyped bucket still reports the bucket (FR-006, FR-007).
+		//
+		// Only Neo4j, which every archive carries. Whether the task-manager database
+		// is written is the archive's to say, and its metadata is not readable until
+		// the object is on this host: gating it here would refuse, or create a
+		// workload for, an external PostgreSQL that an archive without it never
+		// touches. RestoreBackup gates it once the metadata is read, still before
+		// anything is stopped, and its second pass over Neo4j does nothing (see
+		// unpreparedExternalRestores).
+		//
+		// The credentials are resolved first. This gate runs before RestoreBackup's
+		// DetectEnvironment, and the gate records the endpoint it prepares for the
+		// whole run: without this, a deployment that leaves INFRAHUB_DB_DATABASE (or
+		// the username) at Infrahub's default recorded an empty database name, which
+		// the seed statement then refused only after the deployment was quiesced.
+		if err := iops.fetchDatabaseCredentials(); err != nil {
+			return fmt.Errorf("could not fetch database credentials: %w", err)
+		}
+		if err := iops.prepareDatabaseRestore(false); err != nil {
+			return err
+		}
+
+		return downloadLatestS3Backup(ctx, client, iops.config.BackupDir, ref, restore)
 	})
 }

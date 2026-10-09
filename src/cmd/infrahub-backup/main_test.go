@@ -598,10 +598,12 @@ func TestResolveRestoreInvocation(t *testing.T) {
 // invocation is rejected before RunE runs — the only ordering in which "nothing was
 // restored" is guaranteed (FR-002, FR-003).
 //
-// It builds its own command with its own flag registration rather than reaching into the
-// one main() assembles, so it does NOT pin the published flag names: renaming --latest or
-// --s3 in main.go would not fail this test. Covering that would mean exporting the command
-// construction, which is a larger change than the risk warrants.
+// It builds its own command with its own flag registration rather than driving the one
+// the binary ships, so it pins neither the published flag names nor where the backend
+// comes from: it is handed a backend directly. That is precisely how T123 stayed hidden
+// from it, so what the binary actually enforces is pinned by
+// TestShippedRestoreCommandInvocationContract instead. This case remains as the
+// Args-before-RunE ordering on its own, decoupled from the wiring.
 func TestRestoreCommandValidatesBeforeRunning(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -710,6 +712,204 @@ func TestRestoreCommandValidatesBeforeRunning(t *testing.T) {
 			}
 			if request != tc.wantRequest {
 				t.Errorf("request = %+v, want %+v", request, tc.wantRequest)
+			}
+		})
+	}
+}
+
+// restoreInvocation is what the shipped `restore` command was left holding once cobra
+// had parsed its flags, validated its arguments, and reached its action.
+type restoreInvocation struct {
+	ran     bool
+	args    []string
+	backend app.BackendType
+	latest  bool
+	s3      bool
+}
+
+// shippedRestoreCommand wires the `restore` command the binary ships under a root
+// configured exactly as main configures it, and swaps its action for a recorder so the
+// invocation contract can be driven without a deployment to overwrite.
+//
+// Everything the contract spans is the real thing: the flag names, the Args hook, and
+// cobra's ordering between flag parsing, argument validation, and the persistent pre-run
+// that resolves --backend. viper is global, so each call resets it and restores it
+// afterwards.
+func shippedRestoreCommand(t *testing.T, env map[string]string) (*cobra.Command, *restoreInvocation) {
+	t.Helper()
+
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	for _, name := range []string{"INFRAHUB_BACKEND", "INFRAHUB_REPO", "INFRAHUB_LATEST", "INFRAHUB_S3"} {
+		t.Setenv(name, "")
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatalf("unsetting %s = %v, want nil", name, err)
+		}
+	}
+	for name, value := range env {
+		t.Setenv(name, value)
+	}
+
+	iops := app.NewInfrahubOps()
+	root := &cobra.Command{Use: "infrahub-backup", SilenceUsage: true, RunE: func(cmd *cobra.Command, args []string) error { return nil }}
+	app.ConfigureRootCommand(root, iops)
+
+	restoreCmd := newRestoreCommand(iops)
+	record := &restoreInvocation{}
+	restoreCmd.RunE = func(cmd *cobra.Command, args []string) error {
+		record.ran = true
+		record.args = args
+		record.backend = iops.Config().Backend
+		record.latest, _ = cmd.Flags().GetBool("latest")
+		record.s3, _ = cmd.Flags().GetBool("s3")
+		return nil
+	}
+
+	root.AddCommand(restoreCmd)
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+
+	return root, record
+}
+
+// TestShippedRestoreCommandInvocationContract is the invocation contract as the binary
+// enforces it, driven through the command main ships rather than a copy of it.
+//
+// A copy is what let T123 through. TestRestoreCommandValidatesBeforeRunning hands
+// resolveRestoreInvocation a backend directly, so it stayed green when the shipped
+// command started reading a backend nothing had resolved yet: cobra validates arguments
+// before it runs the persistent pre-run, so `--backend plakar restore` was judged by the
+// tarball arity rule and refused for naming no archive — a Plakar restore names none.
+//
+// Every row therefore states which backend the invocation actually ran under, because
+// "accepted" is only the right answer for the backend the command line asked for.
+func TestShippedRestoreCommandInvocationContract(t *testing.T) {
+	tests := []struct {
+		name        string
+		env         map[string]string
+		args        []string
+		wantBackend app.BackendType
+		wantArgs    []string
+		wantLatest  bool
+		wantS3      bool
+		// errContains are fragments the refusal must carry: what was wrong, and the flag
+		// or form that fixes it.
+		errContains []string
+	}{
+		{
+			// T123: the regression itself. A Plakar restore takes no positional archive.
+			name:        "plakar: bare restore is accepted",
+			args:        []string{"--backend", "plakar", "--repo", "/repo", "restore"},
+			wantBackend: app.BackendPlakar,
+		},
+		{
+			// The same invocation configured the way an unattended run configures it.
+			name:        "plakar from the environment: bare restore is accepted",
+			env:         map[string]string{"INFRAHUB_BACKEND": "plakar"},
+			args:        []string{"restore"},
+			wantBackend: app.BackendPlakar,
+		},
+		{
+			// FR-004: --latest is an alias for the no-argument form on this backend, so
+			// it is accepted and takes the same route.
+			name:        "plakar: --latest is accepted",
+			args:        []string{"--backend", "plakar", "--repo", "/repo", "restore", "--latest"},
+			wantBackend: app.BackendPlakar,
+			wantLatest:  true,
+		},
+		{
+			// resolveRestoreInvocation accepts this: the group to restore comes from
+			// --backup-id, and the argument is not consulted. It is pinned here so a
+			// change to that reading is a change to this test.
+			name:        "plakar: a named archive is accepted and not consulted",
+			args:        []string{"--backend", "plakar", "--repo", "/repo", "restore", "infrahub_backup_20260804_120000.tar.gz"},
+			wantBackend: app.BackendPlakar,
+			wantArgs:    []string{"infrahub_backup_20260804_120000.tar.gz"},
+		},
+		{
+			name:        "plakar: --latest --s3 is refused",
+			args:        []string{"--backend", "plakar", "--repo", "/repo", "restore", "--latest", "--s3"},
+			errContains: []string{"--s3", "plakar", "--repo"},
+		},
+		{
+			// FR-003: the tarball arity rule is unchanged, message included — a typo must
+			// not become a data-overwriting default.
+			name:        "tarball: bare restore is still refused",
+			args:        []string{"restore"},
+			errContains: []string{"requires exactly 1 arg(s), only received 0", "--latest"},
+		},
+		{
+			name:        "tarball: a named archive is accepted",
+			args:        []string{"restore", "infrahub_backup_20260804_120000.tar.gz"},
+			wantBackend: app.BackendTarball,
+			wantArgs:    []string{"infrahub_backup_20260804_120000.tar.gz"},
+		},
+		{
+			name:        "tarball: --latest is accepted without an archive",
+			args:        []string{"restore", "--latest"},
+			wantBackend: app.BackendTarball,
+			wantLatest:  true,
+		},
+		{
+			name:        "tarball: --latest --s3 is accepted",
+			args:        []string{"restore", "--latest", "--s3"},
+			wantBackend: app.BackendTarball,
+			wantLatest:  true,
+			wantS3:      true,
+		},
+		{
+			// FR-002: nothing runs when the command line asks for both.
+			name:        "tarball: --latest with an archive is refused",
+			args:        []string{"restore", "--latest", "infrahub_backup_20260804_120000.tar.gz"},
+			errContains: []string{"mutually exclusive"},
+		},
+		{
+			name:        "tarball: --s3 without --latest is refused",
+			args:        []string{"restore", "--s3"},
+			errContains: []string{"--s3", "requires it", "s3://bucket/key"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root, record := shippedRestoreCommand(t, tc.env)
+			root.SetArgs(tc.args)
+
+			err := root.Execute()
+
+			if len(tc.errContains) > 0 {
+				if err == nil {
+					t.Fatalf("Execute(%v) = nil, want a refusal", tc.args)
+				}
+				for _, want := range tc.errContains {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error = %q, want it to contain %q", err, want)
+					}
+				}
+				if record.ran {
+					t.Error("the restore ran, want the invocation refused before any restore work")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("Execute(%v) = %v, want nil", tc.args, err)
+			}
+			if !record.ran {
+				t.Fatalf("Execute(%v) accepted nothing, want the restore to proceed", tc.args)
+			}
+			if record.backend != tc.wantBackend {
+				t.Errorf("backend = %q, want %q: the invocation was judged against the wrong backend", record.backend, tc.wantBackend)
+			}
+			if strings.Join(record.args, ",") != strings.Join(tc.wantArgs, ",") {
+				t.Errorf("args = %v, want %v", record.args, tc.wantArgs)
+			}
+			if record.latest != tc.wantLatest {
+				t.Errorf("--latest = %v, want %v", record.latest, tc.wantLatest)
+			}
+			if record.s3 != tc.wantS3 {
+				t.Errorf("--s3 = %v, want %v", record.s3, tc.wantS3)
 			}
 		})
 	}

@@ -26,14 +26,43 @@ func (iops *InfrahubOps) resetDeploymentID() error {
 	newUUID := uuid.NewString()
 	updatedAt := time.Now().UTC().Format(time.RFC3339)
 
-	args := []string{
+	statement := []string{
+		"--param", fmt.Sprintf("new_uuid => '%s'", newUUID),
+		"--param", fmt.Sprintf("updated_at => '%s'", updatedAt),
+		"MATCH (n:Root) SET n.uuid = $new_uuid, n.updated_at = $updated_at RETURN n",
+	}
+
+	args := append([]string{
 		"cypher-shell",
 		"-u", iops.config.Neo4jUsername,
 		"-p" + iops.config.Neo4jPassword,
 		"-d", iops.config.Neo4jDatabase,
-		"--param", fmt.Sprintf("new_uuid => '%s'", newUUID),
-		"--param", fmt.Sprintf("updated_at => '%s'", updatedAt),
-		"MATCH (n:Root) SET n.uuid = $new_uuid, n.updated_at = $updated_at RETURN n",
+	}, statement...)
+	run := func() (string, error) {
+		return iops.Exec("database", args, nil)
+	}
+
+	// A database outside the deployment has no `database` container to exec
+	// into, so the statement goes through the restore workload the gate
+	// prepared, over Bolt, with the credentials its secret supplies — the same
+	// channel the seed and its online confirmation used.
+	if restore := iops.externalRestores[serviceNeo4j]; restore != nil {
+		uri, err := restore.boltURI()
+		if err != nil {
+			return err
+		}
+
+		external := append([]string{
+			"cypher-shell", "--non-interactive", "--format", "plain",
+			"-a", uri,
+			"-d", restore.Endpoint.Database,
+		}, statement...)
+		run = func() (string, error) {
+			return iops.execBoundedAgainst(
+				externalDBProbeBound(iops.config), "resetting the deployment ID", restore.Endpoint.endpointTarget(),
+				serviceNeo4j, external, restore.execOptions(),
+			)
+		}
 	}
 
 	logrus.Info("Resetting deployment ID on Root node...")
@@ -41,7 +70,7 @@ func (iops *InfrahubOps) resetDeploymentID() error {
 	var lastErr error
 	var lastOutput string
 	for attempt := 1; attempt <= resetDeploymentIDMaxAttempts; attempt++ {
-		output, err := iops.Exec("database", args, nil)
+		output, err := run()
 		if err == nil {
 			logrus.WithField("new_uuid", newUUID).Info("Deployment ID reset successfully")
 			return nil
