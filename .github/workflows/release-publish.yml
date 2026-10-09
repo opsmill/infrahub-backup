@@ -10,12 +10,8 @@ name: Publish release
 on:
   push:
     branches: [main]
-
-concurrency:
-  # GitHub keeps only one pending run per group. A branch-wide group could
-  # replace a pending release merge with an unrelated later push.
-  group: release-publish-${{ github.sha }}
-  cancel-in-progress: false
+  release:
+    types: [published]
 
 permissions:
   contents: read
@@ -23,7 +19,13 @@ permissions:
 jobs:
   publish:
     name: Tag and publish
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    concurrency:
+      # GitHub keeps only one pending run per group. A branch-wide group could
+      # replace a pending release merge with an unrelated later push.
+      group: release-publish-${{ github.sha }}
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
@@ -139,25 +141,53 @@ jobs:
           set -euo pipefail
 
           if [ "${IS_PRERELEASE}" = "true" ]; then
-            IS_LATEST=false
             RELEASE_FLAGS=(--prerelease)
           else
-            # Mark only the highest full release as latest.
-            RELEASED=$(gh release list --exclude-drafts --exclude-pre-releases \
-              --limit 1000 --json tagName --jq '.[].tagName')
-            HIGHEST=$(printf '%s\n%s\n' "${RELEASED}" "v${VERSION}" | sed '/^$/d; s/^v//' | sort -V | tail -n 1)
-            if [ "${HIGHEST}" = "${VERSION}" ]; then
-              IS_LATEST=true
-            else
-              IS_LATEST=false
-            fi
             RELEASE_FLAGS=()
           fi
-          echo "v${VERSION} prerelease=${IS_PRERELEASE} latest=${IS_LATEST}"
+          echo "v${VERSION} prerelease=${IS_PRERELEASE}"
 
+          # The release.published reconciliation job selects Latest after
+          # publication. This push job may overlap another release run, so a
+          # pre-create snapshot cannot safely decide which release is newest.
           gh release create "v${VERSION}" \
             --target "${GITHUB_SHA}" \
             --title "v${VERSION}" \
-            --latest="${IS_LATEST}" \
+            --latest=false \
             "${RELEASE_FLAGS[@]}" \
             --notes-file /tmp/release-body.md
+
+  reconcile-latest:
+    name: Mark highest stable release as Latest
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    concurrency:
+      # Every published release triggers a full reconciliation. If GitHub
+      # replaces a pending run, its replacement sees all published releases.
+      group: release-latest
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - name: Reconcile Latest
+        env:
+          GH_TOKEN: ${{ secrets.GH_INFRAHUB_BOT_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # List every published release, not just the most recent page:
+          # a backport may have been published after the highest version.
+          HIGHEST=$(
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' \
+              | awk '/^v[0-9]+\.[0-9]+\.[0-9]+(\.post[0-9]+)?$/' \
+              | sort -V \
+              | tail -n 1
+          )
+          if [ -z "${HIGHEST}" ]; then
+            echo "No stable release to mark Latest."
+            exit 0
+          fi
+
+          echo "Marking ${HIGHEST} as Latest."
+          gh release edit "${HIGHEST}" --latest
