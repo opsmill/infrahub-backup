@@ -39,18 +39,21 @@ All three tools share common internal application logic but expose different com
 
 The changelog is assembled by [towncrier](https://towncrier.readthedocs.io/) from news fragments in
 `changelog/`, so every change carries its own entry instead of everyone editing `CHANGELOG.md`.
-Internal and tooling work goes under `housekeeping`. CI enforces this on pull requests targeting
-`main` (the `Changelog / News fragment present` check); a change that genuinely needs no entry
-opts out with the `ci/skip-changelog` label. Add a fragment in the same PR as the change:
+Internal and tooling work goes under `housekeeping`. The pull-request fragment check is
+currently muted, in line with the other ecosystem repositories. Add a fragment in the
+same PR as the change when it belongs in the release notes:
 
 - `uv run towncrier create -c "Fixed the thing" 42.fixed.md` - one fragment per change, named
   `<issue>.<type>.md`. Without an issue or PR number, use a descriptive slug prefixed with `+`,
   e.g. `+retention-dry-run.added.md`.
 - Types: `security`, `removed`, `deprecated`, `added`, `changed`, `fixed`, `housekeeping`.
 - `uv run towncrier build --draft --version X.Y.Z` - preview the rendered changelog.
-- `uv run towncrier build --version X.Y.Z` - assemble `CHANGELOG.md` at release time (consumes the
-  fragments). The version is always passed explicitly: releases are versioned from git tags, not
-  from `pyproject.toml`.
+- Run `auto-bump.yml` on `main` to prepare a release pull request. It assembles
+  `CHANGELOG.md` from the fragments and uses the latest Git tag, not the helper
+  `pyproject.toml` version, to choose the next release version.
+- Review and merge the release pull request to publish. `release-publish.yml`
+  creates the GitHub Release, which starts the existing binary, image, and
+  Homebrew publishing workflow.
 
 ### Nix Vendor Hash
 
