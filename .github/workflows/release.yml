@@ -68,6 +68,22 @@ jobs:
         id: version
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
 
+      - name: Choose image tags
+        id: tags
+        env:
+          REGISTRY: ${{ secrets.HARBOR_HOST }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
+          PRERELEASE: ${{ github.event.release.prerelease }}
+        run: |
+          {
+            echo 'tags<<EOF'
+            echo "${REGISTRY}/opsmill/infrahub-backup:${VERSION}"
+            if [ "${PRERELEASE}" != "true" ]; then
+              echo "${REGISTRY}/opsmill/infrahub-backup:latest"
+            fi
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push multi-arch image
         uses: docker/build-push-action@v7
         with:
@@ -76,12 +92,11 @@ jobs:
           platforms: linux/amd64,linux/arm64
           build-args: |
             VERSION=${{ github.event.release.tag_name }}
-          tags: |
-            ${{ secrets.HARBOR_HOST }}/opsmill/infrahub-backup:${{ steps.version.outputs.VERSION }}
-            ${{ secrets.HARBOR_HOST }}/opsmill/infrahub-backup:latest
+          tags: ${{ steps.tags.outputs.tags }}
 
   homebrew:
     needs: publish
+    if: ${{ !github.event.release.prerelease }}
     name: Bump Homebrew formula
     runs-on: ubuntu-24.04
     steps:
