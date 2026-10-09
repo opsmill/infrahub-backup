@@ -3,12 +3,19 @@ bin/
 infrahub_backups/
 src/internal/app/embedded/neo4jwatchdog/*watchdog*
 
+# neo4jwatchdog build output (cross-compiled by make build)
+tools/neo4jwatchdog/neo4jwatchdog
+
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
 *.egg-info/
-build/
+# Scoped to entries rather than the whole directory: build/runner/ is the tracked
+# Dockerfile context for the co-located Plakar runner, and a bare `build/` would stop
+# git descending into it, so new files there would be silently unstageable.
+build/*
+!build/runner/
 dist/
 
 # Virtual environments
@@ -56,3 +63,6 @@ Thumbs.db
 
 # Spec-kit local state (records the active feature per checkout; not shared)
 .specify/feature.json
+
+# spec-kit extension catalog cache
+.specify/extensions/.cache/
