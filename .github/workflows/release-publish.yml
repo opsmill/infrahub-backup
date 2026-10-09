@@ -12,7 +12,9 @@ on:
     branches: [main]
 
 concurrency:
-  group: release-publish
+  # GitHub keeps only one pending run per group. A branch-wide group could
+  # replace a pending release merge with an unrelated later push.
+  group: release-publish-${{ github.sha }}
   cancel-in-progress: false
 
 permissions:
