@@ -1,0 +1,25 @@
+dev/adr/0018-transient-workload-is-a-job.md
+  s_33f105a6deb867::t_6c7235e0a9ccf5 1-54
+dev/adr/0008-transient-workload-for-external-databases.md
+  s_33f105a6deb867::t_841f7061270f81 3
+dev/adr/0009-transient-workload-lifecycle-and-credential-ownership.md
+  s_33f105a6deb867::t_841f7061270f81 3
+dev/adr/0017-database-tools-in-the-infrahub-backup-image.md
+  s_33f105a6deb867::t_6c7235e0a9ccf5 1-66
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "263ad9ac7f1542b67231c92c7a2fc935b971436f",
+  "prompts": {},
+  "sessions": {
+    "s_33f105a6deb867": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2564d676-32e7-45e0-82a1-111443df6e89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Benoit Kohler <benoit@opsmill.com>"
+    }
+  }
+}
