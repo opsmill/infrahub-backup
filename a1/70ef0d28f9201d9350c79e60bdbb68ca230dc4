@@ -1,0 +1,24 @@
+specs/archive/007-external-database-backup/tasks.md
+  s_33f105a6deb867::t_ea10d38cf41893 400-432
+specs/archive/007-external-database-backup/spec.md
+  s_33f105a6deb867::t_c8df5e554cd27d 20-25
+  s_33f105a6deb867::t_5a8f705deae4cc 297-318
+specs/archive/007-external-database-backup/plan.md
+  s_33f105a6deb867::t_c5605a47dc98f6 221-247
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a170ef0d28f9201d9350c79e60bdbb68ca230dc4",
+  "prompts": {},
+  "sessions": {
+    "s_33f105a6deb867": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2564d676-32e7-45e0-82a1-111443df6e89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Benoit Kohler <benoit@opsmill.com>"
+    }
+  }
+}
