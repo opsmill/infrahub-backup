@@ -1,0 +1,63 @@
+src/internal/app/app_config.go
+  s_33f105a6deb867::t_deff4ecd765c3a 343-361
+  s_33f105a6deb867::t_2ce34a10a4b215 225,228,232-243
+  s_33f105a6deb867::t_287347050792c0 333,338-342
+  s_33f105a6deb867::t_80fd71a995878b 362-363
+src/internal/app/external_credential_refs.go
+  s_33f105a6deb867::t_f148b0705052cb 446
+  s_33f105a6deb867::t_f29c6afe92c1a3 4
+  s_33f105a6deb867::t_e425a9360a9b96 1-3,5-445,447-457
+src/internal/app/app.go
+  s_33f105a6deb867::t_b0c023fa70670b 322-335
+src/internal/app/external_capture.go
+  s_33f105a6deb867::t_a29bce3d63a25c 512-519
+docs/docs/backup/external-databases.mdx
+  s_33f105a6deb867::t_3bebb8759e88f4 302-305
+  s_33f105a6deb867::t_ae8fb722b4c9f2 22-38
+dev/knowledge/external-database-backup.md
+  s_33f105a6deb867::t_88cd29528d672b 61-75
+  s_33f105a6deb867::t_5aa29131e50a8e 93-94
+  s_33f105a6deb867::t_e24d0e18363b46 127-129
+src/internal/app/transient_workload.go
+  s_33f105a6deb867::t_d3c826f7738a3d 2061-2067
+  s_33f105a6deb867::t_2a64039b59cfec 492
+  s_33f105a6deb867::t_1ef7ae236550f4 2326-2329
+  s_33f105a6deb867::t_b460aaab711654 801-804
+  s_33f105a6deb867::t_ad32dd0c9feb3c 2148-2153,2155-2156,2158-2159,2161-2163
+  s_33f105a6deb867::t_f800c79fee27f9 2412-2419
+  s_33f105a6deb867::t_ce5af2ef533297 2088-2092,2097
+  s_33f105a6deb867::t_56dcaab4bd6773 1727-1730,1732-1736,1743-1744,1749
+  s_33f105a6deb867::t_3b7d7113e4eee8 1579-1580
+  s_33f105a6deb867::t_8da87ccaaa885c 249-256
+  s_33f105a6deb867::t_c8635de22cd002 2348-2353
+  s_33f105a6deb867::t_c628ff4391c948 675
+  s_33f105a6deb867::t_1707e741d8fb18 1599-1613
+  s_33f105a6deb867::t_cb986dd2d98c99 458-475
+  s_33f105a6deb867::t_636879a80855d8 742-746
+  s_33f105a6deb867::t_438dbbbfd29c27 302-351
+  s_33f105a6deb867::t_a5c150837bb56c 856-887
+AGENTS.md
+  s_33f105a6deb867::t_2928243e914d29 184-188
+src/internal/app/external_credential_refs_test.go
+  s_33f105a6deb867::t_af8b3a7b00cf7c 465
+  s_33f105a6deb867::t_a26a346413c9f7 10
+  s_33f105a6deb867::t_117af391e91d1b 1-9,11-464,466-505
+changelog/172.added.md
+  s_33f105a6deb867::t_244e0472698cf1 1
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8981548be06b6ddfc6b905ab24c5879e229877bc",
+  "prompts": {},
+  "sessions": {
+    "s_33f105a6deb867": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2564d676-32e7-45e0-82a1-111443df6e89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Benoit Kohler <benoit@opsmill.com>"
+    }
+  }
+}
