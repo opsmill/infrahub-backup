@@ -173,6 +173,16 @@ jobs:
       - name: Build binaries (infrahub-backup, infrahub-taskmanager, infrahub-collect)
         run: make build
 
+      # The external-database cases run the database tools from this image (ADR 0017) and
+      # pass it with --external-db-image, because a development build has no published image
+      # to default to. The vcluster is created by pytest, so the `external_db_image` fixture
+      # loads the image into the cluster's nodes; it is tagged with the commit rather than
+      # `latest` so that the workload takes it from the node instead of pulling it.
+      - name: Build the infrahub-backup image under test
+        run: |
+          docker build -t "infrahub-backup:e2e-${GITHUB_SHA}" .
+          echo "INFRAHUB_TESTING_EXTERNAL_DB_IMAGE=infrahub-backup:e2e-${GITHUB_SHA}" >> "$GITHUB_ENV"
+
       - name: Install Python dependencies
         run: uv sync --all-packages
 

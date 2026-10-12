@@ -278,8 +278,12 @@ run inside it, listed in [Required permissions](./kubernetes-backup.mdx#required
 - `list` and `get` on `pods`, to find the Infrahub components
 - `create` on `pods/exec`, to read the database address, credentials and certificate authority from
   the Infrahub components
-- `get` and `patch` on `deployments` and `statefulsets`, to stop and restart the Infrahub
-  components around an offline capture or a restore
+- `get` on `pods/log`, to follow the progress of commands run in the Infrahub components
+- `get`, `list` and `patch` on `deployments` and `statefulsets`, to find the Infrahub components'
+  workloads by label
+- `get` and `patch` on `deployments/scale` and `statefulsets/scale`, to stop and restart the
+  Infrahub components around an offline capture or a restore. `kubectl scale` writes to these
+  resources, and `patch` on the workload itself does not cover them
 
 It needs no permission on `jobs` or `secrets`, and no `create`, `delete` or `watch` on `pods`.
 

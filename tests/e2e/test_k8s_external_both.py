@@ -29,6 +29,7 @@ from tests.e2e.conftest import (
     SERVICE_NEO4J,
     SERVICE_TASK_MANAGER_DB,
     external_db_env,
+    external_db_image_args,
     portforward_infrahub,
     requires_external_db,
     transient_objects,
@@ -181,13 +182,14 @@ async def test_both_databases_external_are_both_captured(
     database lives, rather than on a single verdict for the deployment.
     """
     namespace = infrahub_k8s_external["namespace"]
+    image_args = external_db_image_args(infrahub_k8s_external)
     kubeconfig = infrahub_k8s_external["kubeconfig_path"]
     backup_dir = tmp_path / "backups"
     env = {"KUBECONFIG": kubeconfig, **external_db_env(external_topology)}
 
     run_backup(
         backup_binary,
-        ["--k8s-namespace", namespace, "--backup-dir", str(backup_dir), "create", "--force"],
+        ["--k8s-namespace", namespace, *image_args, "--backup-dir", str(backup_dir), "create", "--force"],
         env=env,
     )
     metadata = read_backup_metadata(find_latest_backup(backup_dir))
@@ -224,6 +226,7 @@ async def test_restore_is_refused_without_the_authorisation(
     confer the authorisation, and neither does.
     """
     namespace = infrahub_k8s_external["namespace"]
+    image_args = external_db_image_args(infrahub_k8s_external)
     kubeconfig = infrahub_k8s_external["kubeconfig_path"]
     backup_dir = tmp_path / "backups"
     env = {"KUBECONFIG": kubeconfig, **external_db_env(external_topology), **_seed_store_env(external_seed_store)}
@@ -237,7 +240,7 @@ async def test_restore_is_refused_without_the_authorisation(
 
     run_backup(
         backup_binary,
-        ["--k8s-namespace", namespace, "--backup-dir", str(backup_dir), "create", "--force"],
+        ["--k8s-namespace", namespace, *image_args, "--backup-dir", str(backup_dir), "create", "--force"],
         env=env,
     )
     archive = find_latest_backup(backup_dir)
@@ -252,13 +255,23 @@ async def test_restore_is_refused_without_the_authorisation(
     # --force does not confer it.
     forced = run_cli(
         backup_binary,
-        ["--k8s-namespace", namespace, *store_args, "restore", "--force", str(archive)],
+        ["--k8s-namespace", namespace, *image_args, *store_args, "restore", "--force", str(archive)],
         env=env,
     )
     # An unattended `restore --latest`, the shape a scheduled restore takes, does not either.
     scheduled = run_cli(
         backup_binary,
-        ["--k8s-namespace", namespace, "--backup-dir", str(backup_dir), *store_args, "restore", "--force", "--latest"],
+        [
+            "--k8s-namespace",
+            namespace,
+            *image_args,
+            "--backup-dir",
+            str(backup_dir),
+            *store_args,
+            "restore",
+            "--force",
+            "--latest",
+        ],
         env=env,
     )
 
@@ -302,6 +315,7 @@ async def test_full_round_trip_through_both_external_databases(
     a zero exit followed by data that is not back is the failure this asserts against.
     """
     namespace = infrahub_k8s_external["namespace"]
+    image_args = external_db_image_args(infrahub_k8s_external)
     kubeconfig = infrahub_k8s_external["kubeconfig_path"]
     token = infrahub_k8s_external["token"]
     backup_dir = tmp_path / "backups"
@@ -313,7 +327,7 @@ async def test_full_round_trip_through_both_external_databases(
 
     run_backup(
         backup_binary,
-        ["--k8s-namespace", namespace, "--backup-dir", str(backup_dir), "create", "--force"],
+        ["--k8s-namespace", namespace, *image_args, "--backup-dir", str(backup_dir), "create", "--force"],
         env=env,
     )
     archive = find_latest_backup(backup_dir)
@@ -328,6 +342,7 @@ async def test_full_round_trip_through_both_external_databases(
         [
             "--k8s-namespace",
             namespace,
+            *image_args,
             *store_args,
             "restore",
             "--allow-external-restore",
@@ -381,6 +396,7 @@ async def test_an_unreadable_artifact_uri_is_refused_before_anything_destructive
     failure takes: a bucket named in configuration that the credentials cannot reach.
     """
     namespace = infrahub_k8s_external["namespace"]
+    image_args = external_db_image_args(infrahub_k8s_external)
     kubeconfig = infrahub_k8s_external["kubeconfig_path"]
     token = infrahub_k8s_external["token"]
     backup_dir = tmp_path / "backups"
@@ -391,7 +407,7 @@ async def test_an_unreadable_artifact_uri_is_refused_before_anything_destructive
 
     run_backup(
         backup_binary,
-        ["--k8s-namespace", namespace, "--backup-dir", str(backup_dir), "create", "--force"],
+        ["--k8s-namespace", namespace, *image_args, "--backup-dir", str(backup_dir), "create", "--force"],
         env=env,
     )
     archive = find_latest_backup(backup_dir)
@@ -404,6 +420,7 @@ async def test_an_unreadable_artifact_uri_is_refused_before_anything_destructive
         [
             "--k8s-namespace",
             namespace,
+            *image_args,
             "--s3-bucket",
             unreachable_bucket,
             "--s3-endpoint",
@@ -456,6 +473,7 @@ async def test_a_readable_but_corrupt_artifact_fails_and_never_reports_success(
     looking, and finds out at the next outage.
     """
     namespace = infrahub_k8s_external["namespace"]
+    image_args = external_db_image_args(infrahub_k8s_external)
     kubeconfig = infrahub_k8s_external["kubeconfig_path"]
     backup_dir = tmp_path / "backups"
     env = {"KUBECONFIG": kubeconfig, **external_db_env(external_topology), **_seed_store_env(external_seed_store)}
@@ -466,7 +484,7 @@ async def test_a_readable_but_corrupt_artifact_fails_and_never_reports_success(
 
     run_backup(
         backup_binary,
-        ["--k8s-namespace", namespace, "--backup-dir", str(backup_dir), "create", "--force"],
+        ["--k8s-namespace", namespace, *image_args, "--backup-dir", str(backup_dir), "create", "--force"],
         env=env,
     )
     archive = find_latest_backup(backup_dir)
@@ -482,6 +500,7 @@ async def test_a_readable_but_corrupt_artifact_fails_and_never_reports_success(
         [
             "--k8s-namespace",
             namespace,
+            *image_args,
             *store_args,
             "restore",
             "--allow-external-restore",

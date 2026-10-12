@@ -22,7 +22,6 @@ this file that reports skips has proved nothing, and says so.
 """
 
 import asyncio
-import os
 import re
 
 import kr8s.asyncio
@@ -35,6 +34,7 @@ from tests.e2e.conftest import (
     SERVICE_TASK_MANAGER_DB,
     UNREACHABLE_ENDPOINT,
     external_db_env,
+    external_db_image_args,
     portforward_infrahub,
     requires_external_db,
     restricted_kubeconfig,
@@ -56,15 +56,17 @@ from tests.helpers.utils import (
 RESOLVED_ENDPOINT_LINE = f"Resolved {SERVICE_NEO4J} endpoint:"
 TRANSIENT_WORKLOAD_LINE = "Creating a transient"
 
-# Images whose Neo4j tooling sits either side of the server, for the two directions of the
-# version gate. The defaults assume a calendar-versioned server (`2025.x`), the scheme the
-# quickstart's compatibility-envelope section says must be measured rather than assumed; a
-# `5.x` server needs both variables set, because `5.26` is *newer* than nothing in the
-# calendar scheme and the gate would then be provoked in one direction only.
-OLDER_TOOLING_IMAGE_VAR = "INFRAHUB_TESTING_EXTERNAL_NEO4J_OLDER_IMAGE"
-NEWER_TOOLING_IMAGE_VAR = "INFRAHUB_TESTING_EXTERNAL_NEO4J_NEWER_IMAGE"
-DEFAULT_OLDER_TOOLING_IMAGE = "neo4j:5.26.0-enterprise"
-DEFAULT_NEWER_TOOLING_IMAGE = "neo4j:2025.10.1-enterprise"
+# The versions the derived images' neo4j-admin reports, for the two directions of the version
+# gate. The tool's own image pins its tooling at build time (FR-031), so an older or newer
+# vendor image is no longer the way to move the tooling version: the cases build an image
+# from the one under test whose `neo4j-admin --version` reports one of these and which runs
+# the real tool for everything else (`tooling_image_reporting` in conftest.py). Both values
+# sit outside every version a real server reports in either scheme — older than any `5.x`
+# or calendar release, newer than any calendar release — so each direction is provoked
+# against the live server whatever its version. The comparison itself, scheme by scheme, is
+# held by TestCheckVersionCompatibility in src/internal/app/external_endpoint_test.go.
+OLDER_THAN_ANY_SERVER = "4.0.0"
+NEWER_THAN_ANY_SERVER = "2099.12.0"
 
 # The gate's two messages, from src/internal/app/external_endpoint.go. The abort names both
 # versions and the flag that changes the tooling; the reverse direction only warns.
@@ -102,6 +104,7 @@ async def test_mixed_topology_reports_and_records_the_external_neo4j(
     is used) and SC-004.
     """
     namespace = infrahub_k8s_external["namespace"]
+    image_args = external_db_image_args(infrahub_k8s_external)
     kubeconfig = infrahub_k8s_external["kubeconfig_path"]
     backup_dir = tmp_path / "backups"
     env = {"KUBECONFIG": kubeconfig, **external_db_env(external_topology)}
@@ -111,7 +114,7 @@ async def test_mixed_topology_reports_and_records_the_external_neo4j(
 
     result = run_backup(
         backup_binary,
-        ["--k8s-namespace", namespace, "--backup-dir", str(backup_dir), "create", "--force"],
+        ["--k8s-namespace", namespace, *image_args, "--backup-dir", str(backup_dir), "create", "--force"],
         env=env,
     )
     log = _log(result)
@@ -159,7 +162,7 @@ async def test_mixed_topology_reports_and_records_the_external_neo4j(
 @pytest.mark.k8s
 @requires_external_db(SERVICE_NEO4J, edition="enterprise")
 async def test_tooling_older_than_the_server_aborts_before_writing_anything(
-    infrahub_k8s_external, external_topology, backup_binary, tmp_path
+    infrahub_k8s_external, external_topology, tooling_image_reporting, backup_binary, tmp_path
 ):
     """Quickstart Scenario 4, first direction: abort, both versions named, zero bytes written.
 
@@ -170,7 +173,7 @@ async def test_tooling_older_than_the_server_aborts_before_writing_anything(
     namespace = infrahub_k8s_external["namespace"]
     kubeconfig = infrahub_k8s_external["kubeconfig_path"]
     backup_dir = tmp_path / "backups"
-    older_image = os.environ.get(OLDER_TOOLING_IMAGE_VAR, DEFAULT_OLDER_TOOLING_IMAGE)
+    older_image = tooling_image_reporting(OLDER_THAN_ANY_SERVER)
     env = {"KUBECONFIG": kubeconfig, **external_db_env(external_topology)}
 
     result = run_cli(
@@ -178,10 +181,10 @@ async def test_tooling_older_than_the_server_aborts_before_writing_anything(
         [
             "--k8s-namespace",
             namespace,
+            "--external-db-image",
+            older_image,
             "--backup-dir",
             str(backup_dir),
-            "--external-db-image-neo4j",
-            older_image,
             "create",
             "--force",
         ],
@@ -192,8 +195,9 @@ async def test_tooling_older_than_the_server_aborts_before_writing_anything(
     match = OLDER_THAN_SERVER.search(result.stdout + result.stderr)
     assert match, f"the abort does not name both versions:\n{result.stdout}\n{result.stderr}"
     utility, server = match.group(1), match.group(2)
-    assert utility and server and utility != server, f"both versions must be named and differ: {utility!r} {server!r}"
-    assert "--external-db-image-neo4j" in result.stdout + result.stderr, (
+    assert utility == OLDER_THAN_ANY_SERVER, f"the abort names {utility!r}, not the version the tooling reported"
+    assert server and server != utility, f"both versions must be named and differ: {utility!r} {server!r}"
+    assert "--external-db-image" in result.stdout + result.stderr, (
         "the abort must name the flag that changes the tooling"
     )
     assert _archives(backup_dir) == [], "an aborted run must write no artifact at all"
@@ -203,17 +207,19 @@ async def test_tooling_older_than_the_server_aborts_before_writing_anything(
 @pytest.mark.k8s
 @requires_external_db(SERVICE_NEO4J, edition="enterprise")
 async def test_tooling_newer_than_the_server_warns_and_continues(
-    infrahub_k8s_external, external_topology, backup_binary, tmp_path
+    infrahub_k8s_external, external_topology, tooling_image_reporting, backup_binary, tmp_path
 ):
     """Quickstart Scenario 4, second direction: a warning, not an abort.
 
     The asymmetry established in research R3: no documented rule forbids newer tooling, so
-    refusing it would make the tool decline work it could have done (FR-006).
+    refusing it would make the tool decline work it could have done (FR-006). The derived
+    image reports a newer version and runs the real neo4j-admin, so the capture that follows
+    the warning is a real one.
     """
     namespace = infrahub_k8s_external["namespace"]
     kubeconfig = infrahub_k8s_external["kubeconfig_path"]
     backup_dir = tmp_path / "backups"
-    newer_image = os.environ.get(NEWER_TOOLING_IMAGE_VAR, DEFAULT_NEWER_TOOLING_IMAGE)
+    newer_image = tooling_image_reporting(NEWER_THAN_ANY_SERVER)
     env = {"KUBECONFIG": kubeconfig, **external_db_env(external_topology)}
 
     result = run_backup(
@@ -221,17 +227,19 @@ async def test_tooling_newer_than_the_server_warns_and_continues(
         [
             "--k8s-namespace",
             namespace,
+            "--external-db-image",
+            newer_image,
             "--backup-dir",
             str(backup_dir),
-            "--external-db-image-neo4j",
-            newer_image,
             "create",
             "--force",
         ],
         env=env,
     )
 
-    assert NEWER_THAN_SERVER.search(_log(result)), f"the newer direction must be reported as a warning:\n{_log(result)}"
+    match = NEWER_THAN_SERVER.search(_log(result))
+    assert match, f"the newer direction must be reported as a warning:\n{_log(result)}"
+    assert match.group(1) == NEWER_THAN_ANY_SERVER, f"the warning names {match.group(1)!r}, not the reported version"
     assert len(_archives(backup_dir)) == 1, "a warning must not stop the capture"
 
 
@@ -251,13 +259,14 @@ async def test_killing_the_tool_mid_capture_leaves_nothing_behind(
     Secret carrying the database credentials — the state a sleep-based kill would miss.
     """
     namespace = infrahub_k8s_external["namespace"]
+    image_args = external_db_image_args(infrahub_k8s_external)
     kubeconfig = infrahub_k8s_external["kubeconfig_path"]
     backup_dir = tmp_path / "backups"
     env = {"KUBECONFIG": kubeconfig, **external_db_env(external_topology)}
 
     proc, log_path = start_cli(
         backup_binary,
-        ["--k8s-namespace", namespace, "--backup-dir", str(backup_dir), "create", "--force"],
+        ["--k8s-namespace", namespace, *image_args, "--backup-dir", str(backup_dir), "create", "--force"],
         env=env,
         log_path=tmp_path / "killed-mid-capture.log",
     )
@@ -287,25 +296,29 @@ async def test_killing_the_tool_mid_capture_leaves_nothing_behind(
 async def test_credentials_are_reclaimed_with_the_workload_without_the_tool(
     infrahub_k8s_external, external_topology, backup_binary, tmp_path
 ):
-    """Killed between credential creation and workload deletion: the Secret goes with the pod.
+    """Killed between credential creation and workload deletion: the Secret goes with the Job.
 
-    Proves FR-023. Deleting the pod by hand — with no tool involvement at all — must be
-    enough to remove the credentials, which is only true if the Secret is owned by the pod
-    rather than cleaned up by a tool that may have been killed.
+    Proves FR-023. Deleting the Job by hand — with no tool involvement at all — must be
+    enough to remove the credentials, which is only true if the Secret is owned by the Job
+    rather than cleaned up by a tool that may have been killed. The workload is a Job that
+    owns both its pod and its Secret (ADR 0018), so deleting the pod alone would not do it:
+    the Secret's owner would still exist.
     """
     import kr8s.asyncio
+    from kr8s.asyncio.objects import Job as AsyncJob
     from kr8s.asyncio.objects import Pod as AsyncPod
     from kr8s.asyncio.objects import Secret as AsyncSecret
 
     from tests.e2e.conftest import TRANSIENT_LABEL_MARKER, TRANSIENT_OBJECT_PREFIX
 
     namespace = infrahub_k8s_external["namespace"]
+    image_args = external_db_image_args(infrahub_k8s_external)
     kubeconfig = infrahub_k8s_external["kubeconfig_path"]
     env = {"KUBECONFIG": kubeconfig, **external_db_env(external_topology)}
 
     proc, log_path = start_cli(
         backup_binary,
-        ["--k8s-namespace", namespace, "--backup-dir", str(tmp_path / "backups"), "create", "--force"],
+        ["--k8s-namespace", namespace, *image_args, "--backup-dir", str(tmp_path / "backups"), "create", "--force"],
         env=env,
         log_path=tmp_path / "killed-after-credentials.log",
     )
@@ -316,15 +329,22 @@ async def test_credentials_are_reclaimed_with_the_workload_without_the_tool(
         proc.wait(timeout=120)
 
     api = await kr8s.asyncio.api(kubeconfig=kubeconfig)
+    jobs = [job async for job in AsyncJob.list(namespace=namespace, label_selector=TRANSIENT_LABEL_MARKER, api=api)]
     pods = [pod async for pod in AsyncPod.list(namespace=namespace, label_selector=TRANSIENT_LABEL_MARKER, api=api)]
     secrets = [
         secret async for secret in AsyncSecret.list(namespace=namespace, label_selector=TRANSIENT_LABEL_MARKER, api=api)
     ]
 
-    if not pods and not secrets:
+    if not jobs and not pods and not secrets:
         pytest.skip(
             "the run cleaned up before the kill landed, so there was nothing for the cluster to "
             "reclaim; FR-023 is about the case where the tool does not get to clean up"
+        )
+    if not secrets:
+        pytest.skip(
+            "the run created no credential Secret, because the deployment's own pods take the "
+            "database credentials from Secret keys and the workload references those; FR-023 "
+            "has nothing of the run's own to reclaim"
         )
 
     # FR-028: the objects are named so that they cannot be mistaken for a replica of the
@@ -332,7 +352,7 @@ async def test_credentials_are_reclaimed_with_the_workload_without_the_tool(
     # name, so a name containing a service name would surface in replica enumeration
     # however carefully its labels were chosen. This is the one case in these suites where
     # transient objects exist to be inspected, so it is where that is asserted.
-    for obj in [*pods, *secrets]:
+    for obj in [*jobs, *pods, *secrets]:
         assert obj.name.startswith(TRANSIENT_OBJECT_PREFIX), (
             f"{obj.name} does not carry the documented transient prefix {TRANSIENT_OBJECT_PREFIX}"
         )
@@ -342,16 +362,18 @@ async def test_credentials_are_reclaimed_with_the_workload_without_the_tool(
                 "find it during replica enumeration"
             )
 
-    # Every credential object must be owned by a pod, which is what makes reclaiming the
-    # pod sufficient. An unowned Secret survives until something remembers to delete it.
+    # Every credential object must be owned by the run's Job, which is what makes reclaiming
+    # the Job sufficient (ADR 0018). An unowned Secret survives until something remembers to
+    # delete it.
+    job_uids = {job.raw["metadata"]["uid"] for job in jobs}
     for secret in secrets:
         owners = secret.raw["metadata"].get("ownerReferences", [])
-        assert any(owner.get("kind") == "Pod" for owner in owners), (
-            f"secret {secret.name} is not owned by a pod, so nothing reclaims it with the workload"
+        assert any(owner.get("kind") == "Job" and owner.get("uid") in job_uids for owner in owners), (
+            f"secret {secret.name} is not owned by the run's Job, so nothing reclaims it with the workload: {owners}"
         )
 
-    for pod in pods:
-        await pod.async_delete()
+    for job in jobs:
+        await job.async_delete(propagation_policy="Background")
 
     for _ in range(60):
         remaining = [
@@ -378,6 +400,7 @@ async def test_one_unreachable_endpoint_of_several_is_not_a_retained_artifact(
     artifact retained after one is the most likely source of a silently unusable backup.
     """
     namespace = infrahub_k8s_external["namespace"]
+    image_args = external_db_image_args(infrahub_k8s_external)
     kubeconfig = infrahub_k8s_external["kubeconfig_path"]
     backup_dir = tmp_path / "backups"
     addresses = f"{external_topology['neo4j_address']},{UNREACHABLE_ENDPOINT}"
@@ -388,6 +411,7 @@ async def test_one_unreachable_endpoint_of_several_is_not_a_retained_artifact(
         [
             "--k8s-namespace",
             namespace,
+            *image_args,
             "--backup-dir",
             str(backup_dir),
             "--neo4j-address",
@@ -420,6 +444,7 @@ async def test_scratch_space_too_small_fails_cleanly(infrahub_k8s_external, exte
     capture filling shared node storage before anything notices.
     """
     namespace = infrahub_k8s_external["namespace"]
+    image_args = external_db_image_args(infrahub_k8s_external)
     kubeconfig = infrahub_k8s_external["kubeconfig_path"]
     backup_dir = tmp_path / "backups"
     env = {"KUBECONFIG": kubeconfig, **external_db_env(external_topology)}
@@ -429,6 +454,7 @@ async def test_scratch_space_too_small_fails_cleanly(infrahub_k8s_external, exte
         [
             "--k8s-namespace",
             namespace,
+            *image_args,
             "--backup-dir",
             str(backup_dir),
             "--external-db-scratch-size",
@@ -491,13 +517,14 @@ async def test_external_community_is_refused_for_its_mechanism_not_a_missing_ser
     point of pinning the edition rather than inferring it.
     """
     namespace = infrahub_k8s_external["namespace"]
+    image_args = external_db_image_args(infrahub_k8s_external)
     kubeconfig = infrahub_k8s_external["kubeconfig_path"]
     backup_dir = tmp_path / "backups"
     env = {"KUBECONFIG": kubeconfig, **external_db_env(external_topology)}
 
     result = run_cli(
         backup_binary,
-        ["--k8s-namespace", namespace, "--backup-dir", str(backup_dir), "create", "--force"],
+        ["--k8s-namespace", namespace, *image_args, "--backup-dir", str(backup_dir), "create", "--force"],
         env=env,
     )
     combined = result.stdout + result.stderr
@@ -541,6 +568,7 @@ async def test_an_undiscoverable_endpoint_names_where_discovery_looked(
     is shared with every case above it.
     """
     namespace = infrahub_k8s_external["namespace"]
+    image_args = external_db_image_args(infrahub_k8s_external)
     kubeconfig = infrahub_k8s_external["kubeconfig_path"]
     backup_dir = tmp_path / "backups"
     # Deliberately *without* external_db_env: the credentials it pins are irrelevant here,
@@ -556,7 +584,7 @@ async def test_an_undiscoverable_endpoint_names_where_discovery_looked(
 
         result = run_cli(
             backup_binary,
-            ["--k8s-namespace", namespace, "--backup-dir", str(backup_dir), "create", "--force"],
+            ["--k8s-namespace", namespace, *image_args, "--backup-dir", str(backup_dir), "create", "--force"],
             env=env,
         )
         combined = result.stdout + result.stderr
@@ -591,6 +619,7 @@ async def test_an_undiscoverable_endpoint_names_where_discovery_looked(
             [
                 "--k8s-namespace",
                 namespace,
+                *image_args,
                 "--backup-dir",
                 str(backup_dir),
                 "--neo4j-address",
@@ -629,13 +658,14 @@ async def test_a_revoked_pod_listing_fails_rather_than_switching_to_external_mod
     rather than anything this test asserted into being.
     """
     namespace = infrahub_k8s_external["namespace"]
+    image_args = external_db_image_args(infrahub_k8s_external)
     kubeconfig = infrahub_k8s_external["kubeconfig_path"]
     backup_dir = tmp_path / "backups"
 
     async with restricted_kubeconfig(kubeconfig, namespace, rules=[], name="xdb-nolist") as restricted:
         result = run_cli(
             backup_binary,
-            ["--k8s-namespace", namespace, "--backup-dir", str(backup_dir), "create", "--force"],
+            ["--k8s-namespace", namespace, *image_args, "--backup-dir", str(backup_dir), "create", "--force"],
             env={"KUBECONFIG": restricted, **external_db_env(external_topology)},
         )
         combined = result.stdout + result.stderr
@@ -675,13 +705,14 @@ async def test_absent_pod_creation_permission_names_the_verbs_and_resource(
     fix the wrong thing.
     """
     namespace = infrahub_k8s_external["namespace"]
+    image_args = external_db_image_args(infrahub_k8s_external)
     kubeconfig = infrahub_k8s_external["kubeconfig_path"]
     backup_dir = tmp_path / "backups"
 
     async with restricted_kubeconfig(kubeconfig, namespace, rules=[POD_READ_RULE], name="xdb-nocreate") as restricted:
         result = run_cli(
             backup_binary,
-            ["--k8s-namespace", namespace, "--backup-dir", str(backup_dir), "create", "--force"],
+            ["--k8s-namespace", namespace, *image_args, "--backup-dir", str(backup_dir), "create", "--force"],
             env={"KUBECONFIG": restricted, **external_db_env(external_topology)},
         )
         combined = result.stdout + result.stderr
@@ -699,6 +730,9 @@ async def test_absent_pod_creation_permission_names_the_verbs_and_resource(
     )
     # Resource and verbs, which is what this row is entirely about.
     assert re.search(r"\bcreate\b", combined), f"the failure does not name the verb required:\n{combined}"
+    # The workload is a Job (ADR 0018), so `create` on jobs is the request the API server
+    # refused, and the pod verbs are what the run needs once the Job's pod exists.
+    assert re.search(r"\bjobs?\b", combined), f"the failure does not name the resource refused:\n{combined}"
     assert re.search(r"\bpods?\b", combined), f"the failure does not name the resource required:\n{combined}"
     assert re.search(r"secrets?", combined), (
         f"the failure names pods but not secrets, so an operator granting only what it named "

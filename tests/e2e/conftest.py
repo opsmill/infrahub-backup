@@ -355,8 +355,17 @@ async def infrahub_k8s(
 #       Optional path to a Helm values overlay pointing the chart at those endpoints,
 #       replacing the generated overlay below when the chart's keys differ from it.
 
+#   INFRAHUB_TESTING_EXTERNAL_DB_IMAGE
+#       The infrahub-backup image built from this checkout, as a local Docker tag that is
+#       not `latest` (the CI job tags it with the commit). The external path runs its
+#       database tools from this image (FR-031, ADR 0017), and a development build has no
+#       published image to default to, so every external case passes it with
+#       `--external-db-image`. The `external_db_image` fixture loads it into the session's
+#       vcluster; the cluster is created by pytest, so it cannot be loaded beforehand.
+
 EXTERNAL_DB_ENV_VAR = "INFRAHUB_TESTING_EXTERNAL_DB"
 EXTERNAL_HELM_VALUES_ENV_VAR = "INFRAHUB_TESTING_EXTERNAL_HELM_VALUES"
+EXTERNAL_DB_IMAGE_ENV_VAR = "INFRAHUB_TESTING_EXTERNAL_DB_IMAGE"
 
 # The deployment service names the tool resolves per service, as `docker compose` and the
 # Helm chart name them.
@@ -555,10 +564,127 @@ def _external_values_overlay(topology: dict) -> dict:
     return overlay
 
 
+def load_image_into_vcluster(image: str, cluster_name: str) -> None:
+    """Import a local Docker image into every node of a docker-driver vcluster.
+
+    The `vcluster` fixture creates the cluster with `--driver=docker`, which runs each node
+    as a Docker container (`vcluster.cp.<name>`, and `vcluster.node.<name>...` for any
+    worker) with its own containerd. Those nodes do not see the host's Docker images, so
+    the image is streamed into each node's `k8s.io` containerd namespace, which is the one
+    the kubelet reads. A pod then starts from it with `imagePullPolicy: IfNotPresent`,
+    which the transient Job sets; a `latest` tag would default to `Always` and be pulled.
+    """
+    names = subprocess.run(
+        ["docker", "ps", "--format", "{{.Names}}"], check=True, capture_output=True, text=True
+    ).stdout.split()
+    nodes = [
+        name
+        for name in names
+        if (name.startswith("vcluster.cp.") or name.startswith("vcluster.node.")) and cluster_name in name
+    ]
+    if not nodes:
+        raise RuntimeError(f"found no node container for vcluster {cluster_name} to load {image} into")
+
+    for node in nodes:
+        save = subprocess.Popen(["docker", "save", image], stdout=subprocess.PIPE)
+        try:
+            subprocess.run(
+                ["docker", "exec", "-i", node, "ctr", "-n", "k8s.io", "images", "import", "--all-platforms", "-"],
+                stdin=save.stdout,
+                check=True,
+                capture_output=True,
+            )
+        finally:
+            if save.stdout:
+                save.stdout.close()
+            if save.wait() != 0:
+                raise RuntimeError(f"docker save {image} failed; build it first")
+
+
+def _require_pinned_tag(image: str) -> None:
+    """Refuse an image reference that a pod would pull rather than take from the node."""
+    last = image.rsplit("/", 1)[-1]
+    if ":" not in last or last.endswith(":latest") or "@" in last:
+        pytest.fail(
+            f"{EXTERNAL_DB_IMAGE_ENV_VAR}={image} must be a local tag other than `latest`, such as "
+            "`infrahub-backup:e2e-local`: the image is loaded into the cluster, not pulled"
+        )
+
+
+@pytest.fixture(scope="session")
+def external_db_image(vcluster: dict, external_topology: dict) -> str:
+    """The infrahub-backup image under test, loaded into the session's vcluster.
+
+    Depends on `external_topology` so that a session with no external database skips
+    before anything is built or loaded. With the topology declared and no image, the case
+    fails rather than skips: a development build refuses the external path without
+    `--external-db-image`, so a skip here would hide every external case.
+    """
+    image = os.environ.get(EXTERNAL_DB_IMAGE_ENV_VAR, "").strip()
+    if not image:
+        pytest.fail(
+            f"the external topology is declared but {EXTERNAL_DB_IMAGE_ENV_VAR} is not: build the "
+            "image from this checkout (`docker build -t infrahub-backup:e2e-local .`) and set "
+            f"{EXTERNAL_DB_IMAGE_ENV_VAR}=infrahub-backup:e2e-local"
+        )
+    _require_pinned_tag(image)
+    load_image_into_vcluster(image, vcluster["cluster_name"])
+    return image
+
+
+def external_db_image_args(deployment: dict) -> list[str]:
+    """The root flags that select the image the external path runs, for a CLI invocation."""
+    return ["--external-db-image", deployment["external_db_image"]]
+
+
+# A Dockerfile, built with no context, that derives an image from the one under test whose
+# `neo4j-admin --version` reports a chosen version and which otherwise runs the real tool.
+# The FR-006 gate compares what `neo4j-admin --version` reports in the workload with what
+# the live server reports, so this provokes either direction of the gate against the real
+# server, whatever its version, without a second Neo4j distribution in the test.
+_TOOLING_VERSION_DOCKERFILE = """\
+FROM {base}
+USER root
+RUN set -eu; \\
+    real="$(command -v neo4j-admin)"; \\
+    mv "$real" "$real.real"; \\
+    printf '#!/bin/sh\\nif [ "$1" = "--version" ]; then echo "{version}"; exit 0; fi\\nexec "%s.real" "$@"\\n' \\
+      "$real" > "$real"; \\
+    chmod 0755 "$real"
+USER infrahub
+"""
+
+
+def build_tooling_image_reporting(base: str, version: str) -> str:
+    """Build an image from `base` whose neo4j-admin reports `version`, and return its tag."""
+    repository, _, tag = base.rpartition(":")
+    derived = f"{repository}:{tag}-neo4j-admin-{version}"
+    subprocess.run(
+        ["docker", "build", "-t", derived, "-"],
+        input=_TOOLING_VERSION_DOCKERFILE.format(base=base, version=version),
+        text=True,
+        check=True,
+    )
+    return derived
+
+
+@pytest.fixture(scope="session")
+def tooling_image_reporting(vcluster: dict, external_db_image: str):
+    """A factory for images whose neo4j-admin reports a given version, loaded into the vcluster."""
+
+    def build(version: str) -> str:
+        derived = build_tooling_image_reporting(external_db_image, version)
+        load_image_into_vcluster(derived, vcluster["cluster_name"])
+        return derived
+
+    return build
+
+
 @pytest.fixture(scope="session")
 async def infrahub_k8s_external(
     vcluster: dict,
     external_topology: dict,
+    external_db_image: str,
     tmp_path_factory,
 ) -> AsyncGenerator[dict, None]:
     """Deploy Infrahub into vcluster pointed at the external database(s) by env.
@@ -588,6 +714,7 @@ async def infrahub_k8s_external(
         "kubeconfig_path": kubeconfig_path,
         "token": INFRAHUB_ADMIN_TOKEN,
         "external_services": set(external_topology["services"]),
+        "external_db_image": external_db_image,
     }
 
 
@@ -711,21 +838,59 @@ async def restricted_kubeconfig(kubeconfig_path: str, namespace: str, rules: lis
 # src/internal/app/transient_workload.go, which is what the tool's own refusal names.
 POD_READ_RULE = {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list"]}
 TRANSIENT_WRITE_RULES = [
-    {"apiGroups": [""], "resources": ["pods", "secrets"], "verbs": ["create", "get", "list", "delete"]},
+    {"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["create", "get", "delete"]},
+    {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list", "watch", "delete"]},
+    {"apiGroups": [""], "resources": ["pods/exec"], "verbs": ["create"]},
+    {"apiGroups": [""], "resources": ["secrets"], "verbs": ["create", "list", "delete"]},
+]
+
+# What a run inside the namespace needs when it takes direct mode (FR-032): the permissions
+# of a backup whose databases run inside the deployment, and nothing on jobs or secrets.
+# Kept in step with "Permissions in this mode" in docs/docs/backup/external-databases.mdx.
+# `kubectl scale` patches the `scale` subresource, which `patch` on the workload itself
+# does not cover, and workload resolution lists deployments and statefulsets by label.
+DIRECT_MODE_RULES = [
+    {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list"]},
     {"apiGroups": [""], "resources": ["pods/exec"], "verbs": ["create"]},
     {"apiGroups": [""], "resources": ["pods/log"], "verbs": ["get"]},
+    {"apiGroups": ["apps"], "resources": ["deployments", "statefulsets"], "verbs": ["get", "list", "patch"]},
+    {"apiGroups": ["apps"], "resources": ["deployments/scale", "statefulsets/scale"], "verbs": ["get", "patch"]},
 ]
+
+
+async def transient_jobs(kubeconfig_path: str, namespace: str) -> list[str]:
+    """Every Job in the namespace carrying the transient marker, as `job/name`."""
+    result = subprocess.run(
+        [
+            "kubectl",
+            "--kubeconfig",
+            kubeconfig_path,
+            "-n",
+            namespace,
+            "get",
+            "jobs",
+            "-l",
+            TRANSIENT_LABEL_MARKER,
+            "-o",
+            "name",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return [line.replace("job.batch/", "job/") for line in result.stdout.split() if line]
 
 
 async def transient_objects(kubeconfig_path: str, namespace: str) -> list[str]:
     """Every transient external-database object in the namespace, as `kind/name`.
 
-    The suites assert this list is empty after a run: a surviving pod or Secret is what
-    FR-011 and FR-023 forbid, and the marker label is how the tool's own reaper finds
-    them, so selecting on it is selecting exactly what the tool claims to clean up.
+    The suites assert this list is empty after a run: a surviving Job, pod or Secret is
+    what FR-011 and FR-023 forbid, and the marker label is how the tool's own reaper finds
+    them, so selecting on it is selecting exactly what the tool claims to clean up. The
+    workload is a Job that owns its pod and its Secret (ADR 0018), so the Job is listed too.
     """
     api = await kr8s.asyncio.api(kubeconfig=kubeconfig_path)
-    found: list[str] = []
+    found: list[str] = await transient_jobs(kubeconfig_path, namespace)
     # kr8s listings are typed as able to yield raw dicts as well as objects; they only do so
     # when asked for raw output, which these are not, so the dict arm is skipped rather than
     # handled twice.
