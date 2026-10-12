@@ -218,3 +218,30 @@ restore paths. Every one of those edits *inserts* something ahead of the existin
 capture refusal — or changes a signature to carry an error. None rewrites how a service is
 named or which service is addressed. That is the shape the indicator was asking for, and the
 single argv edit above is the one place it is not literally true.
+
+## Amendment 2026-10-12: database tools in the infrahub-backup image (ADR 0017)
+
+Requested in review of PR #172. Requirements FR-030 to FR-033. ADR 0018 records the existing move
+from a bare Pod to a Job, which this amendment builds on.
+
+- **Image** (`Dockerfile`): the runtime stage adds a Java runtime, the `neo4j-admin` and
+  `cypher-shell` distributions copied from the pinned `neo4j:2025.10.1-enterprise` image in a
+  build stage, and the PostgreSQL 18 client tools. The base image may change if the Neo4j tools
+  do not run on Alpine; the deciding test is `neo4j-admin --version`, `cypher-shell --version`,
+  `pg_dump --version` inside the built image. The image keeps its non-root `infrahub` user (uid
+  1000).
+- **Workload image** (`cli.go`, `app.go`, `transient_workload.go`): one flag, `--external-db-image`,
+  not bound to the environment. Default `registry.opsmill.io/opsmill/infrahub-backup:<version>`
+  from the build version; a development build has no default and the external gate refuses
+  before creating anything. `databaseImageUser` becomes the image's declared uid, for both roles.
+- **Direct mode** (new `external_local.go`): detection is the service-account namespace file
+  (`/var/run/secrets/kubernetes.io/serviceaccount/namespace`) equal to the target namespace, plus
+  every tool the role needs found with `exec.LookPath`. The local runner provides the same
+  operations the capture and restore sequences already call on a workload (run a command, read a
+  file, copy out, check free scratch space), so the sequences do not fork. Credentials go in the
+  child's `Env`; scratch is a run-specific directory under the operator-settable scratch location,
+  removed on every exit path.
+- **Tests**: unit tests for the flag, the default image, the development-build refusal, the
+  security context, detection, and the local runner's credential handling. The Kubernetes
+  end-to-end job builds the image and loads it into the test cluster; the suites move to
+  `--external-db-image`.

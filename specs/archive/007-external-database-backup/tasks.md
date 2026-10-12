@@ -397,6 +397,39 @@ Ships independently of, and after, User Story 1.
 
 ---
 
+## Phase 6: Database tools in the infrahub-backup image (ADR 0017, FR-030 to FR-033)
+
+Added 2026-10-12 after review of PR #172. Run in order: 6A, 6B, 6C, 6D.
+
+### Phase 6A: The image carries the tools
+
+- [ ] T162 Add the database tools to the `Dockerfile` runtime stage per FR-030: a Java runtime, the `neo4j-admin` and `cypher-shell` distributions copied from `neo4j:2025.10.1-enterprise` in a build stage, and the PostgreSQL 18 client tools. Pin every version. Keep the non-root `infrahub` user (uid 1000). Change the base image only if the Neo4j tools do not run on Alpine, and record why in a `Dockerfile` comment
+- [ ] T163 Add `scripts/check-image-tools.sh` and a `make docker-check-tools` target that build the image and run `neo4j-admin --version`, `cypher-shell --version`, `pg_dump --version`, `pg_restore --version` and `psql --version` inside it as the image's user, failing when any is missing. Run it locally and record the output and the image size before and after T162 in the commit message
+
+### Phase 6B: The transient workload runs the infrahub-backup image
+
+- [ ] T164 Replace `--external-db-image-neo4j` and `--external-db-image-postgres` with one `--external-db-image` flag in `src/internal/app/cli.go`, not bound to the environment (FR-027 comment kept), and update `contracts/cli-surface.md`
+- [ ] T165 Default the workload image to `registry.opsmill.io/opsmill/infrahub-backup:<version>` from the build version (`src/internal/app/app.go`, `utils.go`); remove `defaultExternalDBImageNeo4j` and `defaultExternalDBImagePostgres`. A development build with no `--external-db-image` is refused at the external gate before anything is created or stopped, with a message naming the flag (FR-031)
+- [ ] T166 Set the workload's `runAsUser`, `runAsGroup` and `fsGroup` to the image's declared uid in `transient_workload.go` (`databaseImageUser`), rewrite its comment for the new image, and adjust anything that depended on the vendor images' paths or users (FR-033)
+- [ ] T167 Unit tests for T164 to T166: the single flag and its absence from the environment bindings, the default image tag, the development-build refusal happening before any kubectl write, and the security context in both roles
+- [ ] T168 [P] Update `docs/docs/backup/external-databases.mdx`, `docs/docs/reference/configuration.mdx` and `dev/knowledge/external-database-backup.md` for the single image and flag: an air-gapped operator mirrors `infrahub-backup` only. Vale and rumdl pass
+
+### Phase 6C: Direct mode when infrahub-backup runs in the namespace
+
+- [ ] T169 Add `src/internal/app/external_local.go`: detection per FR-032 (service-account namespace file equals the target namespace, and every tool the role needs is found on `PATH`), returning the reason when direct mode is not taken, logged at info
+- [ ] T170 Implement the local runner behind the operations the capture and restore sequences already call on a transient workload (run a command, read a file, copy out, check free scratch space), so `external_capture.go` and `external_restore.go` do not fork. Credentials reach the child only through its environment (FR-014); scratch is a run-specific directory removed on every exit path; the scratch-size check reads local free space
+- [ ] T171 Wire direct mode into the gate so that, when taken, no Job and no Secret is created and no Job or Secret permission is exercised
+- [ ] T172 Unit tests for T169 to T171: detection true and false cases (no namespace file, other namespace, a missing tool), credentials absent from every argv, scratch removed on success and on failure, and no kubectl create call in direct mode
+- [ ] T173 [P] Document direct mode in `docs/docs/backup/external-databases.mdx` (running infrahub-backup as a pod in the namespace, and the permissions it then needs) and add `external_local.go` to `AGENTS.md`
+
+### Phase 6D: End-to-end
+
+- [ ] T174 Make the Kubernetes end-to-end job in `.github/workflows/ci.yml` build the image and load it into the test cluster, and pass it with `--external-db-image`
+- [ ] T175 Move `tests/e2e/test_k8s_external_neo4j.py` and any other suite to `--external-db-image`; rework the version-gate cases, which selected an older vendor image, so they still test both directions; fix the owner-kind assertion that still expects `Pod` (ADR 0018)
+- [ ] T176 Add an end-to-end case that runs infrahub-backup as a Job in the namespace with the built image and asserts a capture completes with no transient workload created. If it cannot run locally, say so and give the CI command
+
+---
+
 ## Dependencies
 
 ```text

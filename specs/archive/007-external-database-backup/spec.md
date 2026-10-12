@@ -17,6 +17,12 @@
 - Q: SC-004 requires recording whether the source endpoint was a follower, but which endpoint served a multi-endpoint capture is not exposed by a documented interface. How should the recovery-point caveat be recorded? → A: Record the endpoint list supplied plus each member's role as observed at capture time, without claiming which one served the capture
 - Q: How does the tool learn the database size needed to size scratch space before a capture? → A: Query the server for its store size before capture, apply a headroom factor, and let the flag override
 
+### Session 2026-10-12 (PR #172 review)
+
+- Q: Should the transient workload keep running the vendors' images? → A: No. The database tools ship in the `infrahub-backup` image and the workload runs that image (ADR 0017, reviewer request)
+- Q: What happens when `infrahub-backup` already runs as a pod in the target namespace? → A: It runs the tools itself and creates no workload
+- Q: Does redistributing Neo4j Enterprise tool binaries in the image need clearance? → A: Cleared by the PR author
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### Context: why "cannot find them" understates the gap
@@ -287,6 +293,28 @@ utilities installed, take and restore a backup with no cluster-side workload cre
   of restore. Where it is absent, the tool MUST refuse before any destructive step (FR-007) and
   MUST name the prerequisite. The tool MUST NOT offer a partial restore that leaves the two
   databases at different recovery points.
+
+**Database tools in the infrahub-backup image (amendment 2026-10-12, ADR 0017)**
+
+- **FR-030**: The `infrahub-backup` container image MUST carry the database tools the external
+  path runs: `neo4j-admin` and `cypher-shell` at the Neo4j version previously pinned for the
+  vendor image (`2025.10.1`, Enterprise), and `pg_dump`, `pg_restore` and `psql` for PostgreSQL 18.
+  The `Dockerfile` MUST pin these versions, so that one image tag has one known tool set.
+- **FR-031**: The transient workload MUST run the `infrahub-backup` image whose tag matches the
+  running binary's version. A single flag, `--external-db-image`, MUST replace
+  `--external-db-image-neo4j` and `--external-db-image-postgres`, and MUST stay unbound from the
+  environment for the reason FR-027 gives. A binary whose version has no published image (a
+  development build) MUST refuse the external path before creating anything, naming
+  `--external-db-image`, unless that flag is set.
+- **FR-032**: When `infrahub-backup` itself runs as a pod in the target namespace and finds the
+  tools it needs on its own `PATH`, it MUST run them in its own process and MUST create no
+  transient workload and no Secret. Credentials MUST reach those tools only through the child
+  process's environment, never its arguments (FR-014). Every other requirement on the external
+  path (version gate, edition gate, scratch sizing, incomplete-capture removal, restore
+  authorisation) MUST apply unchanged. In any other case the tool MUST use the transient workload.
+- **FR-033**: The transient workload's security context MUST name the user the `infrahub-backup`
+  image declares, so that a restricted pod-security policy admits it without the uid exceptions
+  the vendor images needed.
 
 ### Key Entities
 
