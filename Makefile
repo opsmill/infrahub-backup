@@ -1,4 +1,4 @@
-.PHONY: build build-all clean install test lint fmt vet help docker-build docker-build-multi docker-push
+.PHONY: build build-all clean install test lint fmt vet help docker-build docker-check-tools docker-build-multi docker-push
 
 # Variables
 BINARIES=infrahub-backup infrahub-taskmanager infrahub-collect
@@ -123,6 +123,9 @@ docker-build: ## Build Docker image for current platform
 	@docker build --build-arg VERSION=$(VERSION) \
 		-t $(DOCKER_REGISTRY)/$(DOCKER_IMAGE):$(VERSION) \
 		-t $(DOCKER_REGISTRY)/$(DOCKER_IMAGE):latest .
+
+docker-check-tools: ## Build the image for the current platform and check it carries the database tools
+	@VERSION=$(VERSION) ./scripts/check-image-tools.sh $(DOCKER_IMAGE):check-tools
 
 docker-build-multi: ## Build multi-arch Docker images (amd64 + arm64)
 	@echo "Building multi-arch Docker images..."

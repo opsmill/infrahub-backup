@@ -403,8 +403,8 @@ Added 2026-10-12 after review of PR #172. Run in order: 6A, 6B, 6C, 6D.
 
 ### Phase 6A: The image carries the tools
 
-- [ ] T162 Add the database tools to the `Dockerfile` runtime stage per FR-030: a Java runtime, the `neo4j-admin` and `cypher-shell` distributions copied from `neo4j:2025.10.1-enterprise` in a build stage, and the PostgreSQL 18 client tools. Pin every version. Keep the non-root `infrahub` user (uid 1000). Change the base image only if the Neo4j tools do not run on Alpine, and record why in a `Dockerfile` comment
-- [ ] T163 Add `scripts/check-image-tools.sh` and a `make docker-check-tools` target that build the image and run `neo4j-admin --version`, `cypher-shell --version`, `pg_dump --version`, `pg_restore --version` and `psql --version` inside it as the image's user, failing when any is missing. Run it locally and record the output and the image size before and after T162 in the commit message
+- [X] T162 Add the database tools to the `Dockerfile` runtime stage per FR-030: a Java runtime, the `neo4j-admin` and `cypher-shell` distributions copied from `neo4j:2025.10.1-enterprise` in a build stage, and the PostgreSQL 18 client tools. Pin every version. Keep the non-root `infrahub` user (uid 1000). Change the base image only if the Neo4j tools do not run on Alpine, and record why in a `Dockerfile` comment. Done: Neo4j tools from `neo4j:2025.10.1-enterprise` under `/opt/neo4j`, Alpine OpenJDK 21 and `postgresql18-client`, pinned by ARG; base moved from alpine:3.21 to alpine:3.23 because 3.21 has no PostgreSQL 18 client, the Neo4j tools run on Alpine
+- [X] T163 Add `scripts/check-image-tools.sh` and a `make docker-check-tools` target that build the image and run `neo4j-admin --version`, `cypher-shell --version`, `pg_dump --version`, `pg_restore --version` and `psql --version` inside it as the image's user, failing when any is missing. Run it locally and record the output and the image size before and after T162 in the commit message. Done: the script also refuses an image that runs as root; passed locally on arm64, amd64 build also checked
 
 ### Phase 6B: The transient workload runs the infrahub-backup image
 
