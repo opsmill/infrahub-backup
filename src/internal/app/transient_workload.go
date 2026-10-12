@@ -1964,12 +1964,17 @@ type transientCopy struct {
 	// operation is what a timeout names, so the operator is told which
 	// transfer ran out of time rather than that an exec failed.
 	operation string
+
+	// local is the same direction when the target is a scratch directory this
+	// process stands in for a workload with (direct mode, FR-032).
+	local func(w *localWorkload, src, dest string) error
 }
 
 var (
 	// copyOutOfTransientWorkload takes a capture's artifact out of the pod.
 	copyOutOfTransientWorkload = transientCopy{
 		perform:     (*KubernetesBackend).CopyFromPodContext,
+		local:       (*localWorkload).copyOut,
 		preposition: "from",
 		operation:   "copying the artifact out of the transient workload",
 	}
@@ -1977,6 +1982,7 @@ var (
 	// copyIntoTransientWorkload puts a restore's dump into it.
 	copyIntoTransientWorkload = transientCopy{
 		perform:     (*KubernetesBackend).CopyToPodContext,
+		local:       (*localWorkload).copyIn,
 		preposition: "into",
 		operation:   "copying the dump into the transient workload",
 	}
@@ -1998,6 +2004,10 @@ var (
 // Kubernetes-only refusal, the bound, the context that carries it, and the
 // wrapping that turns a deadline into a message naming the pod.
 func (iops *InfrahubOps) copyAcrossTransientWorkload(direction transientCopy, pod, src, dest string) error {
+	if local := iops.localWorkloadFor(pod); local != nil {
+		return direction.local(local, src, dest)
+	}
+
 	backend, err := iops.ensureBackend()
 	if err != nil {
 		return err

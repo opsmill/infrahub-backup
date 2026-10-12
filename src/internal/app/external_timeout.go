@@ -277,6 +277,18 @@ func (e DatabaseEndpoint) endpointTarget() string {
 // assertions in environment_docker.go and environment_kubernetes.go), so the
 // refusal is unreachable in a real deployment.
 func (iops *InfrahubOps) execBounded(ctx context.Context, bound time.Duration, service string, command []string, opts *ExecOptions) (string, error) {
+	// Direct mode (FR-032): a target this run's own process stands in for runs
+	// as a child process here, under the same bound and with the same streams
+	// apart, and with its credentials in the child's environment only.
+	if local := iops.localWorkloadForOptions(opts); local != nil {
+		stdout, stderr, err := local.run(ctx, bound, command, opts)
+		if err != nil {
+			return stdout, withStderr(err, stderr)
+		}
+
+		return stdout, nil
+	}
+
 	backend, err := iops.ensureBackend()
 	if err != nil {
 		return "", err

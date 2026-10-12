@@ -186,6 +186,18 @@ The codebase follows a command-pattern architecture using Cobra for CLI structur
       holds came from Secret-backed variables of the component's running pod (no Secret created,
       no secrets verbs), or the Job-owned credential Secret otherwise. The pod spec is read with
       a references-only jsonpath, so an inline value never leaves the API server
+    - `external_local.go` - Direct mode (FR-032, ADR 0017): when this process runs as a pod in
+      the target namespace (service-account namespace file) and finds every tool a database
+      needs on `PATH`, `externalCaptureOps` returns operations served by a `localWorkload` — a
+      run-specific scratch directory under `os.TempDir` — and creates no Job or Secret, mints no
+      run identifier and runs no reaper. The decision is taken after the collect refusal and
+      before the image refusal, once per database, and logged at info. The sequences do not
+      fork: the execution target is `local:<role>-<service>-<n>` (a colon no pod name can
+      carry), and the four seams — `execBounded`, `ExecStreamPipe`,
+      `copyAcrossTransientWorkload`, `refuseUnfittableRestoreDump` — serve such a target here.
+      `translate` maps `transientScratchPath` onto the scratch directory in argv, env values and
+      copy paths; credentials go in the child's `Env` only. `external_local_statfs*.go` read free
+      space (Linux and macOS; refused elsewhere)
     - `external_timeout.go` - Every bound and deadline the external path spends
     - `transient_workload.go` - The stand-in pod and its credential Secret: manifest
       construction, lifecycle, the stray reaper (FR-011) and the FR-028 exclusion. The

@@ -19,6 +19,9 @@ the deployment, none of this applies and nothing here changes how your backups b
   network — its backup mechanism requires the database to be stopped and its store directory to be
   directly accessible — so `infrahub-backup` refuses the capture rather than producing a partial
   one. Keep Community databases inside the deployment.
+- If you run `infrahub-backup` as a pod in the Infrahub namespace, the Job and Secret permissions
+  below do not apply: see
+  [Run `infrahub-backup` as a pod in the Infrahub namespace](#run-infrahub-backup-as-a-pod-in-the-infrahub-namespace).
 - Your Kubernetes credentials can create and remove a Job in the Infrahub namespace. The namespace
   must grant `create`, `get` and `delete` on `jobs`; `get`, `list`, `watch` and `delete` on `pods`;
   and `create` on `pods/exec`. The `watch` verb is what the readiness wait needs: the tool waits
@@ -243,6 +246,64 @@ infrahub-backup create \
 
 The pod mounts no service-account token, so naming an account grants it no cluster access — what
 it carries is registry credentials and whatever your admission rules require.
+
+## Run `infrahub-backup` as a pod in the Infrahub namespace
+
+You can run `infrahub-backup` inside the cluster instead of from your workstation, for example as
+the Job or CronJob that the [backup Helm chart](./kubernetes-backup.mdx) deploys. When that pod
+runs the `infrahub-backup` image, it already carries `neo4j-admin`, `cypher-shell` and the
+PostgreSQL client. In that case `infrahub-backup` runs these tools in its own container and creates
+no Job and no Secret in the namespace.
+
+`infrahub-backup` runs the tools in its own container when both of these conditions hold:
+
+- The pod's namespace, which Kubernetes writes to
+  `/var/run/secrets/kubernetes.io/serviceaccount/namespace`, is the namespace you back up or
+  restore (`--k8s-namespace`).
+- Every program the database needs is on the container's `PATH`:
+  - for Neo4j: `neo4j-admin`, `cypher-shell`, `keytool`, `sh`, `tar`, `rm`, `mkdir`, `ls` and
+    `base64`
+  - for PostgreSQL: `pg_dump`, `pg_restore`, `psql`, `sh`, `rm` and `base64`
+
+In every other case, including any run from outside the cluster, `infrahub-backup` uses the
+transient Job. Each run logs one line at the `info` level that names the mode it took and why, for
+example `Running the external database tools in this process, with no transient Job: this pod runs
+in the target namespace "infrahub" and finds neo4j tools on PATH`.
+
+### Permissions in this mode
+
+The pod's service account needs the same permissions as a backup of a deployment whose databases
+run inside it, listed in [Required permissions](./kubernetes-backup.mdx#required-permissions):
+
+- `list` and `get` on `pods`, to find the Infrahub components
+- `create` on `pods/exec`, to read the database address, credentials and certificate authority from
+  the Infrahub components
+- `get` and `patch` on `deployments` and `statefulsets`, to stop and restart the Infrahub
+  components around an offline capture or a restore
+
+It needs no permission on `jobs` or `secrets`, and no `create`, `delete` or `watch` on `pods`.
+
+### What the pod itself needs
+
+- Network access from the pod to each database: the Neo4j client port (`7687` by default), the
+  Neo4j backup port you exposed in Step 1, and the PostgreSQL port (`5432` by default). If your
+  namespace enforces default-deny egress, add these to the backup pod's egress rules.
+- Free disk space under the pod's temporary directory. The capture writes the artifact there
+  before the run archives it, and the run checks the free space against the same size it would
+  give the Job: the store size with headroom, or `--external-db-scratch-size`. To use a larger
+  volume, mount it in the pod and set `TMPDIR` to its path.
+
+Each run works in a directory of its own under the temporary directory and removes it on every
+exit path, including a failure. The credentials reach the database tools only through their
+environment, never through their command line.
+
+The flags that describe the transient Job — `--external-db-image`,
+`--external-db-image-pull-secrets`, `--external-db-service-account`, `--external-db-node-selector`,
+`--external-db-tolerations` and `--external-db-priority-class` — have no effect in this mode,
+because no Job is created. All other checks are unchanged: the version and edition checks, the
+scratch-size check, the removal of an incomplete capture, and the authorization of a restore.
+
+`infrahub-collect --include-backup` still refuses to capture an external database in this mode.
 
 ## Validation
 

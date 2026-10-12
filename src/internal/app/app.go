@@ -359,6 +359,21 @@ type InfrahubOps struct {
 	// transient workload becomes possible (externalCaptureOps). Its zero value
 	// is the backup tool's: capture permitted.
 	externalCaptureForbidden bool
+	// directModeHost is what direct mode reads from the host (the
+	// service-account namespace file, PATH, the temporary directory, free
+	// space). Nil means the real host; tests supply a fake one.
+	directModeHost *directModeHost
+	// directModeDecisions remembers, per database service name, whether this
+	// run executes that database's tools in its own process (FR-032), so the
+	// probe, the capture and the restore of one database run in one place and
+	// the decision is logged once.
+	directModeDecisions map[string]bool
+	// localWorkloads are the scratch directories direct mode stands in for
+	// transient Jobs with, keyed by the execution target handed to the
+	// sequences. releaseTransientWorkloads removes whatever is left in it.
+	localWorkloads map[string]*localWorkload
+	// localWorkloadSeq numbers the execution targets direct mode hands out.
+	localWorkloadSeq int
 	// resolveConfiguration runs, at most once, the resolution of Configuration
 	// from the root command ConfigureRootCommand was given. It is held here so
 	// ResolveConfiguration can be asked for it by name from a command whose
@@ -547,6 +562,11 @@ func (iops *InfrahubOps) buildTaskWorkerExecOpts(existingOpts *ExecOptions) *Exe
 }
 
 func (iops *InfrahubOps) ExecStreamPipe(service string, command []string, opts *ExecOptions) (io.ReadCloser, func() error, error) {
+	// Direct mode (FR-032): a target this run's own process stands in for.
+	if local := iops.localWorkloadForOptions(opts); local != nil {
+		return local.stream(command, opts)
+	}
+
 	backend, err := iops.ensureBackend()
 	if err != nil {
 		return nil, nil, err

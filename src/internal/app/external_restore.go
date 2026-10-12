@@ -180,7 +180,7 @@ func (iops *InfrahubOps) prepareExternalRestores(targets databaseTargets) error 
 	logrus.Warnf("This restore writes to %d database(s) the deployment does not manage (%v), authorised by %s",
 		len(external), external.services(), external[0].Restore.describe())
 
-	ops, err := iops.externalCaptureOps()
+	ops, err := iops.externalCaptureOps(external.services()...)
 	if err != nil {
 		return err
 	}
@@ -1273,7 +1273,7 @@ func (iops *InfrahubOps) copyDumpIntoRestoreWorkload(restore *externalRestore, d
 		return fmt.Errorf("cannot read the task-manager dump to restore: %w", err)
 	}
 
-	if err := refuseUnfittableDump(iops.config.ExternalDB.ScratchSize, info.Size()); err != nil {
+	if err := iops.refuseUnfittableRestoreDump(restore.Pod, info.Size()); err != nil {
 		return err
 	}
 
@@ -1282,6 +1282,18 @@ func (iops *InfrahubOps) copyDumpIntoRestoreWorkload(restore *externalRestore, d
 	}
 
 	return nil
+}
+
+// refuseUnfittableRestoreDump is the fit check for the workload a restore
+// holds: the Job's sized scratch volume, or — in direct mode (FR-032) — the
+// free space of the filesystem this process's scratch directory is on, which
+// is the only limit there is.
+func (iops *InfrahubOps) refuseUnfittableRestoreDump(target string, dumpBytes int64) error {
+	if local := iops.localWorkloadFor(target); local != nil {
+		return local.requireFree("the task-manager dump", dumpBytes, "free space there or point TMPDIR at a larger volume")
+	}
+
+	return refuseUnfittableDump(iops.config.ExternalDB.ScratchSize, dumpBytes)
 }
 
 // refuseUnfittableDump refuses a dump larger than the workload's scratch

@@ -181,7 +181,7 @@ func (iops *InfrahubOps) prepareExternalSources(targets databaseTargets) error {
 		return nil
 	}
 
-	ops, err := iops.externalCaptureOps()
+	ops, err := iops.externalCaptureOps(external.services()...)
 	if err != nil {
 		return err
 	}
@@ -390,7 +390,7 @@ func (iops *InfrahubOps) openExternalCapture(service string) (*externalCapture, 
 		return nil, nil
 	}
 
-	ops, err := iops.externalCaptureOps()
+	ops, err := iops.externalCaptureOps(service)
 	if err != nil {
 		return nil, err
 	}
@@ -469,7 +469,12 @@ type externalCaptureOps struct {
 // namespace to stand a workload up in, and locateServiceIn answers "internal"
 // there by construction, so this is unreachable on Docker rather than refused
 // there.
-func (iops *InfrahubOps) externalCaptureOps() (externalCaptureOps, error) {
+//
+// services are the databases the caller will run tools for. They decide direct
+// mode (FR-032): when this process runs as a pod in the namespace and has every
+// tool those databases need, the operations run here and nothing is created in
+// the namespace.
+func (iops *InfrahubOps) externalCaptureOps(services ...string) (externalCaptureOps, error) {
 	backend, err := iops.ensureBackend()
 	if err != nil {
 		return externalCaptureOps{}, err
@@ -486,6 +491,16 @@ func (iops *InfrahubOps) externalCaptureOps() (externalCaptureOps, error) {
 	// has been touched.
 	if err := iops.refuseForbiddenExternalCapture(k.namespace); err != nil {
 		return externalCaptureOps{}, err
+	}
+
+	// Direct mode (FR-032), after the collect refusal so infrahub-collect is
+	// turned back in either mode, and before everything below, which exists
+	// only to create workloads: the image they run, the run identifier they
+	// are labelled with, and the reaper's listing and deletion of Jobs and
+	// Secrets. None of it happens, and none of those permissions is exercised,
+	// when the tools run in this process.
+	if iops.decideDirectMode(k.namespace, services) {
+		return iops.localCaptureOps(), nil
 	}
 
 	// Also before the reaper, and for the same reason: a run with no image to
@@ -686,6 +701,10 @@ func (iops *InfrahubOps) reapTransientStrays(k *KubernetesBackend, runID string)
 // between the two — a failed download, a second database that fails after the
 // first was recorded — never reach the inner defer.
 func (iops *InfrahubOps) releaseTransientWorkloads() {
+	// Direct mode's scratch directories first: they hold database content on
+	// this pod's own disk, and removing them needs no cluster call.
+	iops.releaseLocalWorkloads()
+
 	k, ok := iops.backend.(*KubernetesBackend)
 	if !ok {
 		return
