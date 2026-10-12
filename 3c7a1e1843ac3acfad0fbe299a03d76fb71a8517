@@ -1,0 +1,19 @@
+.github/workflows/release-publish.yml
+  s_fd6e06864286e5::t_a64df7a4fc07f8 13-14,22,24-28,148,150-152,156,159-193
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3c7a1e1843ac3acfad0fbe299a03d76fb71a8517",
+  "prompts": {},
+  "sessions": {
+    "s_fd6e06864286e5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a11d36-3189-79e1-b04c-e17dd51f4320",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Benoit Kohler <Kohler.benoit@bearchitek.com>"
+    }
+  }
+}

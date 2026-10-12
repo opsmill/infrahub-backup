@@ -1,0 +1,25 @@
+.github/workflows/release-publish.yml
+  s_fd6e06864286e5::t_3542f7c2d2d442 45-46
+.github/workflows/ci.yml
+  s_fd6e06864286e5::t_5da7deff6eff1c 217-218
+scripts/check_release_labels.py
+  s_fd6e06864286e5::t_2c8c2e2e8593ea 15,37,41-42
+tests/test_release_labels.py
+  s_fd6e06864286e5::t_c80a05f18da414 1-88
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d7a35e94fe420e4c6b8930dbedc85e02a1e61f93",
+  "prompts": {},
+  "sessions": {
+    "s_fd6e06864286e5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a11d36-3189-79e1-b04c-e17dd51f4320",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Benoit Kohler <Kohler.benoit@bearchitek.com>"
+    }
+  }
+}

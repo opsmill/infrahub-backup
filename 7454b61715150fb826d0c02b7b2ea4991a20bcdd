@@ -1,0 +1,44 @@
+.github/workflows/release-publish.yml
+  s_fd6e06864286e5::t_6aae7791d4b7a0 59-60,63-69
+  s_fd6e06864286e5::t_8a672bf1419c52 118
+  s_fd6e06864286e5::t_3f706d509a7dcb 1-58,61-62,70-117,119-159
+docs/docs/release-notes/index.mdx
+  s_fd6e06864286e5::t_11ecea98f11c8d 1-6
+.github/workflows/auto-bump.yml
+  s_fd6e06864286e5::t_ccc045f7a2ca26 1-106,108-120,122-128,131-158,160-179,181-317,319-323
+  s_fd6e06864286e5::t_164bc80254a810 107,121,129-130,159,180,318
+.github/labels.yml
+  s_fd6e06864286e5::t_9341a6ee28ce59 64-76
+scripts/check_release_labels.py
+  s_fd6e06864286e5::t_69c67435f2f1cb 1-70
+.github/workflows/release-label-check.yml
+  s_fd6e06864286e5::t_6ecb2bc17c09ed 1-55
+.github/workflows/labels.yml
+  s_fd6e06864286e5::t_7cb848e6596762 13-16
+  s_fd6e06864286e5::t_2db0eaed9e0212 1-12,17-32
+.github/version-drafter.yml
+  s_fd6e06864286e5::t_986b767768d402 1-8
+docs/sidebars.ts
+  s_fd6e06864286e5::t_e9170c72e4e7db 39-41
+  s_fd6e06864286e5::t_22eb493d373061 37-38
+changelog/+reviewable-release-pr.housekeeping.md
+  s_fd6e06864286e5::t_d5fad4fc16d86c 1
+AGENTS.md
+  s_fd6e06864286e5::t_b0cd38ef250750 42-44,51-56
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7454b61715150fb826d0c02b7b2ea4991a20bcdd",
+  "prompts": {},
+  "sessions": {
+    "s_fd6e06864286e5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a11d36-3189-79e1-b04c-e17dd51f4320",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "Benoit Kohler <Kohler.benoit@bearchitek.com>"
+    }
+  }
+}
