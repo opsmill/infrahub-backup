@@ -319,6 +319,20 @@ type InfrahubOps struct {
 	// read is remembered: a failure says the component could not answer, not
 	// that there is no authority.
 	deploymentCAFiles map[string]string
+	// deploymentCredentials records, per deployment database service name,
+	// that the username and password this run holds were both read out of the
+	// deployment's own environment, and from which variables. It is the
+	// provenance withDeploymentCredentialRefs needs before it may point a
+	// transient workload at the deployment's Secret instead of creating one: a
+	// service absent from it has credentials the operator supplied, or
+	// defaults, and the Secret may hold something else.
+	deploymentCredentials map[string]deploymentCredentialSource
+	// deploymentCredentialRefs remembers, per database service name, what
+	// resolveDeploymentCredentialRefs decided: the Secret keys a transient
+	// workload references, or nil for "carry an owned Secret". Remembered
+	// because the component it is read from can be scaled to zero before the
+	// run's last workload is created.
+	deploymentCredentialRefs map[string]map[string]transientSecretKeyRef
 	// incompleteCaptures records, per deployment service name, why a capture of
 	// that database was not a complete one. It is the run's memory of FR-012:
 	// the capture path fails as soon as it reaches this verdict, and this is

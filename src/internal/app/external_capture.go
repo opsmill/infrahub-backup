@@ -509,6 +509,14 @@ func (iops *InfrahubOps) externalCaptureOps() (externalCaptureOps, error) {
 			return "", nil, specErr
 		}
 
+		// Every role passes through here, so this is the one place the
+		// credentials' delivery is decided: the deployment's own Secret when
+		// the run can show it holds them, the owned Secret otherwise. The
+		// gate creates the first workload while the deployment is still up,
+		// which is when the component's pod spec can be read; the decision is
+		// remembered for the workloads created after a scale-down.
+		spec = iops.withDeploymentCredentialRefs(k, spec)
+
 		workload, err := k.CreateTransientWorkload(spec)
 		if err != nil {
 			return "", nil, err

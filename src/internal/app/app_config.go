@@ -222,11 +222,25 @@ func (iops *InfrahubOps) applyNeo4jEnvironment(envOut string) {
 	if value, ok := env["INFRAHUB_DB_DATABASE"]; ok && iops.config.Neo4jDatabase == "" {
 		iops.config.Neo4jDatabase = value
 	}
+	readUser, readPassword := false, false
 	if value, ok := env["INFRAHUB_DB_USERNAME"]; ok && iops.config.Neo4jUsername == "" {
 		iops.config.Neo4jUsername = value
+		readUser = value != ""
 	}
 	if value, ok := env["INFRAHUB_DB_PASSWORD"]; ok && iops.config.Neo4jPassword == "" {
 		iops.config.Neo4jPassword = value
+		readPassword = value != ""
+	}
+	// Recorded only when this read supplied both: a pair the deployment never
+	// held together — one value from the operator, one from here — is not
+	// what any Secret of the deployment's holds (see
+	// deploymentCredentialSource).
+	if readUser && readPassword {
+		iops.recordDeploymentCredentials(serviceNeo4j, deploymentCredentialSource{
+			component: componentInfrahubServer,
+			username:  []string{"INFRAHUB_DB_USERNAME"},
+			password:  []string{"INFRAHUB_DB_PASSWORD"},
+		})
 	}
 
 	// The host list, in the shape --from already wants: comma-separated
@@ -316,9 +330,35 @@ func (iops *InfrahubOps) fetchPostgresCredentials() error {
 		return err
 	}
 
-	iops.applyPrefectConnection(prefectConnectionFromEnvironment(envOut))
+	iops.applyPostgresEnvironment(envOut)
 
 	return nil
+}
+
+// applyPostgresEnvironment applies the task-manager's `env` dump: the
+// connection URL's credentials and endpoint, and — when this read is what
+// supplied both the user and the password — which variables beside the URL
+// held them.
+func (iops *InfrahubOps) applyPostgresEnvironment(envOut string) {
+	userBefore, passwordBefore := iops.config.PostgresUsername, iops.config.PostgresPassword
+	iops.applyPrefectConnection(prefectConnectionFromEnvironment(envOut))
+
+	// The user and password arrive inside the connection URL, which is one
+	// value and, in the default chart, one Secret key — nothing a client can
+	// be handed a username and a password from. What can be referenced is a
+	// variable beside the URL that held the same value, which is how
+	// prefect-server renders a database whose user and password come from
+	// Secret keys. Which variables those are is settled here, while the
+	// values they held are still at hand, so the decision later needs only
+	// the pod spec and never the values again.
+	if userBefore == "" && passwordBefore == "" && iops.config.PostgresUsername != "" && iops.config.PostgresPassword != "" {
+		env := envValues(envOut)
+		iops.recordDeploymentCredentials(serviceTaskManagerDB, deploymentCredentialSource{
+			component: componentTaskManager,
+			username:  envNamesHolding(env, iops.config.PostgresUsername, prefectUserEnvVars),
+			password:  envNamesHolding(env, iops.config.PostgresPassword, prefectPasswordEnvVars),
+		})
+	}
 }
 
 // prefectConnectionFromEnvironment picks the task-manager connection URL out of

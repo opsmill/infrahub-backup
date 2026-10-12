@@ -19,12 +19,23 @@ the deployment, none of this applies and nothing here changes how your backups b
   network — its backup mechanism requires the database to be stopped and its store directory to be
   directly accessible — so `infrahub-backup` refuses the capture rather than producing a partial
   one. Keep Community databases inside the deployment.
-- Your Kubernetes credentials can create and remove a Job and a secret in the Infrahub namespace.
-  The namespace must grant `create`, `get` and `delete` on `jobs`; `get`, `list`, `watch` and
-  `delete` on `pods`; `create` on `pods/exec`; and `create`, `list` and `delete` on `secrets`.
-  The `watch` verb is what the readiness wait needs: the tool waits for the Job's pod with
-  `kubectl wait`, which opens a watch. The Job has a deadline and a time-to-live (TTL), so the
-  cluster removes it, its pod and its credential secret if the CLI terminates unexpectedly.
+- Your Kubernetes credentials can create and remove a Job in the Infrahub namespace. The namespace
+  must grant `create`, `get` and `delete` on `jobs`; `get`, `list`, `watch` and `delete` on `pods`;
+  and `create` on `pods/exec`. The `watch` verb is what the readiness wait needs: the tool waits
+  for the Job's pod with `kubectl wait`, which opens a watch. The Job has a deadline and a
+  time-to-live (TTL), so the cluster removes it and its pod if the CLI terminates unexpectedly.
+- Permissions on `secrets` are needed only in some cases. When the Infrahub server (for Neo4j) or
+  the task manager (for PostgreSQL) takes the database username and password from Secret keys, the
+  Job reads the same Secret keys and the tool creates no secret. In every other case, the tool
+  stores the credentials in a secret of its own, owned by the Job, and the namespace must also
+  grant `create`, `list` and `delete` on `secrets`. Those other cases are:
+  - you supply the credentials in the environment of `infrahub-backup`
+  - the pod specification states the username or the password as a plain value
+  - the PostgreSQL username and password exist only inside the task manager's connection URL,
+    which is how the Prefect server chart renders them unless you set
+    `externalDatabase.usernameSecretKey` and `externalDatabase.passwordSecretKey`
+
+  The log states which case applies to each database.
 - Administrative access to the Neo4j server configuration, and the ability to restart it.
 - An S3-compatible bucket, if you intend to restore. Restore stages the artifact there for the
   database to fetch.
@@ -288,7 +299,10 @@ aborts in that direction and only warns in the other. Point `--external-db-image
 In a cluster that mirrors images, this is usually an image pull the registry rejected. Name the
 pull secret with `--external-db-image-pull-secrets`. If your namespace enforces a restricted pod
 security standard, the failure names the security context requirement instead — check the service
-account and priority class your namespace admits pods under.
+account and priority class your namespace admits pods under. If the pod waits with
+`CreateContainerConfigError` and names a Secret key, the Job reads the database credentials from
+the same Secret as your Infrahub pods, and that Secret no longer holds the key. Restore the key, or
+restart the Infrahub pods so that they and the tool read the same credentials.
 
 ### `infrahub-collect --include-backup` refuses to run
 

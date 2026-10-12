@@ -246,6 +246,14 @@ type transientWorkloadSpec struct {
 	// argument, and never an inline env value in the pod spec, either of which
 	// a deployment observer can read (FR-014).
 	Credentials map[string]string
+	// CredentialRefs, when set, replaces Credentials: the client's credential
+	// variables are referenced from Secret keys the deployment already has,
+	// through `env[].valueFrom.secretKeyRef`, and no Secret is created (see
+	// external_credential_refs.go). A reference names a Secret and a key, not
+	// the value, so FR-014 holds the same way it does for the owned Secret.
+	// validate refuses a spec carrying both, so a value can never ride along
+	// beside the reference.
+	CredentialRefs map[string]transientSecretKeyRef
 	// Scheduling is what the operator's cluster requires of this pod: the
 	// registry credentials for its image, the identity it runs under and where
 	// it may be placed. Its zero value adds nothing to the manifest.
@@ -289,6 +297,56 @@ func (s transientWorkloadSpec) jobName() string {
 // this spec did not describe.
 func (s transientWorkloadSpec) secretName() string {
 	return s.jobName() + "-creds"
+}
+
+// reusesDeploymentSecret reports whether the workload references the
+// deployment's own Secret for its credentials rather than carrying one of its
+// own — in which case no Secret is created, and none has to be removed.
+func (s transientWorkloadSpec) reusesDeploymentSecret() bool {
+	return len(s.CredentialRefs) > 0
+}
+
+// credentialEnvironment is how the credentials reach the container: as
+// secretKeyRefs onto the deployment's Secret when the spec reuses one, in a
+// stable order so the manifest does not vary between two builds of one spec,
+// or as an envFrom of the owned Secret otherwise.
+//
+// Neither form is optional. A missing Secret or key must hold the container in
+// a visible pending state, never let it start unauthenticated — and for a
+// reused Secret that is also the answer to a deployment whose own reference
+// was optional: the value the run read proves the key existed when the
+// deployment's pod started, and if it has gone since, failing visibly is the
+// right outcome.
+func (s transientWorkloadSpec) credentialEnvironment() ([]transientEnvVar, []transientEnvFrom) {
+	if !s.reusesDeploymentSecret() {
+		return nil, []transientEnvFrom{{
+			SecretRef: transientSecretRef{
+				Name:     s.secretName(),
+				Optional: boolPtr(false),
+			},
+		}}
+	}
+
+	names := make([]string, 0, len(s.CredentialRefs))
+	for name := range s.CredentialRefs {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+
+	env := make([]transientEnvVar, 0, len(names))
+	for _, name := range names {
+		ref := s.CredentialRefs[name]
+		env = append(env, transientEnvVar{
+			Name: name,
+			ValueFrom: &transientEnvVarSource{SecretKeyRef: &transientSecretKeySelector{
+				Name:     ref.Name,
+				Key:      ref.Key,
+				Optional: boolPtr(false),
+			}},
+		})
+	}
+
+	return env, nil
 }
 
 // transientDatabaseToken is the name segment that tells one database's
@@ -397,6 +455,24 @@ type transientEnvFrom struct {
 	SecretRef transientSecretRef `json:"secretRef"`
 }
 
+type transientSecretKeySelector struct {
+	Name     string `json:"name"`
+	Key      string `json:"key"`
+	Optional *bool  `json:"optional"`
+}
+
+// transientEnvVarSource carries a Secret key reference and nothing else: the
+// transient container has no variable whose value is stated inline, so the
+// type cannot express one (FR-014).
+type transientEnvVarSource struct {
+	SecretKeyRef *transientSecretKeySelector `json:"secretKeyRef"`
+}
+
+type transientEnvVar struct {
+	Name      string                 `json:"name"`
+	ValueFrom *transientEnvVarSource `json:"valueFrom"`
+}
+
 type transientResources struct {
 	Requests map[string]string `json:"requests,omitempty"`
 	Limits   map[string]string `json:"limits,omitempty"`
@@ -413,6 +489,7 @@ type transientContainer struct {
 	ImagePullPolicy string                             `json:"imagePullPolicy,omitempty"`
 	Command         []string                           `json:"command,omitempty"`
 	Args            []string                           `json:"args,omitempty"`
+	Env             []transientEnvVar                  `json:"env,omitempty"`
 	EnvFrom         []transientEnvFrom                 `json:"envFrom,omitempty"`
 	Resources       transientResources                 `json:"resources"`
 	VolumeMounts    []transientVolumeMount             `json:"volumeMounts,omitempty"`
@@ -595,6 +672,7 @@ func buildTransientWorkloadManifest(spec transientWorkloadSpec) ([]byte, error) 
 	// inversion the margin exists to prevent.
 	limit := formatGiB(saturatingAdd(scratch, transientScratchLimitMargin))
 	imageUser := databaseImageUser(spec.Service)
+	credentialEnv, credentialEnvFrom := spec.credentialEnvironment()
 
 	manifest := transientJobManifest{
 		APIVersion: "batch/v1",
@@ -661,15 +739,11 @@ func buildTransientWorkloadManifest(spec transientWorkloadSpec) ([]byte, error) 
 						// container ends when the deadline does, so the pod's own
 						// bound and its process agree.
 						Args: []string{"-c", fmt.Sprintf("exec sleep %d", spec.deadlineSeconds())},
-						EnvFrom: []transientEnvFrom{{
-							SecretRef: transientSecretRef{
-								Name: spec.secretName(),
-								// Not optional: a missing credential secret must hold
-								// the container in a visible pending state, never let
-								// it start unauthenticated.
-								Optional: boolPtr(false),
-							},
-						}},
+						// The owned Secret through envFrom, or the deployment's own
+						// Secret keys through secretKeyRef — never a value, and
+						// never optional: see credentialEnvironment.
+						Env:     credentialEnv,
+						EnvFrom: credentialEnvFrom,
 						Resources: transientResources{
 							Requests: map[string]string{
 								"cpu":               "100m",
@@ -724,6 +798,10 @@ func buildTransientSecretManifest(spec transientWorkloadSpec, jobUID string) ([]
 		return nil, err
 	}
 
+	if spec.reusesDeploymentSecret() {
+		return nil, fmt.Errorf("refusing to create a %s credential secret for a workload that references the deployment's own Secret: creating one is what referencing it avoids", spec.Service)
+	}
+
 	if strings.TrimSpace(jobUID) == "" {
 		return nil, fmt.Errorf("refusing to create the %s credential secret without the transient Job's UID: an owner reference with an empty UID does not bind, and the credentials would outlive the run (FR-023)", spec.Service)
 	}
@@ -773,6 +851,38 @@ func (s transientWorkloadSpec) validate() error {
 		return fmt.Errorf("cannot build the transient %s workload without a namespace", s.Service)
 	case strings.TrimSpace(s.ScratchSize) == "":
 		return fmt.Errorf("cannot build the transient %s workload without a scratch size", s.Service)
+	}
+
+	return s.validateCredentialRefs()
+}
+
+// validateCredentialRefs refuses a reusing spec that would start the client
+// without one of its credentials, or that carries the values as well as the
+// references — the second would let a later change ship both without anyone
+// noticing that the Secret it was meant to avoid is being created after all.
+func (s transientWorkloadSpec) validateCredentialRefs() error {
+	if !s.reusesDeploymentSecret() {
+		return nil
+	}
+
+	if len(s.Credentials) != 0 {
+		return fmt.Errorf("cannot build the transient %s workload with both credential values and references to the deployment's Secret: it uses one or the other", s.Service)
+	}
+
+	userVar, passwordVar, err := transientCredentialNames(s.Service)
+	if err != nil {
+		return err
+	}
+
+	for _, name := range []string{userVar, passwordVar} {
+		ref, ok := s.CredentialRefs[name]
+		if !ok || strings.TrimSpace(ref.Name) == "" || strings.TrimSpace(ref.Key) == "" {
+			return fmt.Errorf("cannot build the transient %s workload: its reference for %s to the deployment's Secret is missing a Secret name or key", s.Service, name)
+		}
+	}
+
+	if len(s.CredentialRefs) != 2 {
+		return fmt.Errorf("cannot build the transient %s workload: it references %d credential variables from the deployment's Secret, and the client reads exactly %s and %s", s.Service, len(s.CredentialRefs), userVar, passwordVar)
 	}
 
 	return nil
@@ -1466,7 +1576,8 @@ func selectTransientStrays(candidates []transientCandidate, ownRunID string, now
 // earlier, because this lists pods *and* secrets, and putting two API calls and
 // two RBAC verbs on every Kubernetes run would make FR-015's "all-internal
 // deployments unchanged" false and would fail runs on clusters where this tool
-// cannot list secrets.
+// cannot list secrets. Even on the external path, a refusal to list secrets is
+// a warning rather than a failure: see reapTransientStraysWith.
 //
 // It is a tidy-up, not the reclamation mechanism: the Job's deadline and TTL
 // bound a workload when the tool never returns, and its owner references remove
@@ -1485,6 +1596,21 @@ func (k *KubernetesBackend) reapTransientStraysWith(ops transientClusterOps, own
 	for _, kind := range []string{transientKindPod, transientKindSecret} {
 		output, err := ops.query("kubectl", "get", kind+"s", "-n", k.namespace,
 			"-l", transientLabelMarker+"=true", "-o", transientListJSONPath(kind))
+		if err != nil && kind == transientKindSecret && isForbiddenError(err) {
+			// A namespace that grants no secrets verbs is one this tool is
+			// meant to work in when the deployment's own pods take the
+			// credentials from Secrets: the workload then references those and
+			// creates none. Failing the sweep there would make the permission
+			// the reuse removed a requirement again, through the back door.
+			//
+			// Nothing is lost by carrying on. An owned Secret carries an owner
+			// reference to its Job, so the garbage collector removes it with
+			// the Job; the secret arm of this sweep only tidies what the
+			// collector left, and the pods listed above are still judged.
+			logrus.Warnf("Not checking for credential secrets left behind by earlier runs in namespace %s: this tool may not list secrets there. Any such secret is owned by its Job and is removed with it: %v", k.namespace, err)
+
+			continue
+		}
 		if err != nil {
 			return fmt.Errorf("failed to list transient %ss left behind in namespace %s: %w", kind, k.namespace,
 				workloadPermissionError(err, "list", kind+"s", k.namespace))
@@ -1598,28 +1724,29 @@ func newRunID() (string, error) {
 // It is returned as secret contents, never as arguments: FR-014 forbids the
 // credentials appearing on a process command line or in workload configuration
 // a deployment observer can read.
+//
+// The names come from transientCredentialNames, the same pair a spec that
+// references the deployment's own Secret maps onto, so the two ways of
+// delivering the credentials cannot disagree about what the client reads.
 func transientCredentials(cfg *Configuration, service string) (map[string]string, error) {
+	userVar, passwordVar, err := transientCredentialNames(service)
+	if err != nil {
+		return nil, err
+	}
+
 	switch service {
 	case serviceNeo4j:
 		if cfg.Neo4jUsername == "" || cfg.Neo4jPassword == "" {
 			return nil, fmt.Errorf("no Neo4j credentials are available for the external database: set INFRAHUB_DB_USERNAME and INFRAHUB_DB_PASSWORD, or make them discoverable from the deployment")
 		}
 
-		return map[string]string{
-			"NEO4J_USERNAME": cfg.Neo4jUsername,
-			"NEO4J_PASSWORD": cfg.Neo4jPassword,
-		}, nil
-	case serviceTaskManagerDB:
+		return map[string]string{userVar: cfg.Neo4jUsername, passwordVar: cfg.Neo4jPassword}, nil
+	default:
 		if cfg.PostgresUsername == "" || cfg.PostgresPassword == "" {
 			return nil, fmt.Errorf("no PostgreSQL credentials are available for the external task-manager database: make them discoverable from the deployment or supply them explicitly")
 		}
 
-		return map[string]string{
-			"PGUSER":     cfg.PostgresUsername,
-			"PGPASSWORD": cfg.PostgresPassword,
-		}, nil
-	default:
-		return nil, errNotADatabaseService("resolve credentials for", service)
+		return map[string]string{userVar: cfg.PostgresUsername, passwordVar: cfg.PostgresPassword}, nil
 	}
 }
 
@@ -1931,6 +2058,13 @@ func (k *KubernetesBackend) CreateTransientWorkload(spec transientWorkloadSpec) 
 // cannot start because its secret does not exist yet. That is a visible pending
 // state the kubelet retries out of, and it resolves long before the image has
 // finished pulling.
+//
+// A spec that references the deployment's own Secret (reusesDeploymentSecret)
+// skips the secret step entirely: there is no credential object of this run's
+// to own, so FR-023 has nothing to bind, and the run needs no secrets verb.
+// The UID is still read, because it is what the workload records about the Job
+// it created whichever way the credentials travel, and because a Job whose UID
+// cannot be read is a Job this run cannot account for.
 func (k *KubernetesBackend) createTransientWorkloadWith(ops transientClusterOps, spec transientWorkloadSpec) (*TransientWorkload, error) {
 	if spec.Namespace == "" {
 		spec.Namespace = k.namespace
@@ -1951,11 +2085,16 @@ func (k *KubernetesBackend) createTransientWorkloadWith(ops transientClusterOps,
 		return nil, fmt.Errorf("refusing to create a transient %s workload: the service already resolves to pod %s in namespace %s, which this run did not create — a transient workload stands in for a database the deployment does not have", spec.Service, cached, spec.Namespace)
 	}
 
+	secretName := spec.secretName()
+	if spec.reusesDeploymentSecret() {
+		secretName = ""
+	}
+
 	workload := &TransientWorkload{
 		RunID:      spec.RunID,
 		Service:    spec.Service,
 		JobName:    spec.jobName(),
-		SecretName: spec.secretName(),
+		SecretName: secretName,
 		Namespace:  spec.Namespace,
 		State:      workloadStatePending,
 		ops:        ops,
@@ -2006,18 +2145,22 @@ func (k *KubernetesBackend) createTransientWorkloadWith(ops transientClusterOps,
 
 	workload.JobUID = strings.TrimSpace(uid)
 
-	secretManifest, err := buildTransientSecretManifest(spec, workload.JobUID)
-	if err != nil {
-		workload.releaseAfterFailure()
+	if spec.reusesDeploymentSecret() {
+		logrus.Debugf("The transient %s workload %s references the deployment's own Secret for its credentials; no credential Secret is created", spec.Service, workload.JobName)
+	} else {
+		secretManifest, err := buildTransientSecretManifest(spec, workload.JobUID)
+		if err != nil {
+			workload.releaseAfterFailure()
 
-		return nil, err
-	}
+			return nil, err
+		}
 
-	if err := ops.create(secretManifest); err != nil {
-		workload.releaseAfterFailure()
+		if err := ops.create(secretManifest); err != nil {
+			workload.releaseAfterFailure()
 
-		return nil, fmt.Errorf("failed to create the credential secret %s owned by the transient %s workload: %w", workload.SecretName, spec.Service,
-			workloadPermissionError(err, "create", transientKindSecret+"s", spec.Namespace))
+			return nil, fmt.Errorf("failed to create the credential secret %s owned by the transient %s workload: %w", workload.SecretName, spec.Service,
+				workloadPermissionError(err, "create", transientKindSecret+"s", spec.Namespace))
+		}
 	}
 
 	if err := workload.resolveJobPod(externalDBWorkloadReadyTimeout); err != nil {
@@ -2180,8 +2323,10 @@ func (w *TransientWorkload) ExecutionTarget() (string, error) {
 	return w.PodName, nil
 }
 
-// Release removes the workload. Deleting the Job cascades to its pod and the
-// credential Secret because both are owned by it.
+// Release removes the workload. Deleting the Job cascades to its pod and, when
+// the workload carried one, the credential Secret, because both are owned by
+// it. A workload that referenced the deployment's own Secret leaves that Secret
+// exactly as it found it: it was never this run's to remove.
 func (w *TransientWorkload) Release() error {
 	if w == nil || w.State == workloadStateReleased {
 		return nil
@@ -2200,7 +2345,12 @@ func (w *TransientWorkload) Release() error {
 	w.State = workloadStateReleasing
 
 	if err := w.ops.remove("job", w.JobName, "--ignore-not-found", "--wait=false"); err != nil {
-		return fmt.Errorf("failed to remove the transient %s workload %s (its pod %s and credential secret %s are owned by it and go with it): %w", w.Service, w.JobName, w.PodName, w.SecretName,
+		owned := "its pod " + w.PodName + " is owned by it and goes with it"
+		if w.SecretName != "" {
+			owned = fmt.Sprintf("its pod %s and credential secret %s are owned by it and go with it", w.PodName, w.SecretName)
+		}
+
+		return fmt.Errorf("failed to remove the transient %s workload %s (%s): %w", w.Service, w.JobName, owned,
 			workloadPermissionError(err, "delete", "jobs", w.Namespace))
 	}
 
@@ -2259,7 +2409,14 @@ var errTransientWorkloadForbidden = errors.New("the deployment refused this tool
 // granted `create` on pods alone gets one step further and reads a second
 // refusal. The pods/exec entry is easy to leave out of a Role and is what every
 // operation the workload performs travels through.
-const transientWorkloadRBAC = "create, get and delete on jobs; get, list, watch and delete on pods; create on pods/exec; and create, list and delete on secrets"
+//
+// The secrets verbs are conditional, and the text says so: a workload whose
+// credentials the deployment's own pods take from a Secret references that
+// Secret and creates none (see external_credential_refs.go), and the stray
+// sweep tolerates a refused secrets listing. They are needed only where the
+// run falls back to carrying the credentials in a Secret of its own.
+const transientWorkloadRBAC = "create, get and delete on jobs; get, list, watch and delete on pods; create on pods/exec; " +
+	"and, unless the deployment's own pods take the database username and password from Secret keys, create, list and delete on secrets"
 
 // isForbiddenError reports whether a kubectl failure was the API server
 // refusing the request rather than failing to serve it.

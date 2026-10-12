@@ -58,7 +58,21 @@ operator's own `PGHOST`. The resolved endpoint is logged before any connection i
 ## The transient workload
 
 One pod per role per external database, created from a full manifest piped to `kubectl create`
-on stdin, with a credential Secret that carries an `ownerReference` to the pod (ADR 0009).
+on stdin. The credentials reach it in one of two ways (`external_credential_refs.go`):
+
+- **Reference the deployment's Secret.** When the username and password the run holds were both
+  read from the deployment component's environment, and that component's running pod declares the
+  variables that held them as Secret keys (`env[].valueFrom.secretKeyRef`, or a single matching
+  `envFrom[].secretRef`), the Job maps those keys onto `NEO4J_USERNAME`/`NEO4J_PASSWORD` or
+  `PGUSER`/`PGPASSWORD` with `secretKeyRef` (never optional). No Secret is created. The pod spec is
+  read with a jsonpath that returns references only, never inline values, and the decision is made
+  once per database while the deployment is still up. For PostgreSQL the URL is a single value, so
+  reuse needs variables beside it that held the same user and password; prefect-server renders
+  `PREFECT_SERVER_DATABASE_USER`/`_PASSWORD` that way when `externalDatabase.usernameSecretKey` and
+  `passwordSecretKey` are set. The default chart puts only the URL in a Secret, so it falls back.
+- **Owned Secret (fallback).** Operator-supplied credentials, inline values, ConfigMaps, ambiguous
+  `envFrom` sources or an unreadable pod: a credential Secret is created with an `ownerReference`
+  to the Job (ADR 0009), exactly as before.
 
 | Role | When | Scratch | Hosts |
 |---|---|---|---|
@@ -76,7 +90,8 @@ Identity and lifecycle:
 - restricted pod-security context; the official images declare no user, so `runAsUser` is set
   explicitly — see [container-image-user-semantics.md](container-image-user-semantics.md).
 - a stray reaper deletes marker-labelled pods and Secrets from earlier runs that are terminated or
-  past their deadline, before a new workload is created.
+  past their deadline, before a new workload is created. A forbidden secrets listing is a warning,
+  not a failure: owned Secrets go with their Job through the garbage collector.
 - excluded from every pod listing by the marker label first and the name prefix second, so it never
   appears in service enumeration, replica counts or `infrahub-collect` output.
 
@@ -109,8 +124,9 @@ Customer side (documented, verified by the end-to-end suite, not assumable by th
    `sslrootcert`), or the operator opts out of verification.
 4. In an air-gapped cluster, the tooling image is mirrored and its pull secret named.
 
-Cluster side: `create`, `get`, `list`, `watch`, `delete` on pods and secrets, and `create` on
-`pods/exec`, in the Infrahub namespace. `watch` is needed by `kubectl wait`. These are the first
+Cluster side, in the Infrahub namespace: `create`, `get`, `delete` on jobs; `get`, `list`,
+`watch`, `delete` on pods; `create` on `pods/exec`. `watch` is needed by `kubectl wait`. `create`,
+`list`, `delete` on secrets only when the run falls back to an owned credential Secret (see above). These are the first
 write verbs the tools require and only the external path needs them. `infrahub-collect` needs none
 of this and refuses `--include-backup` for an external database (ADR 0003).
 

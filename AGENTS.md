@@ -181,6 +181,11 @@ The codebase follows a command-pattern architecture using Cobra for CLI structur
       proves nothing
     - `external_ca.go` - Carries the deployment's own certificate authority into the workload
       that has to verify against it, once per workload
+    - `external_credential_refs.go` - Decides how the credentials reach a transient workload:
+      `secretKeyRef`s onto the deployment's own Secret when the run can show the credentials it
+      holds came from Secret-backed variables of the component's running pod (no Secret created,
+      no secrets verbs), or the Job-owned credential Secret otherwise. The pod spec is read with
+      a references-only jsonpath, so an inline value never leaves the API server
     - `external_timeout.go` - Every bound and deadline the external path spends
     - `transient_workload.go` - The stand-in pod and its credential Secret: manifest
       construction, lifecycle, the stray reaper (FR-011) and the FR-028 exclusion. The
