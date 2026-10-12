@@ -54,10 +54,10 @@ wide:
   the cluster can reach. That is now a stated prerequisite rather than a discovered one, and the
   pull secret for such a registry is nameable — without it the pod sat in `ImagePullBackOff` until
   the readiness bound expired.
-- The namespace must grant `create, get, list, watch and delete on pods and secrets, plus create on
-  pods/exec` (FR-019). This is the first write permission these tools require, and it is required
-  only on the external path. `watch` is not optional padding: readiness is awaited with `kubectl
-  wait`, which opens a watch, so a namespace granting everything else still fails there.
+- Only a deployment with a database outside it needs new permissions (FR-019). A deployment whose
+  databases are all internal needs none beyond what it needed before (FR-015). The permissions an
+  external database needs are listed in ADR 0009. They are the first write permissions these tools
+  require.
 - `infrahub-collect` does not inherit any of this. `--include-backup` refuses when a database
   resolves as external, naming `infrahub-backup create` as the tool that performs the capture, so
   ADR 0003's read-only guarantee stays unqualified and collect still needs only read and exec

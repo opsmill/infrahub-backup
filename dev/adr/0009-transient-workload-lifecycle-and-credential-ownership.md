@@ -49,9 +49,18 @@ ADR 0001 forbids a Kubernetes client library, and the backend already drives eve
 
 ## Consequences
 
-- The namespace must grant `create`, `get`, `list`, `watch` and `delete` on pods and secrets, plus
-  `create` on `pods/exec`. `watch` is not optional: readiness is awaited with `kubectl wait`. This
-  is the first write permission these tools require, and only the external path needs it.
+- Only a deployment with a database outside it needs new permissions. A deployment whose databases
+  are all internal never reaches this path and needs no permission beyond what it needed before
+  (FR-015). When a database is external, the namespace must grant:
+  - `create`, `get` and `delete` on jobs
+  - `get`, `list`, `watch` and `delete` on pods
+  - `create` on `pods/exec`
+  - `create`, `list` and `delete` on secrets, only when the run cannot reference the deployment's
+    own Secret keys and has to create its own credential Secret (see
+    `external_credential_refs.go`)
+
+  `watch` is not optional: readiness is awaited with `kubectl wait`, which opens a watch. These are
+  the first write permissions these tools require.
 - A tool killed mid-run leaves nothing that the cluster will not clean up by itself: the deadline
   removes the pod, ownership removes the Secret.
 - Each workload costs five kubectl calls (create pod, read UID, create Secret, wait, delete) plus
