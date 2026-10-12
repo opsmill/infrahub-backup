@@ -1,0 +1,48 @@
+specs/archive/007-external-database-backup/tasks.md
+  s_33f105a6deb867::t_b3d288babd45c2 419-423
+src/internal/app/external_timeout.go
+  s_33f105a6deb867::t_116e7aef896176 280-291
+src/internal/app/external_restore.go
+  s_33f105a6deb867::t_47e2303ceb105f 183,1276,1287-1296
+  s_33f105a6deb867::t_d0ac408961827b 1297-1298
+AGENTS.md
+  s_33f105a6deb867::t_878932d2093600 189-200
+src/internal/app/external_capture.go
+  s_33f105a6deb867::t_47e2303ceb105f 184,393,472-477,496-505,704-707
+docs/docs/backup/external-databases.mdx
+  s_33f105a6deb867::t_878932d2093600 22-24,250-306
+  s_33f105a6deb867::t_ad1dabab4c16db 307
+src/internal/app/app.go
+  s_33f105a6deb867::t_e825ada4a52d6d 565-569
+  s_33f105a6deb867::t_8204f258aa3119 362-376
+src/internal/app/transient_workload.go
+  s_33f105a6deb867::t_2573b47a480fd7 1967-1970,1977,1985,2007-2010
+changelog/172.added.md
+  s_33f105a6deb867::t_cee83ae06586e9 1
+src/internal/app/external_local_test.go
+  s_33f105a6deb867::t_9c61b512608407 1-533
+  s_33f105a6deb867::t_7fd651d693e2ce 534-545
+src/internal/app/external_local_statfs_other.go
+  s_33f105a6deb867::t_71375141adadbe 1-15
+src/internal/app/external_local.go
+  s_33f105a6deb867::t_9b418c57c7d9d8 164,182,504-505,512-513,516
+  s_33f105a6deb867::t_af0cdc0b99cbfe 1-163,165-181,183-503,506-511,514-515,517-642
+src/internal/app/external_local_statfs.go
+  s_33f105a6deb867::t_efb8ddfafef91f 1-17
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b5e87ad8c66558743d4d862010d363a760558a14",
+  "prompts": {},
+  "sessions": {
+    "s_33f105a6deb867": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2564d676-32e7-45e0-82a1-111443df6e89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Benoit Kohler <benoit@opsmill.com>"
+    }
+  }
+}
