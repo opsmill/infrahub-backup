@@ -1,6 +1,6 @@
 # 9. Transient workload lifecycle: a Pod manifest on stdin, deadline-bounded, owning its credential Secret
 
-**Status**: Accepted
+**Status**: Accepted; the bare-Pod choice and the Secret owner are superseded by ADR 0018
 **Date**: 2026-09-07
 **Source**: specs/archive/007-external-database-backup/research.md (R5, R7), spec FR-011/FR-014/FR-023/FR-028, data-model.md (`TransientWorkload`)
 

@@ -1,6 +1,6 @@
 # 8. A load-bearing image pull for external databases; offline-by-default survives it
 
-**Status**: Accepted
+**Status**: Accepted; the image choice is superseded by ADR 0017
 **Date**: 2026-09-03
 **Source**: specs/archive/007-external-database-backup/research.md (R1, R5), spec FR-004/FR-015/FR-019/FR-027
 
