@@ -18,8 +18,7 @@ overridable by `INFRAHUB_`-prefixed environment variables with `-` replaced by `
 | `--neo4j-address` | backup, restore | *(discovered)* | Override the Neo4j host list. Accepts `host[:port][,host[:port]...]`, the same shape Infrahub's own address setting accepts. |
 | `--neo4j-backup-port` | backup | `6362` | The backup service port. Not discoverable; see research R4. |
 | `--postgres-address` | backup, restore | *(discovered)* | Override the PostgreSQL endpoint as `host[:port]`. |
-| `--external-db-image-neo4j` | backup, restore | *(pinned default)* | Image supplying the Neo4j administration tooling. Flag only — not environment-settable (FR-027). |
-| `--external-db-image-postgres` | backup, restore | *(pinned default)* | Image supplying the PostgreSQL client tooling. Flag only — not environment-settable (FR-027). |
+| `--external-db-image` | backup, restore | `registry.opsmill.io/opsmill/infrahub-backup:<version>` *(none on a development build)* | Image the transient workload runs, for both databases. Flag only — not environment-settable (FR-027, FR-031). |
 | `--external-db-scratch-size` | backup | *(derived from database size)* | Scratch space for the transient workload (FR-022). |
 | `--external-db-insecure-tls` | backup, restore | `false` | Do not protect connections to an external database server: skip certificate verification, and accept an unencrypted channel where the deployment records TLS as disabled. The **only** opt-out from FR-029; neither a discovered `INFRAHUB_DB_TLS_INSECURE` nor an absent `INFRAHUB_DB_TLS_ENABLED` implies it. |
 | `--allow-external-restore` | restore | `false` | The authorisation required by FR-009. Distinct from `--force`. |
@@ -32,8 +31,8 @@ overridable by `INFRAHUB_`-prefixed environment variables with `-` replaced by `
 
 **T111 added the five placement flags above, and this is the change of record.** The manifest
 declared no `imagePullSecrets`, `serviceAccountName`, `nodeSelector`, `tolerations` or
-`priorityClassName`, and nothing could supply them — which made the image flags unusable for the
-case they exist for. An operator who must mirror the tooling image into their own registry has a
+`priorityClassName`, and nothing could supply them — which made the image flags (now the one
+`--external-db-image`) unusable for the case they exist for. An operator who must mirror the tooling image into their own registry has a
 registry that needs credentials, so the workload sat in `ImagePullBackOff` until the readiness
 bound expired, and the only diagnosis available named a condition the operator had no input to
 fix. The same held for a namespace whose capable nodes are tainted, or which admits a pod only
@@ -44,16 +43,29 @@ none of this gets exactly the pod it got before (FR-015). A malformed value is r
 object is created, by a message naming the flag — the same reason `--external-db-scratch-size` is
 parsed by this tool rather than by the API server.
 
-Unlike the image flags, these follow the binding convention and are environment-settable. FR-027's
+Unlike the image flag, these follow the binding convention and are environment-settable. FR-027's
 reason for keeping the image out of ambient environment does not reach them: the danger there is
 that the tool holds workload-creation rights, so an environment-settable image turns those rights
 into a means of running arbitrary code in the customer's namespace. These say where a pod may be
 placed and which credentials fetch its image, never what it runs, and the image itself stays
-pinned or flag-only. A named service account grants the pod no API access either —
+the release's own or flag-only. A named service account grants the pod no API access either —
 `automountServiceAccountToken` stays `false`, so what an account carries here is its registry
 credentials and whatever the namespace's admission requires. An unattended backup is configured by
 environment at least as often as by argv, and a scheduled run in a mirrored-registry cluster with
 no way to name its pull secret is the defect restated rather than fixed.
+
+**T164 and T165 replaced the two image flags, and this is the change of record.**
+`--external-db-image-neo4j` and `--external-db-image-postgres` selected the vendor images
+`neo4j:2025.10.1-enterprise` and `postgres:18-alpine`. The transient workload now runs the
+`infrahub-backup` image, which carries `neo4j-admin`, `cypher-shell` and the PostgreSQL 18 client
+(FR-030, ADR 0017), so one flag, `--external-db-image`, selects it for both databases. Its default
+is the image the release workflow publishes for the running binary's version: a binary built from
+tag `v2.3.0` runs `registry.opsmill.io/opsmill/infrahub-backup:2.3.0`. A development build — a
+version that is empty, a commit hash, `git describe` output, or carries build metadata — has no
+published image and so no default; the external path refuses it before creating or deleting
+anything unless `--external-db-image` is given (FR-031). The two old flags were never released, so
+they were removed rather than deprecated. An air-gapped operator now mirrors one image, the one
+they already run.
 
 `--external-db-tls-policy` was registered by T001 and removed by T095, which recorded that T041
 would reintroduce it alongside the channel it configures. T041 landed that channel and **did not**
@@ -88,8 +100,8 @@ introduced and `--external-db-tls-policy` stays removed.
 ## Configuration keys
 
 Every flag above has an `INFRAHUB_`-prefixed environment equivalent, per the existing binding
-convention — **except the image flags**, which stay the sole exception (the placement flags added
-by T111 are bound; see the reasoning above). Those resolve from a pinned default or an explicitly
+convention — **except `--external-db-image`**, which stays the sole exception (the placement flags
+added by T111 are bound; see the reasoning above). It resolves from its default or an explicitly
 supplied flag only, never from ambient environment (FR-027): the tool holds workload-creation
 rights, so an environment-settable image would turn those rights into a means of running arbitrary
 images in the customer's namespace.
@@ -131,6 +143,7 @@ Reading these is additive: a deployment that does not set them behaves exactly a
 | Restore accepted and the database's state can no longer be read | non-zero well before the operation bound, attributed to the path to the database rather than to the database | FR-021, FR-025 |
 | An external database stops responding mid-operation | non-zero at the bound, Infrahub returned to prior scale | FR-025 |
 | Restricted pod-security namespace rejects the workload | non-zero, naming the security context requirement | FR-027 |
+| Development build, an external database, and no `--external-db-image` | non-zero, before any workload is created or deleted and before any Infrahub service is stopped | FR-031 |
 
 The tool MUST NOT surface a database vendor's exit code directly where that code conflates
 outcomes — notably a backup exit status that means either failure or partial success (research R6).
@@ -153,6 +166,7 @@ illustrative; the three required elements are not.
 | Restore did not come online | the database's reported status, and where the server logs the cause |
 | The restored database's state cannot be read at all | that the failure is in the path to the database (the transient pod, the cluster API, the exec permission) and not a verdict on the database, which may still be loading — explicitly *not* the row above's "the database is not usable", and not the server's own logs |
 | `infrahub-collect --include-backup` against an external database | that the capture needs a transient pod and secret in the namespace, that collection creates no workload (ADR-0003), and that `infrahub-backup create` performs it |
+| Development build with no `--external-db-image` | that reaching the database needs a transient workload, that a development build has no published image for it, `--external-db-image` and a released `infrahub-backup` as the two remedies, and that nothing was created or stopped (FR-031) |
 
 ## Backwards compatibility
 

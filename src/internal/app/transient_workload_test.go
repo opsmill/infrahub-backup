@@ -46,7 +46,7 @@ func testCaptureSpec() transientWorkloadSpec {
 		RunID:       "a1b2c3d4",
 		Service:     serviceNeo4j,
 		Role:        workloadRoleCapture,
-		Image:       "neo4j:2025.10.1-enterprise",
+		Image:       "registry.opsmill.io/opsmill/infrahub-backup:2.3.0",
 		Namespace:   "infrahub",
 		ScratchSize: "40Gi",
 		Deadline:    2*time.Hour + 10*time.Minute,
@@ -172,26 +172,26 @@ func TestBuildTransientPodManifestShape(t *testing.T) {
 	if got := nested(t, pod, "spec", "template", "spec", "securityContext", "runAsNonRoot"); got != true {
 		t.Errorf("spec.securityContext.runAsNonRoot = %v, want true", got)
 	}
-	if got := nested(t, pod, "spec", "template", "spec", "securityContext", "fsGroup"); got != float64(7474) {
-		t.Errorf("spec.securityContext.fsGroup = %v, want 7474 (the neo4j image's own user)", got)
+	if got := nested(t, pod, "spec", "template", "spec", "securityContext", "fsGroup"); got != float64(1000) {
+		t.Errorf("spec.securityContext.fsGroup = %v, want 1000 (the infrahub-backup image's own user)", got)
 	}
 	if got := nested(t, pod, "spec", "template", "spec", "securityContext", "seccompProfile", "type"); got != "RuntimeDefault" {
 		t.Errorf("spec.securityContext.seccompProfile.type = %v, want RuntimeDefault", got)
 	}
-	// runAsUser must be stated. Neither pinned image declares a user
-	// (Config.User is empty in both, verified with docker image inspect), and
-	// Command replaces the entrypoint that would have dropped privileges, so
-	// runAsNonRoot with runAsUser absent makes the kubelet resolve the
-	// effective user from the image, find root, and refuse the container with
-	// CreateContainerConfigError. This assertion previously required the field
-	// to be *absent*, which is why a pod that could never start had passing
-	// tests: it asserted the manifest's shape, and no unit test connects that
-	// shape to an admission decision.
-	if got := nested(t, pod, "spec", "template", "spec", "securityContext", "runAsUser"); got != float64(7474) {
-		t.Errorf("spec.securityContext.runAsUser = %v, want 7474 (the neo4j image's own uid); absent means the kubelet rejects the pod with CreateContainerConfigError", got)
+	// runAsUser must be stated. The infrahub-backup image declares its user by
+	// name (Config.User is "infrahub", verified with docker image inspect), and
+	// the kubelet cannot check runAsNonRoot against a name: with runAsUser
+	// absent it refuses the container with CreateContainerConfigError ("image
+	// has non-numeric user"). The vendor images this replaced declared no user
+	// at all and failed the same way as root. This assertion once required the
+	// field to be *absent*, which is why a pod that could never start had
+	// passing tests: it asserted the manifest's shape, and no unit test connects
+	// that shape to an admission decision.
+	if got := nested(t, pod, "spec", "template", "spec", "securityContext", "runAsUser"); got != float64(1000) {
+		t.Errorf("spec.securityContext.runAsUser = %v, want 1000 (the infrahub-backup image's own uid); absent means the kubelet rejects the pod with CreateContainerConfigError", got)
 	}
-	if got := nested(t, pod, "spec", "template", "spec", "securityContext", "runAsGroup"); got != float64(7474) {
-		t.Errorf("spec.securityContext.runAsGroup = %v, want 7474 (the neo4j image's own gid)", got)
+	if got := nested(t, pod, "spec", "template", "spec", "securityContext", "runAsGroup"); got != float64(1000) {
+		t.Errorf("spec.securityContext.runAsGroup = %v, want 1000 (the infrahub-backup image's own gid)", got)
 	}
 
 	// FR-027: restricted pod-security fields, at the container level. These
@@ -301,12 +301,13 @@ func TestBuildTransientWorkloadManifestIsTTLManaged(t *testing.T) {
 }
 
 // TestBuildTransientPodManifestPostgresRunsAsItsOwnUser pins the other half of
-// the FR-027 reconciliation: the user the pod runs as follows the image's own
-// database user, which differs between the two images.
+// the FR-027 reconciliation, as FR-033 changed it: the PostgreSQL workload runs
+// as the same user as the Neo4j one, because it runs the same image. With the
+// vendor images it ran as 70, the alpine postgres image's own user; that value
+// coming back would mean a second image, and a uid exception, had returned.
 func TestBuildTransientPodManifestPostgresRunsAsItsOwnUser(t *testing.T) {
 	spec := testCaptureSpec()
 	spec.Service = serviceTaskManagerDB
-	spec.Image = "postgres:18-alpine"
 	spec.Credentials = map[string]string{"PGUSER": "postgres", "PGPASSWORD": "pw"}
 
 	manifest, err := buildTransientWorkloadManifest(spec)
@@ -316,8 +317,8 @@ func TestBuildTransientPodManifestPostgresRunsAsItsOwnUser(t *testing.T) {
 
 	pod := decodePod(t, manifest)
 	for _, field := range []string{"runAsUser", "runAsGroup", "fsGroup"} {
-		if got := nested(t, pod, "spec", "template", "spec", "securityContext", field); got != float64(70) {
-			t.Errorf("spec.securityContext.%s = %v, want 70 (the alpine postgres image's own uid/gid)", field, got)
+		if got := nested(t, pod, "spec", "template", "spec", "securityContext", field); got != float64(1000) {
+			t.Errorf("spec.securityContext.%s = %v, want 1000 (the infrahub-backup image's own uid/gid, the same as for Neo4j)", field, got)
 		}
 	}
 	if got := nested(t, pod, "spec", "template", "spec", "securityContext", "runAsNonRoot"); got != true {
@@ -327,15 +328,21 @@ func TestBuildTransientPodManifestPostgresRunsAsItsOwnUser(t *testing.T) {
 
 // TestTransientPodDeclaresANonRootUserForEveryService is the assertion that
 // would have caught the defect this replaced. runAsNonRoot is a promise the
-// kubelet checks against the image's declared user, and neither pinned image
-// declares one — Config.User is empty for both, so the effective user resolves
-// to root and the container is refused with CreateContainerConfigError before
-// anything runs. Asserting the field is present and non-zero for every service
-// is what keeps the promise checkable without a cluster; the value itself is
-// measured from the image, not derived (see databaseImageUser).
+// kubelet checks against the image's declared user, numerically: the vendor
+// images declared none (root) and the infrahub-backup image declares a name,
+// and either way a pod with no runAsUser is refused with
+// CreateContainerConfigError before anything runs. Asserting the field is
+// present for every service and every role is what keeps the promise checkable
+// without a cluster.
+//
+// The value is asserted too, and it is the same for both databases (FR-033):
+// one image carries both sets of tools, so its one user — uid and gid 1000,
+// measured with `docker run --entrypoint id` (see databaseImageUser) — runs
+// them all. The per-database uids the vendor images needed (7474, 70) were uid
+// exceptions a restricted policy had to admit; their return would fail here.
 func TestTransientPodDeclaresANonRootUserForEveryService(t *testing.T) {
 	for _, service := range []string{serviceNeo4j, serviceTaskManagerDB} {
-		for _, role := range []workloadRole{workloadRoleProbe, workloadRoleCapture} {
+		for _, role := range []workloadRole{workloadRoleProbe, workloadRoleCapture, workloadRoleRestore} {
 			spec := testCaptureSpec()
 			spec.Service = service
 			spec.Role = role
@@ -363,6 +370,9 @@ func TestTransientPodDeclaresANonRootUserForEveryService(t *testing.T) {
 			uid, ok := user.(float64)
 			if !ok || uid <= 0 {
 				t.Errorf("%s/%s: runAsUser = %v, want a positive uid: zero is root, which runAsNonRoot forbids", service, role, user)
+			}
+			if uid != 1000 {
+				t.Errorf("%s/%s: runAsUser = %v, want 1000, the uid the infrahub-backup image declares, for every service and role (FR-033)", service, role, user)
 			}
 			if security["runAsGroup"] != user {
 				t.Errorf("%s/%s: runAsGroup = %v, want it paired with runAsUser %v", service, role, security["runAsGroup"], user)
@@ -420,7 +430,7 @@ func TestBuildTransientPodManifestRejects(t *testing.T) {
 		{
 			name:    "no image names the image flag",
 			mutate:  func(s *transientWorkloadSpec) { s.Image = "" },
-			wantMsg: "--external-db-image-neo4j",
+			wantMsg: "--external-db-image",
 		},
 		{
 			name:    "no namespace",
@@ -1161,6 +1171,7 @@ func TestTransientCredentials(t *testing.T) {
 // asserted: the probe workload is constructible before anything is known about
 // the store, which is what makes it able to go and find out.
 func TestProbeWorkloadSpecNeedsNoStoreSize(t *testing.T) {
+	withBuildVersion(t, "v2.3.0")
 	cfg := NewInfrahubOps().Config()
 	cfg.Neo4jUsername = "neo4j"
 	cfg.Neo4jPassword = "pw"
@@ -1176,8 +1187,8 @@ func TestProbeWorkloadSpecNeedsNoStoreSize(t *testing.T) {
 	if spec.Role != workloadRoleProbe {
 		t.Errorf("probe Role = %q", spec.Role)
 	}
-	if spec.Image != defaultExternalDBImageNeo4j {
-		t.Errorf("probe Image = %q, want the same pinned image the capture uses (%q)", spec.Image, defaultExternalDBImageNeo4j)
+	if want := "registry.opsmill.io/opsmill/infrahub-backup:2.3.0"; spec.Image != want {
+		t.Errorf("probe Image = %q, want the same image the capture uses, this release's own (%q)", spec.Image, want)
 	}
 	if want := externalDBProbeDeadline(cfg, 3); spec.Deadline != want {
 		t.Errorf("probe Deadline = %v, want %v", spec.Deadline, want)

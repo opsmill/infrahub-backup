@@ -85,10 +85,17 @@ Identity and lifecycle:
 - name prefix `infrahub-backup-xdb`, label `infrahub-backup/transient=true`, a run-ID label;
   `restartPolicy: Never`; `activeDeadlineSeconds` = readiness timeout + calls hosted × bound +
   margin (`externalDBWorkloadDeadline`).
-- images pinned in the binary (`neo4j:2025.10.1-enterprise`, `postgres:18-alpine`), overridable by
-  flag only; the pull is load-bearing (ADR 0008).
-- restricted pod-security context; the official images declare no user, so `runAsUser` is set
-  explicitly — see [container-image-user-semantics.md](container-image-user-semantics.md).
+- one image for both databases: `registry.opsmill.io/opsmill/infrahub-backup:<version>`, the
+  binary's own release (tag `v2.3.0` → image tag `2.3.0`), which carries `neo4j-admin`,
+  `cypher-shell` and the PostgreSQL 18 client (ADR 0017). Overridable by `--external-db-image`
+  only; the pull is load-bearing (ADR 0008). A development build (empty version, commit hash,
+  `git describe` output, build metadata — see `publishedImageTag`) has no default and is refused in
+  `externalCaptureOps`, before the reaper and before any service is stopped (FR-031).
+- restricted pod-security context; the image declares its user by name (`infrahub`), which the
+  kubelet cannot check `runAsNonRoot` against, so `runAsUser`, `runAsGroup` and `fsGroup` are set
+  to its uid 1000 for every role and database (FR-033) — see
+  [container-image-user-semantics.md](container-image-user-semantics.md). The vendor images this
+  replaced needed 7474 and 70.
 - a stray reaper deletes marker-labelled pods and Secrets from earlier runs that are terminated or
   past their deadline, before a new workload is created. A forbidden secrets listing is a warning,
   not a failure: owned Secrets go with their Job through the garbage collector.
@@ -109,7 +116,7 @@ equivalent with `-` → `_`) except where marked.
 | `--external-db-timeout` | 2h | yes | Bound on any single external operation |
 | `--external-db-insecure-tls` | false | yes | The only TLS opt-out (ADR 0015) |
 | `--allow-external-restore` | false | **separate channel** | Authorisation for a destructive external restore; the env key `INFRAHUB_ALLOW_EXTERNAL_RESTORE` is read on its own so flag and config are distinguishable (ADR 0014) |
-| `--external-db-image-neo4j`, `--external-db-image-postgres` | pinned | **no** | Tooling images; flag-only because the tool holds workload-creation rights |
+| `--external-db-image` | `infrahub-backup:<version>`; none on a development build | **no** | The workload's image; flag-only because the tool holds workload-creation rights |
 | `--external-db-image-pull-secrets`, `--external-db-service-account`, `--external-db-node-selector`, `--external-db-tolerations`, `--external-db-priority-class` | none | yes | What the operator's cluster requires of a pod it did not author |
 
 ## Prerequisites
@@ -122,7 +129,8 @@ Customer side (documented, verified by the end-to-end suite, not assumable by th
    credentials configured server-side for `CloudSeedProvider`.
 3. A privately signed server certificate has its CA recorded in the deployment (`_TLS_CA_FILE` or
    `sslrootcert`), or the operator opts out of verification.
-4. In an air-gapped cluster, the tooling image is mirrored and its pull secret named.
+4. In an air-gapped cluster, the `infrahub-backup` image at the binary's version is mirrored and
+   its pull secret named. It is the only image to mirror.
 
 Cluster side, in the Infrahub namespace: `create`, `get`, `delete` on jobs; `get`, `list`,
 `watch`, `delete` on pods; `create` on `pods/exec`. `watch` is needed by `kubectl wait`. `create`,

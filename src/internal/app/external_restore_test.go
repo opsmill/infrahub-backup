@@ -568,6 +568,9 @@ func TestRefuseUnfittableDump(t *testing.T) {
 // deadline covering the operations it hosts, and its credentials reaching it
 // through the secret rather than the manifest.
 func TestRestoreWorkloadSpec(t *testing.T) {
+	// A release's configuration, so the spec carries the default image; a
+	// development build has none and is refused before any spec is built.
+	withBuildVersion(t, "v2.3.0")
 	cfg := NewInfrahubOps().Config()
 	cfg.Neo4jUsername = "neo4j"
 	cfg.Neo4jPassword = "hunter2-not-in-the-manifest"

@@ -1017,18 +1017,21 @@ type neo4jCaptureRequest struct {
 // reason is a property of the vendor's own tooling rather than a preference.
 // Given that flag, `neo4j-admin` refuses to read any configuration file whose
 // permissions are looser than 0640 — and it reads both `neo4j.conf` and
-// `neo4j-admin.conf`, so tightening one is not enough. The images this tool
-// pins for the transient workload ship them world-writable: `neo4j:5-enterprise`
-// has `/var/lib/neo4j/conf/neo4j.conf` at 0777. Passing the flag there aborts
-// the capture *before the database is contacted*, reporting a file permission
-// the operator never set, in an image the operator did not build.
+// `neo4j-admin.conf`, so tightening one is not enough. The vendor image ships
+// them world-writable — `neo4j:5-enterprise` has `/var/lib/neo4j/conf/neo4j.conf`
+// at 0777 — and the infrahub-backup image the transient workload runs copies
+// that conf directory from `neo4j:2025.10.1-enterprise` unchanged, so
+// `/opt/neo4j/conf/neo4j.conf` is 0777 there too. Passing the flag aborts the
+// capture *before the database is contacted*, reporting a file permission the
+// operator never set, in an image the operator did not build.
 //
 // Nothing is lost by omitting it. The flag exists so that a deployment's own
 // configuration may hold command-valued settings for `neo4j-admin` to expand,
-// and the transient workload has no such configuration — it is a stock image
-// holding only the credentials it was given and the endpoint it was told to
-// read. The in-container path does run against the deployment's config, so it
-// keeps the flag, which is also what keeps its argv byte-identical (FR-015).
+// and the transient workload has no such configuration — its conf is the stock
+// one, and it holds only the credentials it was given and the endpoint it was
+// told to read. The in-container path does run against the deployment's config,
+// so it keeps the flag, which is also what keeps its argv byte-identical
+// (FR-015).
 //
 // Verified against real servers on 2026-09-03: with the flag, `neo4j:5-enterprise`
 // fails on config permissions; without it, the same argv completes a full remote

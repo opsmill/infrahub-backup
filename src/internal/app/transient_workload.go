@@ -151,7 +151,7 @@ const (
 // solve on its own: the scratch space must be sized from the server's store
 // size, queried before the capture begins, but a pod's storage sizing is fixed
 // when the pod is created and the only client that can query the server lives
-// in the pod. So a short probe workload — same pinned image, no scratch to
+// in the pod. So a short probe workload — same image, no scratch to
 // size, nothing to stage — answers the three questions that must be answered
 // before a capture pod can be built at all: the server's version (the FR-006
 // gate), the utility's version as shipped in that same image, and the store
@@ -577,44 +577,43 @@ type transientSecretManifest struct {
 func boolPtr(v bool) *bool    { return &v }
 func int64Ptr(v int64) *int64 { return &v }
 
-// databaseImageUser is the uid the pinned image's own database user has, and
-// the value the pod runs as. uid, gid and fsGroup are the same number in both
-// images, so one function supplies all three.
+// databaseImageUser is the uid the infrahub-backup image declares, and the
+// value the pod runs as for both roles and both databases. The image's
+// `adduser -D -u 1000 infrahub` gives the user a group of the same name and the
+// same number, so one value supplies runAsUser, runAsGroup and fsGroup (FR-033).
 //
-// This is where FR-027's tension resolves, and the resolution turns on a fact
-// about the images that is easy to assume and wrong. A restricted pod-security
-// policy wants runAsNonRoot, dropped capabilities and no privilege escalation;
-// the vendor documents the backup tooling as needing to run as the database's
-// own user. It is tempting to conclude that stating runAsNonRoot and leaving
-// runAsUser unset gets both — the container would then run as whatever
-// non-root user its image declares, without this tool naming a uid.
+// This is where FR-027's tension resolves. A restricted pod-security policy
+// wants runAsNonRoot, dropped capabilities and no privilege escalation. It is
+// tempting to conclude that stating runAsNonRoot and leaving runAsUser unset is
+// enough now that the image runs as a non-root user — the container would then
+// run as whatever user the image declares, without this tool naming a uid.
+// It is not enough, because of how the image declares it:
 //
-// The images declare no such user:
+//	$ docker image inspect infrahub-backup:<version> --format '{{.Config.User}}'
+//	infrahub
 //
-//	$ docker image inspect neo4j:2025.10.1-enterprise --format '{{.Config.User}}'
+// A name, not a number. The kubelet can only check runAsNonRoot against a
+// numeric uid; given a name and no runAsUser it cannot tell whether that name
+// is root inside the image, and refuses the container with
+// `CreateContainerConfigError: container has runAsNonRoot and image has
+// non-numeric user (infrahub), cannot verify user is non-root`. So the manifest
+// names the number:
 //
-//	$ docker image inspect postgres:18-alpine --format '{{.Config.User}}'
+//	$ docker run --rm --entrypoint id infrahub-backup:<version>
+//	uid=1000(infrahub) gid=1000(infrahub) groups=1000(infrahub)
 //
-// Both are empty, which means uid 0. Both images run as root and drop
-// privileges *inside their own entrypoint* — neo4j via
-// /startup/docker-entrypoint.sh, postgres via gosu — and Command below replaces
-// that entrypoint, so the drop never happens. runAsNonRoot with no runAsUser
-// therefore makes the kubelet resolve the effective user from the image config,
-// find root, and refuse the container with `CreateContainerConfigError:
-// container has runAsNonRoot and image will run as root`. Not on an edge case:
-// on every probe and capture pod, for both databases, on the shipped defaults.
 // See dev/knowledge/container-image-user-semantics.md.
 //
-// The uids are real users inside the images, they are just not declared to
-// Kubernetes, so the manifest has to name them:
+// The vendor images this replaced (ADR 0017) needed a uid per database — 7474
+// for neo4j, 70 for postgres — because both run as root and drop privileges in
+// an entrypoint that Command replaces. This image has one user for both sets of
+// tools and owns what they write: NEO4J_HOME's logs, data, run and conf
+// directories belong to uid 1000, so neo4j-admin finds the home it expects
+// owned by the user running it. No uid exception is needed for either database.
 //
-//	uid=7474(neo4j) gid=7474(neo4j), owning /var/lib/neo4j
-//	uid=70(postgres) gid=70(postgres), owning /var/lib/postgresql
-//
-// An operator-supplied image (--external-db-image-neo4j /
-// --external-db-image-postgres) may run its tooling as a different user, and
-// this tool cannot read an image's config from inside the cluster, so for that
-// image the value below is an assumption rather than a measurement. It is still
+// An operator-supplied image (--external-db-image) may run as a different user,
+// and this tool cannot read an image's config from inside the cluster, so for
+// that image the value is an assumption rather than a measurement. It is still
 // the right one to make, because of what a mismatch costs and does not cost:
 //
 //   - The scratch volume stays writable whatever the uid. The kubelet chowns
@@ -625,18 +624,10 @@ func int64Ptr(v int64) *int64 { return &v }
 //     user owns, and that fails loudly at the first tooling call, naming the
 //     path and the uid.
 //
-// Refusing every image but the pinned default was the alternative, and it takes
-// away the flag FR-027 explicitly allows. An operator whose image needs a
-// different uid must supply one whose database user matches the value here; if
-// that ever proves too narrow, the uid belongs beside the image as a flag of
-// its own rather than guessed differently.
-func databaseImageUser(service string) int64 {
-	if service == serviceTaskManagerDB {
-		return 70
-	}
-
-	return 7474
-}
+// An image built from this repository's Dockerfile — the case the flag exists
+// for, a mirror or a rebuild — has the same user, so for it the value is a
+// measurement again.
+const databaseImageUser int64 = 1000
 
 // buildTransientWorkloadManifest renders the Job which owns the execution pod. It
 // is pure over its spec: no
@@ -671,7 +662,6 @@ func buildTransientWorkloadManifest(spec transientWorkloadSpec) ([]byte, error) 
 	// the scratch volume it is supposed to sit above, which is the exact
 	// inversion the margin exists to prevent.
 	limit := formatGiB(saturatingAdd(scratch, transientScratchLimitMargin))
-	imageUser := databaseImageUser(spec.Service)
 	credentialEnv, credentialEnvFrom := spec.credentialEnvironment()
 
 	manifest := transientJobManifest{
@@ -718,14 +708,14 @@ func buildTransientWorkloadManifest(spec transientWorkloadSpec) ([]byte, error) 
 					// runAsUser is stated, not inferred: see databaseImageUser for
 					// why leaving it to the image makes the kubelet refuse every one
 					// of these pods. runAsGroup pairs with it so the staged artefact
-					// is owned by the database's own user and group, and fsGroup is
+					// is owned by the image's own user and group, and fsGroup is
 					// what makes the scratch volume writable even where the uid turns
 					// out not to match the image's.
 					SecurityContext: &transientPodSecurityContext{
 						RunAsNonRoot:        boolPtr(true),
-						RunAsUser:           int64Ptr(imageUser),
-						RunAsGroup:          int64Ptr(imageUser),
-						FSGroup:             int64Ptr(imageUser),
+						RunAsUser:           int64Ptr(databaseImageUser),
+						RunAsGroup:          int64Ptr(databaseImageUser),
+						FSGroup:             int64Ptr(databaseImageUser),
 						FSGroupChangePolicy: "OnRootMismatch",
 						SeccompProfile:      &transientSeccompProfile{Type: "RuntimeDefault"},
 					},
@@ -846,7 +836,7 @@ func (s transientWorkloadSpec) validate() error {
 	case s.Role != workloadRoleProbe && s.Role != workloadRoleCapture && s.Role != workloadRoleRestore:
 		return fmt.Errorf("cannot build a transient workload with role %q: the roles are %s, %s and %s", s.Role, workloadRoleProbe, workloadRoleCapture, workloadRoleRestore)
 	case strings.TrimSpace(s.Image) == "":
-		return fmt.Errorf("cannot build the transient %s workload without an image: supply %s", s.Service, versionImageFlag(s.Service))
+		return fmt.Errorf("cannot build the transient %s workload without an image: supply %s", s.Service, externalDBImageOption)
 	case strings.TrimSpace(s.Namespace) == "":
 		return fmt.Errorf("cannot build the transient %s workload without a namespace", s.Service)
 	case strings.TrimSpace(s.ScratchSize) == "":
@@ -1787,7 +1777,7 @@ func newTransientWorkloadSpec(cfg *Configuration, namespace, runID, service stri
 		RunID:       runID,
 		Service:     service,
 		Role:        role,
-		Image:       transientImage(cfg, service),
+		Image:       transientImage(cfg),
 		Namespace:   namespace,
 		ScratchSize: scratch,
 		Deadline:    deadline,
@@ -2027,16 +2017,15 @@ func (iops *InfrahubOps) copyAcrossTransientWorkload(direction transientCopy, po
 	return wrapExternalTimeout(err, bound, direction.operation, "pod "+pod)
 }
 
-// transientImage is the tooling image for a service: the pinned default or the
+// transientImage is the image every transient workload runs, whichever database
+// it stands in for: this tool's own image at the binary's version, or the
 // operator's explicit flag, and nothing else. FR-027 makes this deliberate —
 // the tool holds workload-creation rights, so an image taken from ambient
 // environment would turn those rights into a way of running arbitrary images.
-func transientImage(cfg *Configuration, service string) string {
-	if service == serviceTaskManagerDB {
-		return cfg.ExternalDB.ImagePostgres
-	}
-
-	return cfg.ExternalDB.ImageNeo4j
+// It takes no service because there is no longer a per-database image to
+// choose (FR-031): the one image carries both databases' tools.
+func transientImage(cfg *Configuration) string {
+	return cfg.ExternalDB.Image
 }
 
 // CreateTransientWorkload creates a workload, waits for it to be usable, and

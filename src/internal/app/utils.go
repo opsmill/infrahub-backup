@@ -8,8 +8,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"strings"
+
+	"golang.org/x/mod/semver"
 )
 
 // Version can be set via SetVersion from main packages using ldflags
@@ -18,6 +21,60 @@ var version string
 // SetVersion allows main packages to set the version from ldflags
 func SetVersion(v string) {
 	version = v
+}
+
+// publishedImageTag is the tag under which the release workflow published the
+// image for build version v, and whether one was published at all.
+//
+// A release sets main.version from the release's git tag (`make build-all
+// VERSION=v2.3.0`), and the image job pushes the same release under the tag
+// with its leading "v" stripped (`infrahub-backup:2.3.0`). So the tag is the
+// version without its "v", and only a version shaped like a release tag has
+// one. A tag written without the "v" is accepted too, because `make build
+// VERSION=2.3.0` names the same release.
+//
+// Anything else is a development build: an empty version (a plain `go build`
+// or `make build`, where BuildRevision falls back to the commit hash), a commit
+// hash, a `git describe` string, or a version carrying build metadata such as
+// `+dirty`. Those have no published image, and guessing one — `latest`, or the
+// nearest release — would run tooling whose version nobody chose, in the
+// customer's namespace, from a binary that may not match it (FR-031).
+// Canonical form is required for the same reason: semver accepts "v2.3" as
+// "v2.3.0", but no image was ever pushed as `2.3`.
+func publishedImageTag(v string) (string, bool) {
+	tagged := v
+	if !strings.HasPrefix(tagged, "v") {
+		tagged = "v" + tagged
+	}
+	if !semver.IsValid(tagged) || semver.Canonical(tagged) != tagged {
+		return "", false
+	}
+	// `git describe --tags --dirty` output is valid semver — "v2.3.0-4-gea1d73b"
+	// parses as a pre-release of 2.3.0 — but it names a commit after a release,
+	// which no image was pushed for. A published pre-release ("v2.4.0-rc.1")
+	// passes; only describe's own suffixes are refused.
+	if gitDescribeSuffix.MatchString(semver.Prerelease(tagged)) {
+		return "", false
+	}
+
+	return strings.TrimPrefix(tagged, "v"), true
+}
+
+// gitDescribeSuffix matches the pre-release part `git describe` appends to a
+// tag: commits since the tag and an abbreviated hash, and/or a dirty marker.
+var gitDescribeSuffix = regexp.MustCompile(`(^-[0-9]+-g[0-9a-f]+(-dirty)?$)|(-dirty$)`)
+
+// defaultExternalDBImage is this tool's own image at the running binary's
+// version, or empty on a development build, which has none (FR-031). It is
+// read when the configuration is built, which every binary does after
+// SetVersion.
+func defaultExternalDBImage() string {
+	tag, ok := publishedImageTag(version)
+	if !ok {
+		return ""
+	}
+
+	return externalDBImageRepository + ":" + tag
 }
 
 // Utility functions

@@ -1202,7 +1202,7 @@ func TestPrepareExternalSourceWithSequencesTheGate(t *testing.T) {
 		if err == nil {
 			t.Fatal("prepareExternalSourceWith() = nil, want the FR-006 abort")
 		}
-		if !strings.Contains(err.Error(), versionImageFlag(serviceNeo4j)) {
+		if !strings.Contains(err.Error(), externalDBImageOption) {
 			t.Errorf("err = %v, want it to name the flag that fixes it", err)
 		}
 		if contains(recorder.steps, "start-capture(size=0)") {

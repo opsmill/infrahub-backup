@@ -488,6 +488,15 @@ func (iops *InfrahubOps) externalCaptureOps() (externalCaptureOps, error) {
 		return externalCaptureOps{}, err
 	}
 
+	// Also before the reaper, and for the same reason: a run with no image to
+	// give a workload cannot create one, so it must not delete anything either.
+	// Being here rather than in the spec builder is what makes the refusal land
+	// before the first kubectl write instead of at the first create, after the
+	// reaper's deletes (FR-031).
+	if err := refuseUnpublishedExternalDBImage(iops.config); err != nil {
+		return externalCaptureOps{}, err
+	}
+
 	runID, err := iops.externalRunID()
 	if err != nil {
 		return externalCaptureOps{}, err
@@ -588,6 +597,42 @@ func (iops *InfrahubOps) refuseForbiddenExternalCapture(namespace string) error 
 			"infrahub-collect never creates, deletes or scales a workload, so it will not take this backup. "+
 			"Take it with `infrahub-backup create`, which performs the external capture, and re-run the collection without --include-backup for the diagnostics themselves",
 		namespace)
+}
+
+// refuseUnpublishedExternalDBImage turns back a run that would have to create a
+// transient workload without an image for it: a development build, which has
+// no published image of its own, given no --external-db-image (FR-031).
+//
+// The default is this tool's image at the binary's version, and a development
+// build has no version an image was published under (see publishedImageTag).
+// Substituting `latest` or the nearest release would run tooling nobody chose
+// against a binary it may not match, so the operator is asked to choose.
+//
+// It is reached through externalCaptureOps, which every external capture and
+// restore passes through after the gate has settled where each database lives
+// and before any Infrahub service is stopped — so the run ends with nothing
+// created, nothing deleted and nothing stopped, which the message states.
+func refuseUnpublishedExternalDBImage(cfg *Configuration) error {
+	if cfg != nil && strings.TrimSpace(cfg.ExternalDB.Image) != "" {
+		return nil
+	}
+
+	// A released binary has a default, so an empty image there can only be the
+	// flag given an empty value. Calling that a development build would send
+	// the operator after the wrong cause.
+	if _, published := publishedImageTag(version); published {
+		return fmt.Errorf(
+			"a database this run must reach does not run in this deployment, and reaching it means running a transient workload, "+
+				"but %s was given an empty value; omit it to run this release's own image, or name an image. Nothing was created or stopped",
+			externalDBImageOption)
+	}
+
+	return fmt.Errorf(
+		"a database this run must reach does not run in this deployment, and reaching it means running a transient workload, "+
+			"but this is a development build of infrahub-backup (version %q), which has no published image for that workload to run; "+
+			"supply %s with an image built from this repository's Dockerfile, or use a released infrahub-backup. "+
+			"Nothing was created or stopped",
+		BuildRevision(), externalDBImageOption)
 }
 
 // externalRunID is the identifier every transient object this run creates is
@@ -878,7 +923,7 @@ func (iops *InfrahubOps) probeUtilityVersion(opts *ExecOptions, endpoint *Databa
 		command, opts,
 	)
 	if err != nil {
-		return "", fmt.Errorf("failed to read the version of %s in the transient %s workload's image: supply %s with an image that carries it: %w", command[0], endpoint.Service, versionImageFlag(endpoint.Service), err)
+		return "", fmt.Errorf("failed to read the version of %s in the transient %s workload's image: supply %s with an image that carries it: %w", command[0], endpoint.Service, externalDBImageOption, err)
 	}
 
 	version, err := extractVersionToken(output)

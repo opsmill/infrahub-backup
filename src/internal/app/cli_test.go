@@ -3,6 +3,7 @@ package app
 import (
 	"io"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,7 +12,7 @@ import (
 )
 
 // externalDBEnvVars are the environment variables that can reach the external
-// database configuration, including the two that must not (FR-027). Every test
+// database configuration, including the one that must not (FR-027). Every test
 // starts with all of them absent, so a value in the developer's or CI runner's
 // environment cannot decide the outcome.
 var externalDBEnvVars = []string{
@@ -21,8 +22,7 @@ var externalDBEnvVars = []string{
 	"INFRAHUB_EXTERNAL_DB_SCRATCH_SIZE",
 	"INFRAHUB_EXTERNAL_DB_TIMEOUT",
 	"INFRAHUB_EXTERNAL_DB_INSECURE_TLS",
-	"INFRAHUB_EXTERNAL_DB_IMAGE_NEO4J",
-	"INFRAHUB_EXTERNAL_DB_IMAGE_POSTGRES",
+	"INFRAHUB_EXTERNAL_DB_IMAGE",
 	"INFRAHUB_EXTERNAL_DB_IMAGE_PULL_SECRETS",
 	"INFRAHUB_EXTERNAL_DB_SERVICE_ACCOUNT",
 	"INFRAHUB_EXTERNAL_DB_NODE_SELECTOR",
@@ -216,11 +216,8 @@ func TestExternalDBFlagDefaults(t *testing.T) {
 	if cfg.ExternalDB.Timeout != defaultExternalDBTimeout {
 		t.Errorf("Timeout = %v, want %v", cfg.ExternalDB.Timeout, defaultExternalDBTimeout)
 	}
-	if cfg.ExternalDB.ImageNeo4j != defaultExternalDBImageNeo4j {
-		t.Errorf("ImageNeo4j = %q, want %q", cfg.ExternalDB.ImageNeo4j, defaultExternalDBImageNeo4j)
-	}
-	if cfg.ExternalDB.ImagePostgres != defaultExternalDBImagePostgres {
-		t.Errorf("ImagePostgres = %q, want %q", cfg.ExternalDB.ImagePostgres, defaultExternalDBImagePostgres)
+	if cfg.ExternalDB.Image != defaultExternalDBImage() {
+		t.Errorf("Image = %q, want %q", cfg.ExternalDB.Image, defaultExternalDBImage())
 	}
 	if cfg.ExternalDB.Neo4jAddress != "" || cfg.ExternalDB.PostgresAddress != "" {
 		t.Errorf("addresses = %q/%q, want both empty", cfg.ExternalDB.Neo4jAddress, cfg.ExternalDB.PostgresAddress)
@@ -243,8 +240,7 @@ func TestExternalDBFlagsFromCommandLine(t *testing.T) {
 		"--postgres-address", "pg.example.net:5433",
 		"--external-db-scratch-size", "80Gi",
 		"--external-db-timeout", "45m",
-		"--external-db-image-neo4j", "registry.example.net/neo4j:5.26.0-enterprise",
-		"--external-db-image-postgres", "registry.example.net/postgres:18-alpine",
+		"--external-db-image", "registry.example.net/infrahub-backup:2.3.0",
 	)
 
 	tests := []struct {
@@ -255,8 +251,7 @@ func TestExternalDBFlagsFromCommandLine(t *testing.T) {
 		{"Neo4jAddress", cfg.ExternalDB.Neo4jAddress, "db-a:7688,db-b"},
 		{"PostgresAddress", cfg.ExternalDB.PostgresAddress, "pg.example.net:5433"},
 		{"ScratchSize", cfg.ExternalDB.ScratchSize, "80Gi"},
-		{"ImageNeo4j", cfg.ExternalDB.ImageNeo4j, "registry.example.net/neo4j:5.26.0-enterprise"},
-		{"ImagePostgres", cfg.ExternalDB.ImagePostgres, "registry.example.net/postgres:18-alpine"},
+		{"Image", cfg.ExternalDB.Image, "registry.example.net/infrahub-backup:2.3.0"},
 	}
 	for _, tt := range tests {
 		if tt.got != tt.want {
@@ -303,38 +298,74 @@ func TestExternalDBFlagsFromEnvironment(t *testing.T) {
 
 // TestExternalDBImagesIgnoreEnvironment is FR-027's flag-layer guarantee: the
 // tool holds workload-creation rights in the customer's namespace, so the image
-// it runs there resolves from the pinned default or an explicit flag and never
-// from ambient environment. The image flags break the binding convention every
+// it runs there resolves from its default or an explicit flag and never from
+// ambient environment. The image flag breaks the binding convention every
 // other flag follows, which is exactly why it is asserted rather than assumed.
+//
+// The environment carries the variable the binding convention would give the
+// one flag and the two the flags it replaced (FR-031) once had, so a binding
+// added back under either name is caught.
 func TestExternalDBImagesIgnoreEnvironment(t *testing.T) {
+	withBuildVersion(t, "v2.3.0")
+
 	env := map[string]string{
+		"INFRAHUB_EXTERNAL_DB_IMAGE":          "attacker.example.net/anything:latest",
 		"INFRAHUB_EXTERNAL_DB_IMAGE_NEO4J":    "attacker.example.net/anything:latest",
 		"INFRAHUB_EXTERNAL_DB_IMAGE_POSTGRES": "attacker.example.net/anything:latest",
 	}
+	const released = "registry.opsmill.io/opsmill/infrahub-backup:2.3.0"
 
-	t.Run("environment alone leaves the pinned defaults", func(t *testing.T) {
+	t.Run("environment alone leaves the default", func(t *testing.T) {
 		cfg := configureRootCommand(t, env)
 
-		if cfg.ExternalDB.ImageNeo4j != defaultExternalDBImageNeo4j {
-			t.Errorf("ImageNeo4j = %q, want the pinned %q", cfg.ExternalDB.ImageNeo4j, defaultExternalDBImageNeo4j)
-		}
-		if cfg.ExternalDB.ImagePostgres != defaultExternalDBImagePostgres {
-			t.Errorf("ImagePostgres = %q, want the pinned %q", cfg.ExternalDB.ImagePostgres, defaultExternalDBImagePostgres)
+		if cfg.ExternalDB.Image != released {
+			t.Errorf("Image = %q, want the release's own %q", cfg.ExternalDB.Image, released)
 		}
 	})
 
 	t.Run("an explicit flag still decides", func(t *testing.T) {
 		cfg := configureRootCommand(t, env,
-			"--external-db-image-neo4j", "registry.example.net/neo4j:5.26.0-enterprise",
+			"--external-db-image", "registry.example.net/infrahub-backup:2.3.0",
 		)
 
-		if cfg.ExternalDB.ImageNeo4j != "registry.example.net/neo4j:5.26.0-enterprise" {
-			t.Errorf("ImageNeo4j = %q, want the flag's value", cfg.ExternalDB.ImageNeo4j)
-		}
-		if cfg.ExternalDB.ImagePostgres != defaultExternalDBImagePostgres {
-			t.Errorf("ImagePostgres = %q, want the pinned %q", cfg.ExternalDB.ImagePostgres, defaultExternalDBImagePostgres)
+		if cfg.ExternalDB.Image != "registry.example.net/infrahub-backup:2.3.0" {
+			t.Errorf("Image = %q, want the flag's value", cfg.ExternalDB.Image)
 		}
 	})
+
+	t.Run("a development build gets no image from the environment either", func(t *testing.T) {
+		withBuildVersion(t, "")
+		cfg := configureRootCommand(t, env)
+
+		if cfg.ExternalDB.Image != "" {
+			t.Errorf("Image = %q on a development build, want it empty so the external gate refuses", cfg.ExternalDB.Image)
+		}
+	})
+}
+
+// TestExternalDBImageIsOneUnboundFlag is T164: one --external-db-image replaces
+// the per-database pair (FR-031), and it is the flag viper does not know about.
+// Asserting viper's own registry rather than only the resolved value is what
+// catches a binding that some later default happens to mask.
+func TestExternalDBImageIsOneUnboundFlag(t *testing.T) {
+	root, _ := newConfiguredRootCommand(t, nil)
+
+	if root.PersistentFlags().Lookup(ExternalDBImageFlag) == nil {
+		t.Fatalf("--%s is not registered", ExternalDBImageFlag)
+	}
+	for _, gone := range []string{"external-db-image-neo4j", "external-db-image-postgres"} {
+		if root.PersistentFlags().Lookup(gone) != nil {
+			t.Errorf("--%s is still registered; FR-031 replaces it with --%s", gone, ExternalDBImageFlag)
+		}
+	}
+	for _, key := range viper.AllKeys() {
+		if strings.HasPrefix(key, "external-db-image") && key != "external-db-image-pull-secrets" {
+			t.Errorf("viper key %q is bound; the workload image must not be settable from the environment (FR-027)", key)
+		}
+	}
+	if viper.IsSet(ExternalDBImageFlag) {
+		t.Errorf("viper reports %q as set; it must not be bound at all (FR-027)", ExternalDBImageFlag)
+	}
 }
 
 // TestExternalDBSchedulingFlags is T111 at the flag layer. The image flags are

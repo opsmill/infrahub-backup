@@ -46,6 +46,25 @@ Two consequences, and the second is the one that bites:
 A manifest that overrides the entrypoint *and* asserts `runAsNonRoot` without `runAsUser` combines
 both, which is how spec 007 produced a workload that could never start.
 
+## An image that declares its user by name
+
+Since ADR 0017 the transient workload runs the `infrahub-backup` image instead of the vendor
+images. That image does declare a non-root user, but by name:
+
+```console
+$ docker image inspect infrahub-backup:<version> --format '{{.Config.User}}'
+infrahub
+
+$ docker run --rm --entrypoint id infrahub-backup:<version>
+uid=1000(infrahub) gid=1000(infrahub) groups=1000(infrahub)
+```
+
+The kubelet checks `runAsNonRoot` against a numeric uid only. With a named user and no
+`runAsUser`, it refuses the container with `CreateContainerConfigError: container has runAsNonRoot
+and image has non-numeric user (infrahub), cannot verify user is non-root`. So `runAsUser` stays
+explicit, set to 1000 with `runAsGroup` and `fsGroup` (FR-033, `databaseImageUser`). The value is
+the same for both databases, because one image carries both sets of tools.
+
 ## What to do instead
 
 - If the pod must satisfy a restricted pod-security policy, set `runAsUser` **explicitly**. Do not

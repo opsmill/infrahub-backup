@@ -58,15 +58,18 @@ const (
 	// cannot hang a restore while Infrahub is scaled down.
 	defaultExternalDBTimeout = 2 * time.Hour
 
-	// defaultExternalDBImageNeo4j and defaultExternalDBImagePostgres are the
-	// pinned images supplying the database tooling for a transient workload.
-	// They track the images Infrahub itself deploys, with the Neo4j one on the
-	// enterprise tag because the backup mechanism is an Enterprise feature.
-	// Pinned rather than floating, and settable by flag only (see
-	// ConfigureRootCommand), because the tool holds workload-creation rights
-	// (FR-027).
-	defaultExternalDBImageNeo4j    = "neo4j:2025.10.1-enterprise"
-	defaultExternalDBImagePostgres = "postgres:18-alpine"
+	// externalDBImageRepository is where the release workflow publishes this
+	// tool's own image. The transient workload runs that image (FR-031, ADR
+	// 0017): it carries neo4j-admin, cypher-shell and the PostgreSQL client
+	// at versions the Dockerfile pins, so one tag names one tool set and an
+	// air-gapped operator mirrors one image rather than two vendor ones. See
+	// defaultExternalDBImage for how the tag is chosen.
+	externalDBImageRepository = "registry.opsmill.io/opsmill/infrahub-backup"
+
+	// ExternalDBImageFlag selects the transient workload's image. It is the one
+	// image flag, settable by flag only (see ConfigureRootCommand), because the
+	// tool holds workload-creation rights (FR-027).
+	ExternalDBImageFlag = "external-db-image"
 )
 
 // ExternalRestoreAuthSource names the channel that supplied an external-restore
@@ -140,7 +143,7 @@ type ExternalDBTLS struct {
 // are all internal never consults it (FR-015). Each field is either an operator
 // override of a value discovery supplies, a setting discovery reads from the
 // deployment's running components, or -- for the backup port and the tooling
-// images -- a value discovery cannot supply at all.
+// image -- a value discovery cannot supply at all.
 type ExternalDBConfig struct {
 	// Neo4jAddress overrides the discovered Neo4j host list. It takes the same
 	// host[:port][,host[:port]...] shape as Infrahub's own INFRAHUB_DB_ADDRESS,
@@ -165,10 +168,11 @@ type ExternalDBConfig struct {
 	// therefore the one this tool's client needs. It is read, never obeyed, for
 	// the same FR-029 reason Neo4jTLS is.
 	PostgresTLS ExternalDBTLS
-	// ImageNeo4j and ImagePostgres are the images supplying the database tooling
-	// for the transient workload.
-	ImageNeo4j    string
-	ImagePostgres string
+	// Image is the image the transient workload runs, for both databases: this
+	// tool's own image at the running binary's version unless --external-db-image
+	// says otherwise. Empty on a development build that was given no flag, which
+	// the external path refuses (see refuseUnpublishedExternalDBImage).
+	Image string
 	// ScratchSize is the scratch space granted to the transient workload, e.g.
 	// 50Gi. Empty means derive it from the store size queried before the capture
 	// (FR-022).
@@ -377,8 +381,7 @@ func NewInfrahubOps() *InfrahubOps {
 		Plakar:  &PlakarConfig{},
 		ExternalDB: ExternalDBConfig{
 			Neo4jBackupPort: defaultNeo4jBackupPort,
-			ImageNeo4j:      defaultExternalDBImageNeo4j,
-			ImagePostgres:   defaultExternalDBImagePostgres,
+			Image:           defaultExternalDBImage(),
 			Timeout:         defaultExternalDBTimeout,
 		},
 	}

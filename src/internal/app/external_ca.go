@@ -79,8 +79,8 @@ const (
 	externalCATrustStoreAlias = "infrahub-external-ca"
 
 	// postgresSystemTrustStore is libpq's own name for "verify against the
-	// image's trust store" (PostgreSQL 16 and later, which the pinned
-	// defaultExternalDBImagePostgres is). Naming it explicitly is what makes
+	// image's trust store" (PostgreSQL 16 and later; the infrahub-backup image
+	// pins the PostgreSQL 18 client). Naming it explicitly is what makes
 	// verify-full satisfiable: left unset, libpq looks for
 	// ~/.postgresql/root.crt and fails on its absence rather than falling back
 	// to anything.

@@ -163,13 +163,18 @@ func ConfigureRootCommand(cmd *cobra.Command, app *InfrahubOps) {
 	// flag through a variable loses that.
 	cmd.PersistentFlags().Bool(AllowExternalRestoreFlag, false, "Authorise a destructive restore into a database the deployment does not manage (distinct from --force)")
 
-	// The image flags are deliberately not bound to viper below, so they resolve
-	// from their pinned default or an explicitly supplied flag and never from
-	// ambient environment (FR-027): the tool holds workload-creation rights in
-	// the deployment, and an environment-settable image would turn those rights
-	// into a means of running an arbitrary image in the customer's namespace.
-	cmd.PersistentFlags().StringVar(&cfg.ExternalDB.ImageNeo4j, "external-db-image-neo4j", cfg.ExternalDB.ImageNeo4j, "Image supplying the Neo4j administration tooling for the transient workload")
-	cmd.PersistentFlags().StringVar(&cfg.ExternalDB.ImagePostgres, "external-db-image-postgres", cfg.ExternalDB.ImagePostgres, "Image supplying the PostgreSQL client tooling for the transient workload")
+	// The image flag is deliberately not bound to viper below, so it resolves
+	// from its default or an explicitly supplied flag and never from ambient
+	// environment (FR-027): the tool holds workload-creation rights in the
+	// deployment, and an environment-settable image would turn those rights into
+	// a means of running an arbitrary image in the customer's namespace.
+	//
+	// One flag for both databases, because both run the same image: this tool's
+	// own, which carries every database tool the external path calls (FR-031,
+	// ADR 0017). Its default is that image at this binary's version, and a
+	// development build has none — the help text says so rather than showing an
+	// empty default an operator would read as "unset is fine".
+	cmd.PersistentFlags().StringVar(&cfg.ExternalDB.Image, ExternalDBImageFlag, cfg.ExternalDB.Image, "Image the transient workload runs to reach an external database; required on a development build, which has no published image")
 
 	bind := func(name string) {
 		if err := viper.BindPFlag(name, cmd.PersistentFlags().Lookup(name)); err != nil {
@@ -199,8 +204,7 @@ func ConfigureRootCommand(cmd *cobra.Command, app *InfrahubOps) {
 	// flag and INFRAHUB_ALLOW_EXTERNAL_RESTORE through one key, and FR-010 turns
 	// on telling them apart, so resolveExternalRestoreAuth reads each channel
 	// itself.
-	// --external-db-image-neo4j and --external-db-image-postgres are not bound;
-	// see FR-027 at their registration above.
+	// --external-db-image is not bound; see FR-027 at its registration above.
 
 	// The resolution hangs on the command it configures rather than going
 	// through cobra.OnInitialize.

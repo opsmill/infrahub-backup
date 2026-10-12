@@ -1037,7 +1037,7 @@ func flagEnvVar(flag string) string {
 // The repository's other version comparison, in internal/updater, is strict
 // semver over this tool's own release tags. It is deliberately not reused here:
 // it requires a leading "v", has no notion of calendar versioning, and would
-// read the "-enterprise" of the pinned image tag as a pre-release — see
+// read the "-enterprise" of an image tag as a pre-release — see
 // prereleaseMarkers for why that particular reading would abort working runs.
 
 // versionScheme is the numbering scheme a database version belongs to.
@@ -1068,9 +1068,9 @@ const calendarYearFloor = 2000
 // all", because the qualifiers this project meets most are -enterprise,
 // -community and -alpine, which say which build of a release an image carries
 // rather than that it precedes one. Ranking those below the bare numbers, the
-// way semver ranks any pre-release, would make the pinned
-// neo4j:2025.10.1-enterprise tooling older than a 2025.10.1 server and abort a
-// run that would have worked.
+// way semver ranks any pre-release, would make neo4j:2025.10.1-enterprise
+// tooling — the build the infrahub-backup image copies its Neo4j tools from —
+// older than a 2025.10.1 server and abort a run that would have worked.
 var prereleaseMarkers = []string{"alpha", "beta", "rc", "preview", "snapshot"}
 
 // databaseVersion is a database version parsed far enough to be ordered.
@@ -1087,7 +1087,7 @@ type databaseVersion struct {
 	// fields are the numeric components in the order they were written, only as
 	// many as the version states. They are deliberately not padded to three: a
 	// version that stops at its major states nothing about a minor, and reading
-	// the absent field as zero is what would make the pinned postgres:18-alpine
+	// the absent field as zero is what would make a postgres:18-alpine image's
 	// tooling look older than the 18.1 server it reads perfectly well.
 	fields []int
 
@@ -1295,7 +1295,10 @@ func checkVersionCompatibility(service, utilityVersion, serverVersion string) er
 	// comparison happens to make of them.
 	switch ordering := comparedAt(service, utility).compare(comparedAt(service, server)); {
 	case ordering < 0:
-		return fmt.Errorf("the %s utility (%s) is older than the server (%s): supply %s with an image whose tooling is at least as new as the server", service, utility, server, versionImageFlag(service))
+		// The image carries this tool's pinned tooling, so the usual remedy is a
+		// newer release of this tool; the flag is the remedy when the operator
+		// builds or mirrors the image themselves.
+		return fmt.Errorf("the %s utility (%s) is older than the server (%s): use an infrahub-backup release whose image carries tooling at least as new as the server, or supply %s with an image whose tooling is at least as new as the server", service, utility, server, externalDBImageOption)
 	case ordering > 0:
 		logrus.Warnf("The %s utility (%s) is newer than the server (%s); continuing, since no documented rule forbids that direction", service, utility, server)
 	default:
@@ -1316,16 +1319,11 @@ func comparedAt(service string, version databaseVersion) databaseVersion {
 	return version
 }
 
-// versionImageFlag names the flag that selects the tooling image for a service,
-// so an abort tells the operator which end to move rather than only that the two
-// versions disagree.
-func versionImageFlag(service string) string {
-	if service == serviceTaskManagerDB {
-		return "--external-db-image-postgres"
-	}
-
-	return "--external-db-image-neo4j"
-}
+// externalDBImageOption is the flag that selects the transient workload's image,
+// as an operator types it, so an abort tells the operator which end to move
+// rather than only that the two versions disagree. There is one for both
+// databases, because both run the same image (FR-031).
+const externalDBImageOption = "--" + ExternalDBImageFlag
 
 // ---------------------------------------------------------------------------
 // Certificate verification (FR-029)

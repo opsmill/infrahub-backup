@@ -154,8 +154,8 @@ privately issued certificate verifies without any action from you:
 - For Neo4j, it reads the certificate authority named by `INFRAHUB_DB_TLS_CA_FILE` out of the
   Infrahub server container and installs it where the client looks.
 - For PostgreSQL, it reads the `sslrootcert` named by the task manager connection URL. Where the
-  deployment names none, the client falls back to the tooling image's own trust store, which is
-  what lets a publicly issued certificate verify.
+  deployment names none, the client falls back to the trust store in the `infrahub-backup` image,
+  which is what lets a publicly issued certificate verify.
 
 If verification cannot succeed — the certificate is issued by an authority your deployment does not
 record, or the server offers no TLS at all — opt out explicitly:
@@ -201,26 +201,33 @@ scheduled restore is the only way an unattended destructive restore into an exte
 happen — so set it deliberately, and review it when you review the schedule.
 :::
 
-## Step 5: Make the tooling image reachable
+## Step 5: Make the `infrahub-backup` image reachable
 
-Capturing an external database runs vendor tooling in a transient pod, so that pod's image has to
-be pulled. Unlike the opt-in benchmark in `infrahub-collect`, this pull cannot be skipped: without
-it there is no client to reach the database with, and a pull that fails is a failed backup.
+Capturing an external database runs `neo4j-admin`, `cypher-shell` and the PostgreSQL client in a
+transient pod. That pod runs the `infrahub-backup` image at the version of the binary you run: a
+`2.3.0` binary runs `registry.opsmill.io/opsmill/infrahub-backup:2.3.0`. The image carries the
+database tools at versions it pins, so the pod needs no other image. Unlike the opt-in benchmark in
+`infrahub-collect`, this pull cannot be skipped: without it there is no client to reach the
+database with, and a pull that fails is a failed backup.
 
-If your cluster pulls from public registries, the pinned defaults work and you need nothing here.
-If it does not, mirror the images into a registry the cluster can reach and name them:
+If your cluster can pull from `registry.opsmill.io`, you need nothing here. If it cannot, mirror
+the `infrahub-backup` image at your binary's version into a registry the cluster can reach, and
+name it:
 
 ```bash
 infrahub-backup create \
   --k8s-namespace infrahub \
-  --external-db-image-neo4j registry.example.com/neo4j:2025.10.1-enterprise \
-  --external-db-image-postgres registry.example.com/postgres:18-alpine \
+  --external-db-image registry.example.com/opsmill/infrahub-backup:2.3.0 \
   --external-db-image-pull-secrets my-registry-credentials
 ```
 
-The two image flags accept no environment variable, by design — the tool can create workloads in
-your namespace, so an image settable from ambient environment would turn that into a way to run
-arbitrary code there. Supply them on the command line.
+`--external-db-image` accepts no environment variable, by design — the tool can create workloads
+in your namespace, so an image settable from ambient environment would turn that into a way to run
+arbitrary code there. Supply it on the command line.
+
+A build of `infrahub-backup` that is not a release, such as one built from a source checkout, has
+no published image. It refuses to back up or restore an external database until you name one with
+`--external-db-image`, for example an image you built from the repository's `Dockerfile`.
 
 If your namespace admits a pod only under particular placement rules, the remaining flags cover
 them, and each is also settable through the environment:
@@ -290,9 +297,16 @@ Move the database inside the deployment, or move to Enterprise.
 
 ### The capture is refused on version compatibility
 
-The tooling image is older than the server. A newer client reads an older server, so the tool
-aborts in that direction and only warns in the other. Point `--external-db-image-neo4j` or
-`--external-db-image-postgres` at an image at least as new as your server.
+The database tools in the `infrahub-backup` image are older than the server. A newer client reads
+an older server, so the tool aborts in that direction and only warns in the other. Use an
+`infrahub-backup` release whose image carries tools at least as new as your server, or point
+`--external-db-image` at an image that does.
+
+### The run is refused as a development build
+
+The `infrahub-backup` binary you ran is not a release, so no image was published for its version.
+Nothing was created or stopped. Name an image with `--external-db-image`, or run a released
+`infrahub-backup`.
 
 ### The transient pod never becomes ready
 

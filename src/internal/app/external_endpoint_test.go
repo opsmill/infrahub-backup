@@ -1133,15 +1133,16 @@ func TestCheckVersionCompatibility(t *testing.T) {
 }
 
 // TestCheckVersionCompatibilityAbortNamesTheFlag is the other half of a useful
-// abort: the message says which image to move, and it is the flag for the
-// database that actually failed.
+// abort: the message says which image to move. Both databases run the one
+// image (FR-031), so both name the one flag, and the database that actually
+// failed is named beside it.
 func TestCheckVersionCompatibilityAbortNamesTheFlag(t *testing.T) {
 	tests := []struct {
 		service  string
 		wantFlag string
 	}{
-		{service: serviceNeo4j, wantFlag: "--external-db-image-neo4j"},
-		{service: serviceTaskManagerDB, wantFlag: "--external-db-image-postgres"},
+		{service: serviceNeo4j, wantFlag: "--external-db-image"},
+		{service: serviceTaskManagerDB, wantFlag: "--external-db-image"},
 	}
 
 	for _, tt := range tests {
@@ -1279,7 +1280,7 @@ func TestFailureMessageContract(t *testing.T) {
 			err:           checkVersionCompatibility(serviceNeo4j, "5.26.1", "2025.10.1"),
 			wantCondition: []string{"is older than the server"},
 			wantResource:  []string{"5.26.1", "2025.10.1"},
-			wantAction:    []string{versionImageFlag(serviceNeo4j), "at least as new as the server"},
+			wantAction:    []string{externalDBImageOption, "at least as new as the server"},
 		},
 		{
 			row:           "missing authorisation for external restore",
@@ -1310,6 +1311,19 @@ func TestFailureMessageContract(t *testing.T) {
 			wantCondition: []string{"does not run in this deployment"},
 			wantResource:  []string{"transient pod and secret in namespace infrahub"},
 			wantAction:    []string{"infrahub-backup create", "--include-backup"},
+		},
+		{
+			// FR-031. The build version is set for the rest of this test, which
+			// no other row reads.
+			row: "development build with no --external-db-image",
+			err: func() error {
+				withBuildVersion(t, "")
+
+				return refuseUnpublishedExternalDBImage(&Configuration{})
+			}(),
+			wantCondition: []string{"does not run in this deployment", "development build"},
+			wantResource:  []string{"no published image", "transient workload"},
+			wantAction:    []string{"--external-db-image", "released infrahub-backup"},
 		},
 	}
 
