@@ -1,0 +1,82 @@
+src/internal/app/cli.go
+  s_33f105a6deb867::t_ab01b18760042c 207
+  s_33f105a6deb867::t_d6516589b86751 166-176
+  s_33f105a6deb867::t_6e87c6719f3948 177
+specs/archive/007-external-database-backup/contracts/cli-surface.md
+  s_33f105a6deb867::t_4012b1abaa80ef 21,34-35,46,51,57-69,103-104,146,169
+src/internal/app/app.go
+  s_33f105a6deb867::t_6042cea5b527cd 61-72
+  s_33f105a6deb867::t_fabb3e40c2c093 146
+  s_33f105a6deb867::t_5d82c69568aaec 171-175
+  s_33f105a6deb867::t_8c1edae6bdad62 384
+src/internal/app/external_ca.go
+  s_33f105a6deb867::t_fc251065f07afc 82-83
+src/internal/app/external_restore_test.go
+  s_33f105a6deb867::t_0489d9cf089b77 571-573
+src/internal/app/cli_test.go
+  s_33f105a6deb867::t_ea8e7427684e47 6,15
+  s_33f105a6deb867::t_2d9efc0727f82b 25,219-220,243,254,301-302,304-307,309-310,312,316,318,321-322,328,331-332,334-341,346-368
+  s_33f105a6deb867::t_daf0d08c525e3c 369-370
+docs/docs/backup/external-databases.mdx
+  s_33f105a6deb867::t_813ef41b222a0d 157-158,204,206-211,213-215,220,224-230,300-309
+src/internal/app/transient_workload_test.go
+  s_33f105a6deb867::t_09a2be2e5a76be 175-176,181-191,193-194,331-342,345,374-376,433,1174,1190-1191
+  s_33f105a6deb867::t_ed97310d9bd3eb 49,304-307,320-321
+src/internal/app/external_image_test.go
+  s_33f105a6deb867::t_91599953d8a589 1-47,51-229
+  s_33f105a6deb867::t_02e4addf640958 48-50
+docs/docs/reference/configuration.mdx
+  s_33f105a6deb867::t_d4841083ba0b0b 72,79-82,135,146-147
+src/internal/app/external_endpoint_test.go
+  s_33f105a6deb867::t_f83fddfafe8712 1136-1138,1144-1145
+  s_33f105a6deb867::t_c6e8a59cd49fc2 1283
+  s_33f105a6deb867::t_06d97502ee8494 1315-1327
+src/internal/app/utils.go
+  s_33f105a6deb867::t_181aa8381abb34 63-66
+  s_33f105a6deb867::t_b6369b76762389 14-15,26-51,59-62,67-78
+  s_33f105a6deb867::t_c9b170573dd4c4 52-58
+  s_33f105a6deb867::t_6bf7a6865cca32 11
+  s_33f105a6deb867::t_fc85b70d8e2784 79
+src/internal/app/external_capture.go
+  s_33f105a6deb867::t_ac0c0eff73a39b 491-499
+  s_33f105a6deb867::t_064623143c8422 620-629
+  s_33f105a6deb867::t_781bc2dc196ebc 602-619,630-637
+  s_33f105a6deb867::t_fa25972917979c 926
+dev/knowledge/container-image-user-semantics.md
+  s_33f105a6deb867::t_f1876cf3e628e6 49-67
+src/internal/app/backup_neo4j.go
+  s_33f105a6deb867::t_a37db1b2ef3139 1020-1026,1030-1034
+src/internal/app/external_capture_test.go
+  s_33f105a6deb867::t_c6e8a59cd49fc2 1205
+dev/knowledge/external-database-backup.md
+  s_33f105a6deb867::t_7da2adf5d9457d 88-98,119,132-133
+src/internal/app/transient_workload.go
+  s_33f105a6deb867::t_23e1c53c6869bb 154
+  s_33f105a6deb867::t_57cd8ea08f1825 580-583,585-590,592-593,595-600,602-603,607-612,614-616,627-630,716-718
+  s_33f105a6deb867::t_fcdb28aa94ca53 2020-2021,2025-2028
+  s_33f105a6deb867::t_1f1006ac53fed4 711
+  s_33f105a6deb867::t_9436b4408e4e70 1780
+  s_33f105a6deb867::t_23ad3a7a7cd13d 839
+specs/archive/007-external-database-backup/tasks.md
+  s_33f105a6deb867::t_f28680b49cdd20 411-415
+src/internal/app/external_endpoint.go
+  s_33f105a6deb867::t_fe49fc49a9cdcb 1298-1301
+  s_33f105a6deb867::t_1254ffb63042bf 1040,1071-1073,1090
+  s_33f105a6deb867::t_5554fc18745a4c 1322-1326
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "48f6e95834db206aa75937c1ee056c54f51aa20c",
+  "prompts": {},
+  "sessions": {
+    "s_33f105a6deb867": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2564d676-32e7-45e0-82a1-111443df6e89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Benoit Kohler <benoit@opsmill.com>"
+    }
+  }
+}
