@@ -1,0 +1,25 @@
+src/internal/app/external_restore.go
+  s_33f105a6deb867::t_338caad48c7c9f 543-549
+  s_33f105a6deb867::t_af8fec0e2bc77d 531,575-591,594,597
+docs/docs/backup/external-databases.mdx
+  s_33f105a6deb867::t_b08746b1300c4d 136-141
+src/internal/app/external_restore_test.go
+  s_33f105a6deb867::t_af8fec0e2bc77d 274-276,278-281,283-284,288,295-308
+  s_33f105a6deb867::t_38d6161569076a 309-310
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9ba780d52951763587ba517673abdf64fc95bd92",
+  "prompts": {},
+  "sessions": {
+    "s_33f105a6deb867": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2564d676-32e7-45e0-82a1-111443df6e89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Benoit Kohler <benoit@opsmill.com>"
+    }
+  }
+}
