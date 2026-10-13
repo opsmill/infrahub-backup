@@ -183,6 +183,11 @@ jobs:
           docker build -t "infrahub-backup:e2e-${GITHUB_SHA}" .
           echo "INFRAHUB_TESTING_EXTERNAL_DB_IMAGE=infrahub-backup:e2e-${GITHUB_SHA}" >> "$GITHUB_ENV"
 
+      # The image's Java runtime and Neo4j jars are trimmed to what the tools load. This runner is
+      # amd64, so this is where the trimmed image is checked on that architecture.
+      - name: Check the image carries working database tools
+        run: SKIP_BUILD=1 ./scripts/check-image-tools.sh "infrahub-backup:e2e-${GITHUB_SHA}"
+
       - name: Install Python dependencies
         run: uv sync --all-packages
 

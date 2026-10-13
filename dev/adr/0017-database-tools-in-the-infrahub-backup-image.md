@@ -39,9 +39,12 @@ and deployments whose databases are all internal still pull nothing.
 - An air-gapped operator mirrors one image, `infrahub-backup`, instead of three.
 - Running the tool as a pod in the namespace needs no permission to create workloads for the
   external path, because nothing is created.
-- The image grows by a Java runtime and the Neo4j tool libraries. The size has not been measured
-  yet. The growth applies to every user of the image, including users whose databases are all
-  internal.
+- The image grows by a Java runtime and the Neo4j tool libraries, from 34 MiB to 208 MiB
+  compressed (arm64, measured 2026-10-13). The growth applies to every user of the image,
+  including users whose databases are all internal. To keep it at that size, the Java runtime is
+  built with `jlink` from the modules the tools use, and the Neo4j jars that the tools never load
+  are removed. A Neo4j upgrade therefore needs that jar list checked again with a real backup,
+  restore and `cypher-shell` run; `scripts/check-image-tools.sh` only checks that the tools start.
 - OpsMill now redistributes Neo4j Enterprise tool binaries in this image. The PR author confirmed
   that this is cleared, as OpsMill already redistributes Neo4j Enterprise with
   `infrahub-enterprise`.
