@@ -34,7 +34,8 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
 # to run the tools and are left out.
 FROM neo4j:2025.10.1-enterprise AS neo4j-tools
 
-# Jars neo4j-admin and cypher-shell never load: the server's browser, Cypher planner and runtimes,
+# Jars neo4j-admin and cypher-shell never load: the server's browser, the S3, Azure and GCS client SDKs
+# (the tool only writes backups to a local directory), Cypher planner and runtimes,
 # HTTP server and metrics, Parquet/Arrow import, and native libraries for macOS and Windows. Checked
 # by loading classes during a remote backup, inspect, restore, consistency check and cypher-shell
 # over plain and verified TLS Bolt.
@@ -52,7 +53,20 @@ RUN cd /opt/neo4j/lib && rm -f \
       aircompressor-*.jar arrow-*.jar flatbuffers-java-*.jar flight-core-*.jar parquet-*.jar snappy-java-*.jar \
       hk2-*.jar jakarta.*.jar javax.annotation-api-*.jar jaxb-*.jar jersey-*.jar \
       jetty-alpn-*.jar jetty-ee*.jar jetty-http*.jar jetty-io-*.jar jetty-security-*.jar jetty-server-*.jar \
-      jetty-session-*.jar jetty-util-*.jar jetty-xml-*.jar jts-core-*.jar prometheus-metrics-*.jar
+      jetty-session-*.jar jetty-util-*.jar jetty-xml-*.jar jts-core-*.jar prometheus-metrics-*.jar \
+      annotations-2.*.jar apache-client-2.*.jar arns-2.*.jar auth-2.*.jar aws-*.jar checksums-*.jar \
+      crt-core-*.jar endpoints-spi-*.jar http-auth-*.jar http-client-spi-*.jar identity-spi-*.jar \
+      json-utils-2.*.jar metrics-spi-*.jar netty-nio-client-*.jar profiles-2.*.jar protocol-core-*.jar \
+      regions-*.jar retries-*.jar s3-2.*.jar s3-transfer-manager-*.jar sdk-core-*.jar \
+      third-party-jackson-core-*.jar utils-2.*.jar \
+      azure-core-[0-9]*.jar azure-core-http-netty-*.jar azure-identity-*.jar azure-json-*.jar \
+      azure-storage-*.jar azure-xml-*.jar msal4j-*.jar accessors-smart-*.jar content-type-*.jar \
+      json-smart-*.jar lang-tag-*.jar nimbus-jose-jwt-*.jar oauth2-oidc-sdk-*.jar jna-platform-*.jar \
+      reactor-core-*.jar reactor-netty-*.jar \
+      api-common-*.jar gax-*.jar google-api-*.jar google-auth-*.jar google-cloud-core-*.jar \
+      google-cloud-monitoring-*.jar google-http-client-*.jar google-oauth-client-*.jar grpc-*.jar \
+      proto-google-*.jar protobuf-java-*.jar opencensus-*.jar perfmark-api-*.jar threetenbp-*.jar \
+      guava-*.jar failureaccess-*.jar j2objc-annotations-*.jar conscrypt-openjdk-uber-*.jar
 
 # Java runtime stage: a jlink runtime with the modules the Neo4j tool jars reference (jdeps) plus
 # modules loaded by reflection or service lookup. binutils provides the objcopy that --strip-debug runs.

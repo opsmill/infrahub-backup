@@ -47,7 +47,9 @@ gap.
   added in that release.
 - A backup client machine on the same network as the database, with a matching Neo4j installation
   so `neo4j-admin` is available, and with local disk at least the size of the database. Writing to
-  cloud storage still stages through local disk.
+  cloud storage still stages through local disk. The `neo4j-admin` in the `infrahub-backup`
+  container image cannot write to cloud storage, because the image leaves out the S3, Azure and
+  Google Cloud client libraries. Use a full Neo4j installation for this procedure.
 - The Neo4j backup service listening on a non-loopback address. This prerequisite is the same one
   the supported path needs — see
   [Step 1 of the preparation guide](./external-databases.mdx#step-1-expose-the-neo4j-backup-service-on-a-non-loopback-address).
