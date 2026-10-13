@@ -1,0 +1,19 @@
+tests/e2e/test_k8s_external_neo4j.py
+  s_33f105a6deb867::t_eff92b589a4576 469,472,474-478,504-505,507-513,515
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ca4992ee97d97cc3ddcf14b91b4e509d4c9fd537",
+  "prompts": {},
+  "sessions": {
+    "s_33f105a6deb867": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2564d676-32e7-45e0-82a1-111443df6e89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Benoit Kohler <benoit@opsmill.com>"
+    }
+  }
+}
