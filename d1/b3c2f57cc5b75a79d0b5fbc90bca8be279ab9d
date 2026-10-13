@@ -1,0 +1,23 @@
+dev/adr/0017-database-tools-in-the-infrahub-backup-image.md
+  s_33f105a6deb867::t_f1e0e82c068fae 42-47
+Dockerfile
+  s_33f105a6deb867::t_3703de586c3d7b 37-67,78,88,95-96
+.github/workflows/ci.yml
+  s_33f105a6deb867::t_6013b8f97e70c5 186-190
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d1b3c2f57cc5b75a79d0b5fbc90bca8be279ab9d",
+  "prompts": {},
+  "sessions": {
+    "s_33f105a6deb867": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2564d676-32e7-45e0-82a1-111443df6e89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Benoit Kohler <benoit@opsmill.com>"
+    }
+  }
+}
