@@ -1,0 +1,21 @@
+src/internal/app/external_local_test.go
+  s_33f105a6deb867::t_3d26cb0c2475a2 504-542
+src/internal/app/external_local.go
+  s_33f105a6deb867::t_fe872eeac24b7b 599-608
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "43eace0c627f96a0fedc56026873882f15df2104",
+  "prompts": {},
+  "sessions": {
+    "s_33f105a6deb867": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2564d676-32e7-45e0-82a1-111443df6e89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Benoit Kohler <benoit@opsmill.com>"
+    }
+  }
+}

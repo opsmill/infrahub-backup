@@ -1,0 +1,26 @@
+src/internal/app/transient_workload.go
+  s_33f105a6deb867::t_b322d2273be3a8 1970,2007-2008,2010-2014
+src/internal/app/external_local_test.go
+  s_33f105a6deb867::t_e3526ed43df83a 703
+  s_33f105a6deb867::t_ba5fb98be4a1ae 7,673-702,704-717
+  s_33f105a6deb867::t_a2b57bb51a16c9 718
+src/internal/app/external_local.go
+  s_33f105a6deb867::t_c622a9bd7614c5 642,647
+  s_33f105a6deb867::t_b322d2273be3a8 510,526,530,540,569-571,577-578,581-641,643-646,648-654
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4737a1697ad73200bf230dbb9f65b9a0503459c0",
+  "prompts": {},
+  "sessions": {
+    "s_33f105a6deb867": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2564d676-32e7-45e0-82a1-111443df6e89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Benoit Kohler <benoit@opsmill.com>"
+    }
+  }
+}

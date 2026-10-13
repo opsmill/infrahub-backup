@@ -1,0 +1,37 @@
+specs/archive/007-external-database-backup/tasks.md
+  s_33f105a6deb867::t_b766c741ad37ea 336-339
+  s_33f105a6deb867::t_7626ac56b94c0f 428
+  s_33f105a6deb867::t_22828802141beb 427
+  s_33f105a6deb867::t_0ca6ae0073c688 395
+  s_33f105a6deb867::t_9896e073207f92 429
+tests/e2e/test_k8s_external_neo4j.py
+  s_33f105a6deb867::t_92e29f5ac88475 19-21
+tests/e2e/conftest.py
+  s_33f105a6deb867::t_1395e9a1a252b6 326-327
+  s_33f105a6deb867::t_1fd218e99d77f0 428-429
+tests/e2e/test_k8s_external_both.py
+  s_33f105a6deb867::t_1ab790c209d4ea 18-20
+specs/archive/007-external-database-backup/opsmill-implement-report.md
+  s_33f105a6deb867::t_1c9b35c207b6a8 521
+  s_33f105a6deb867::t_62332bdc99b550 523
+  s_33f105a6deb867::t_bfcb05123fe51c 535
+  s_33f105a6deb867::t_a671c772ec73f6 513-515
+  s_33f105a6deb867::t_d2dfc21925a446 532
+  s_33f105a6deb867::t_afa79fdeb3d3c3 538
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d30545fff4adc024fbee2114ff21aa951c99207f",
+  "prompts": {},
+  "sessions": {
+    "s_33f105a6deb867": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2564d676-32e7-45e0-82a1-111443df6e89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Benoit Kohler <benoit@opsmill.com>"
+    }
+  }
+}

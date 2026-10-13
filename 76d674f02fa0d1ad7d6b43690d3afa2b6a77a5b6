@@ -1,0 +1,26 @@
+src/internal/app/external_credential_refs.go
+  s_33f105a6deb867::t_de4c6fe10ca20c 42-43
+  s_33f105a6deb867::t_b0ea350f22f627 296,301-302,306,310
+  s_33f105a6deb867::t_31d95bec0bafe5 271-278
+dev/knowledge/external-database-backup.md
+  s_33f105a6deb867::t_f3a6795c6472a9 65,72-74
+src/internal/app/external_credential_refs_test.go
+  s_33f105a6deb867::t_8c7e2dad76c062 125,133
+  s_33f105a6deb867::t_f3a6795c6472a9 67-71,76,79,83
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "76d674f02fa0d1ad7d6b43690d3afa2b6a77a5b6",
+  "prompts": {},
+  "sessions": {
+    "s_33f105a6deb867": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2564d676-32e7-45e0-82a1-111443df6e89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Benoit Kohler <benoit@opsmill.com>"
+    }
+  }
+}
