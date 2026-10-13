@@ -130,8 +130,13 @@ jobs:
           PYTEST_MARKERS: ${{ matrix.edition == 'enterprise' && 'docker' || 'docker and not enterprise' }}
         run: exec tini -s -g -- uv run pytest -v -m "$PYTEST_MARKERS" tests/e2e
 
+  # Python changes run it too: the suites themselves are Python, and a change to them alone
+  # must still be exercised. `test` is skipped when no Go changed, and a skipped need skips
+  # this job unless the condition says otherwise, so it runs unless a need failed.
   e2e-tests-k8s:
-    if: needs.files-changed.outputs.go == 'true'
+    if: |
+      !cancelled() && !contains(needs.*.result, 'failure') &&
+      (needs.files-changed.outputs.go == 'true' || needs.files-changed.outputs.python == 'true')
     needs: ["files-changed", "test"]
     runs-on:
       group: huge-runners
