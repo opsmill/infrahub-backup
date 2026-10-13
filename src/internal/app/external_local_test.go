@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // directTestHost is a fake host for direct mode: a namespace file in a
@@ -537,6 +538,37 @@ func TestDirectModeScratchFromARelativeTempDir(t *testing.T) {
 	}
 	if content, err := os.ReadFile(dest); err != nil || string(content) != "dump-bytes" {
 		t.Errorf("copied artifact = %q, %v; want %q", content, err, "dump-bytes")
+	}
+}
+
+// TestDirectModeStreamAbortStopsTheChild is a stream whose deadline expires
+// while the child is blocked without writing: closing its stdout does not
+// stop it, so Close has to, together with whatever the shell started.
+func TestDirectModeStreamAbortStopsTheChild(t *testing.T) {
+	host := newDirectTestHost(t, "infrahub")
+	w := &localWorkload{service: serviceTaskManagerDB, role: workloadRoleCapture, scratch: t.TempDir(), host: host.directModeHost}
+
+	stdout, wait, err := w.stream([]string{"sh", "-c", "sleep 30; echo late"}, nil)
+	if err != nil {
+		t.Fatalf("stream() = %v", err)
+	}
+
+	reader := &execReadCloser{reader: stdout, wait: wait, deadline: time.Now().Add(200 * time.Millisecond)}
+	if _, err := reader.Read(make([]byte, 16)); !errors.Is(err, errStreamDeadline) {
+		t.Fatalf("Read() = %v, want the stream deadline", err)
+	}
+
+	start := time.Now()
+	closed := make(chan error, 1)
+	go func() { closed <- reader.Close() }()
+
+	select {
+	case <-closed:
+		if elapsed := time.Since(start); elapsed > commandWaitDelay+time.Second {
+			t.Errorf("Close() took %v after the deadline, want the child stopped at once", elapsed)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close() still blocked 10s after the stream deadline expired")
 	}
 }
 

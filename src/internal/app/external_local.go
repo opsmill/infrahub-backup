@@ -417,6 +417,10 @@ func (w *localWorkload) prepare(ctx context.Context, command []string, opts *Exe
 	cmd := w.host.command(ctx, args[0], args[1:]...)
 	cmd.Env = w.environment(extra)
 	cmd.Dir = w.scratch
+	// Many commands are `sh -c` pipelines: cancelling has to stop the tools
+	// the shell started, not only the shell.
+	killProcessGroupOnCancel(cmd)
+	cmd.WaitDelay = commandWaitDelay
 
 	return cmd, nil
 }
@@ -435,7 +439,6 @@ func (w *localWorkload) run(ctx context.Context, bound time.Duration, command []
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	cmd.WaitDelay = commandWaitDelay
 
 	err = cmd.Run()
 	out, errOut := strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String())
@@ -481,7 +484,23 @@ func (w *localWorkload) stream(command []string, opts *ExecOptions) (io.ReadClos
 		return withStderr(cmd.Wait(), stderr.String())
 	}
 
-	return stdout, wait, nil
+	return cancelOnClose{ReadCloser: stdout, cancel: cancel}, wait, nil
+}
+
+// cancelOnClose is a child's stdout whose Close also stops the child. The
+// reader is closed before the child is waited for, either because the stream
+// ended or because its idle timeout or deadline expired; in the second case a
+// child blocked in database I/O never notices the closed pipe, and waiting for
+// it would hold the run past the bound that just expired.
+type cancelOnClose struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (c cancelOnClose) Close() error {
+	c.cancel()
+
+	return c.ReadCloser.Close()
 }
 
 // copyOut takes an artifact out of the scratch directory to the run's own
