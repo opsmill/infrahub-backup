@@ -1,0 +1,21 @@
+src/internal/app/environment_kubernetes.go
+  s_33f105a6deb867::t_e90d196570e3b2 198-202
+changelog/+namespace-check-reason.fixed.md
+  s_33f105a6deb867::t_1d2fca2eae7b55 1
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "16c4a084197897fde1e7885c181aa7134e51b35b",
+  "prompts": {},
+  "sessions": {
+    "s_33f105a6deb867": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2564d676-32e7-45e0-82a1-111443df6e89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Benoit Kohler <benoit@opsmill.com>"
+    }
+  }
+}
