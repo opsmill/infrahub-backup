@@ -180,6 +180,10 @@ but the channel it would have configured takes no policy name.
 
 ## Auto-detection behavior
 
+When you set `--project` (`INFRAHUB_PROJECT`) or `--k8s-namespace` (`INFRAHUB_K8S_NAMESPACE`), the
+command acts only on that deployment. If it cannot reach it, the command fails and does not look for
+another deployment on the same host.
+
 ### Docker Compose project detection
 
 Order of detection:

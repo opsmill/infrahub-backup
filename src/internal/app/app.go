@@ -424,6 +424,15 @@ func (iops *InfrahubOps) getKubernetesBackend() *KubernetesBackend {
 	return iops.kubernetesBackend
 }
 
+// backendOrder is the backends ensureBackend tries, in order.
+//
+// An explicit target pins its backend: with --k8s-namespace only Kubernetes is
+// tried, with --project only Docker, and with both those two in that order.
+// Falling through to the other backend would act on a deployment the operator
+// did not name. That was observed: with the namespace check refused, a run given
+// --k8s-namespace detected an unrelated Docker Compose project on the same host
+// and went on to back it up, and a restore would have written to it. Only a run
+// that names no target detects.
 func (iops *InfrahubOps) backendOrder() []EnvironmentBackend {
 	order := []EnvironmentBackend{}
 	add := func(backend EnvironmentBackend) {
@@ -444,11 +453,19 @@ func (iops *InfrahubOps) backendOrder() []EnvironmentBackend {
 	if iops.config.DockerComposeProject != "" {
 		add(iops.getDockerBackend())
 	}
+	if iops.explicitTarget() {
+		return order
+	}
 
 	add(iops.getDockerBackend())
 	add(iops.getKubernetesBackend())
 
 	return order
+}
+
+// explicitTarget reports whether the operator named the deployment to act on.
+func (iops *InfrahubOps) explicitTarget() bool {
+	return iops.config.K8sNamespace != "" || iops.config.DockerComposeProject != ""
 }
 
 func (iops *InfrahubOps) ensureBackend() (EnvironmentBackend, error) {
@@ -468,8 +485,10 @@ func (iops *InfrahubOps) ensureBackend() (EnvironmentBackend, error) {
 			continue
 		}
 		if err := backend.Detect(); err != nil {
-			// Soft failures: CLI not available OR environment not found during auto-detect
-			if errors.Is(err, ErrEnvironmentNotFound) || errors.Is(err, ErrCLIUnavailable) {
+			// Soft failures: CLI not available OR environment not found during auto-detect.
+			// With an explicit target there is no auto-detect, so the named backend's
+			// failure is reported as it is rather than as a soft skip.
+			if !iops.explicitTarget() && (errors.Is(err, ErrEnvironmentNotFound) || errors.Is(err, ErrCLIUnavailable)) {
 				logrus.Debugf("Skipping %s backend: %v", backend.Name(), err)
 				if errors.Is(err, ErrCLIUnavailable) {
 					missingRuntimes = append(missingRuntimes, runtimeCommandOf(backend))

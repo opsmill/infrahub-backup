@@ -233,3 +233,49 @@ func TestMetadataCompatibilityHoldsInBothDirections(t *testing.T) {
 		}
 	})
 }
+
+// TestAnExplicitTargetPinsItsBackend is T156. A run that names its deployment
+// must act on that deployment or fail: with --k8s-namespace and the namespace
+// check refused, detection used to fall through to Docker and pick up an
+// unrelated Compose project on the same host (observed in CI), and a restore
+// would then have written to it.
+func TestAnExplicitTargetPinsItsBackend(t *testing.T) {
+	bin := t.TempDir()
+	dockerCalls := filepath.Join(t.TempDir(), "docker-calls")
+
+	// kubectl is installed but the namespace check is refused.
+	kubectl := "#!/bin/sh\nif [ \"$1\" = version ]; then exit 0; fi\n" +
+		"echo 'Error from server (Forbidden): pods is forbidden' >&2\nexit 1\n"
+	// docker records every call and would report a running Compose project.
+	docker := "#!/bin/sh\necho \"$*\" >> " + dockerCalls + "\necho infrahub-other\nexit 0\n"
+	for name, body := range map[string]string{"kubectl": kubectl, "docker": docker} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
+			t.Fatalf("writing the %s stub = %v, want nil", name, err)
+		}
+	}
+	t.Setenv("PATH", bin)
+
+	t.Run("--k8s-namespace fails rather than detecting Docker", func(t *testing.T) {
+		iops := &InfrahubOps{config: &Configuration{K8sNamespace: "infrahub"}, executor: NewCommandExecutor()}
+
+		backend, err := iops.ensureBackend()
+		if err == nil {
+			t.Fatalf("ensureBackend() = %s backend, want the namespace check's failure", backend.Name())
+		}
+		if !strings.Contains(err.Error(), "forbidden") {
+			t.Errorf("err = %v, want kubectl's own reason carried through", err)
+		}
+		if calls, _ := os.ReadFile(dockerCalls); len(calls) != 0 {
+			t.Errorf("docker was called (%q), want no Docker detection when a namespace is named", calls)
+		}
+	})
+
+	t.Run("no target still detects", func(t *testing.T) {
+		iops := &InfrahubOps{config: &Configuration{}, executor: NewCommandExecutor()}
+		_, _ = iops.ensureBackend()
+
+		if calls, _ := os.ReadFile(dockerCalls); len(calls) == 0 {
+			t.Error("docker was never called, want auto-detection to try it when no target is named")
+		}
+	})
+}
