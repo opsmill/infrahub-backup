@@ -596,7 +596,16 @@ func (iops *InfrahubOps) startLocalWorkload(service string, role workloadRole) (
 
 	host := iops.directHost()
 
-	scratch, err := os.MkdirTemp(host.tempDir(), fmt.Sprintf("%s-%s-%s-", transientObjectPrefix, role, service))
+	// The scratch path is both the child's working directory and a path in its
+	// arguments, so it has to be absolute: from a relative TMPDIR, an argument
+	// naming scratch/x would resolve to scratch/scratch/x once the child is in
+	// it.
+	parent, err := filepath.Abs(host.tempDir())
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("cannot resolve the directory for the scratch space of the %s %s run in this process: %w", service, role, err)
+	}
+
+	scratch, err := os.MkdirTemp(parent, fmt.Sprintf("%s-%s-%s-", transientObjectPrefix, role, service))
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("cannot create the scratch directory for the %s %s run in this process: %w", service, role, err)
 	}

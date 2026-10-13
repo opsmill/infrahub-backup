@@ -501,6 +501,45 @@ func TestDirectModeScratchIsRemovedOnEveryExitPath(t *testing.T) {
 	})
 }
 
+// TestDirectModeScratchFromARelativeTempDir is a relative TMPDIR: the scratch
+// path is the child's working directory and also appears in its arguments, so
+// a relative one would resolve beneath itself once the child is in it.
+func TestDirectModeScratchFromARelativeTempDir(t *testing.T) {
+	writeFakeTools(t, map[string]string{})
+	t.Chdir(t.TempDir())
+	if err := os.Mkdir("tmp", 0o700); err != nil {
+		t.Fatalf("creating the relative scratch parent = %v", err)
+	}
+
+	host := newDirectTestHost(t, "infrahub")
+	host.tempDir = func() string { return "tmp" }
+	iops := newDirectModeOps(host)
+	ops, _ := iops.externalCaptureOps(serviceTaskManagerDB)
+
+	target, release, err := ops.startCapture(serviceTaskManagerDB, 1<<20)
+	if err != nil {
+		t.Fatalf("startCapture() = %v", err)
+	}
+	defer release()
+
+	if scratch := iops.localWorkloadFor(target).scratch; !filepath.IsAbs(scratch) {
+		t.Errorf("scratch = %q, want an absolute path", scratch)
+	}
+
+	if _, err := iops.execBoundedAgainst(externalDBControlBound(iops.config), "writing", "test", serviceTaskManagerDB,
+		[]string{"sh", "-c", "printf dump-bytes > " + externalPostgresDumpFile}, &ExecOptions{Pod: target}); err != nil {
+		t.Fatalf("writing into scratch = %v", err)
+	}
+
+	dest := filepath.Join(t.TempDir(), "prefect.dump")
+	if err := iops.copyFromTransientWorkload(target, externalPostgresDumpFile, dest); err != nil {
+		t.Fatalf("copyFromTransientWorkload() = %v", err)
+	}
+	if content, err := os.ReadFile(dest); err != nil || string(content) != "dump-bytes" {
+		t.Errorf("copied artifact = %q, %v; want %q", content, err, "dump-bytes")
+	}
+}
+
 // TestDirectModeRestoreDumpFitReadsLocalFreeSpace is the restore's fit check in
 // direct mode: the free space of the scratch filesystem, not the Job's sized
 // volume, and the copy into scratch when it fits.
