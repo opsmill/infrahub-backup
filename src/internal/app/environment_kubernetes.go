@@ -195,8 +195,11 @@ func (k *KubernetesBackend) Detect() error {
 
 	if k.config.K8sNamespace != "" {
 		k.namespace = k.config.K8sNamespace
-		if _, err := k.executor.runCommand("kubectl", "get", "pods", "-n", k.namespace, "-l", "app.kubernetes.io/name=infrahub"); err != nil {
-			return fmt.Errorf("failed to verify namespace %s: %w", k.namespace, err)
+		if output, err := k.executor.runCommand("kubectl", "get", "pods", "-n", k.namespace, "-l", "app.kubernetes.io/name=infrahub"); err != nil {
+			// kubectl's own message is the only place a refusal ("forbidden") or a
+			// missing namespace is stated, so it is carried rather than reduced to
+			// an exit status.
+			return fmt.Errorf("failed to verify namespace %s: listing its pods failed (%w): %s; check --k8s-namespace and that this identity can list pods there", k.namespace, err, output)
 		}
 		return nil
 	}
