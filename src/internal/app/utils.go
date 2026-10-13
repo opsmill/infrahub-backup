@@ -51,8 +51,10 @@ func publishedImageTag(v string) (string, bool) {
 	}
 	// `git describe --tags --dirty` output is valid semver — "v2.3.0-4-gea1d73b"
 	// parses as a pre-release of 2.3.0 — but it names a commit after a release,
-	// which no image was pushed for. A published pre-release ("v2.4.0-rc.1")
-	// passes; only describe's own suffixes are refused.
+	// which no image was pushed for. The suffix can follow a pre-release too
+	// ("v2.4.0-rc.1-3-gabc1234"), so it is refused wherever it appears. A
+	// published pre-release ("v2.4.0-rc.1") passes; only describe's own
+	// suffixes are refused.
 	if gitDescribeSuffix.MatchString(semver.Prerelease(tagged)) {
 		return "", false
 	}
@@ -60,9 +62,11 @@ func publishedImageTag(v string) (string, bool) {
 	return strings.TrimPrefix(tagged, "v"), true
 }
 
-// gitDescribeSuffix matches the pre-release part `git describe` appends to a
-// tag: commits since the tag and an abbreviated hash, and/or a dirty marker.
-var gitDescribeSuffix = regexp.MustCompile(`(^-[0-9]+-g[0-9a-f]+(-dirty)?$)|(-dirty$)`)
+// gitDescribeSuffix matches what `git describe` appends to a tag, anywhere in
+// the pre-release part: commits since the tag and an abbreviated hash
+// (`-3-gabc1234`), or a dirty marker (`-dirty`). Each must end at an
+// identifier boundary, so a pre-release such as "-rc.1" never matches.
+var gitDescribeSuffix = regexp.MustCompile(`-[0-9]+-g[0-9a-f]+([.-]|$)|-dirty([.-]|$)`)
 
 // defaultExternalDBImage is this tool's own image at the running binary's
 // version, or empty on a development build, which has none (FR-031). It is

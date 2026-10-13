@@ -287,27 +287,32 @@ func (w *localWorkload) translate(value string) string {
 		return value
 	}
 
+	// Both boundary checks read the original string, never the remainder
+	// after an earlier match: in `/data/scratch/scratch` the second
+	// occurrence follows `/scratch`, which makes it part of a longer path.
 	var out strings.Builder
+	start := 0
 	for {
-		index := strings.Index(value, transientScratchPath)
-		if index < 0 {
-			out.WriteString(value)
+		found := strings.Index(value[start:], transientScratchPath)
+		if found < 0 {
+			out.WriteString(value[start:])
 
 			return out.String()
 		}
 
+		index := start + found
 		end := index + len(transientScratchPath)
 		startsToken := index == 0 || !isPathByte(value[index-1])
 		endsToken := end == len(value) || value[end] == '/' || !isPathByte(value[end])
 
-		out.WriteString(value[:index])
+		out.WriteString(value[start:index])
 		if startsToken && endsToken {
 			out.WriteString(w.scratch)
 		} else {
 			out.WriteString(transientScratchPath)
 		}
 
-		value = value[end:]
+		start = end
 	}
 }
 
@@ -324,11 +329,52 @@ func (w *localWorkload) within(path string) (string, error) {
 	return translated, nil
 }
 
-// environment is the child's environment: this process's own, then the
-// credentials, then what the sequence asked for. Later entries win, which
-// os/exec guarantees for duplicate keys.
+// imageToolEnvironment is the NEO4J_* variables the image itself sets so that
+// neo4j-admin and cypher-shell find their jars, configuration and log
+// directory. The Job's container has them too, so the child keeps them.
+var imageToolEnvironment = map[string]bool{
+	"NEO4J_HOME": true,
+	"NEO4J_CONF": true,
+	"NEO4J_LOGS": true,
+}
+
+// clientReadsOnItsOwn reports whether a variable is one the database clients
+// or their JVM read without being told to: libpq's PG* (PGSERVICE,
+// PGPASSFILE, PGSSLMODE...), the Neo4j tools' NEO4J_* (NEO4J_USERNAME,
+// NEO4J_ADDRESS...) other than the ones the image sets, and the JVM's option
+// variables. The Job's container receives none of them from this process: the
+// manifest sets only the credentials, and the sequence sets the rest.
+func clientReadsOnItsOwn(key string) bool {
+	switch {
+	case imageToolEnvironment[key]:
+		return false
+	case strings.HasPrefix(key, "PG"), strings.HasPrefix(key, "NEO4J_"):
+		return true
+	}
+
+	switch key {
+	case "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS", "JAVA_OPTS":
+		return true
+	}
+
+	return false
+}
+
+// environment is the child's environment, built to match what the Job's
+// container would have: this process's own minus every variable a client reads
+// on its own (clientReadsOnItsOwn), then the credentials, then what the
+// sequence asked for. Later entries win, which os/exec guarantees for
+// duplicate keys.
 func (w *localWorkload) environment(extra map[string]string) []string {
-	env := os.Environ()
+	parent := os.Environ()
+	env := make([]string, 0, len(parent)+len(w.credentials)+len(extra))
+	for _, entry := range parent {
+		key, _, _ := strings.Cut(entry, "=")
+		if clientReadsOnItsOwn(key) {
+			continue
+		}
+		env = append(env, entry)
+	}
 
 	for _, key := range sortedKeys(w.credentials) {
 		env = append(env, key+"="+w.credentials[key])

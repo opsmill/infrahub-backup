@@ -49,6 +49,12 @@ func TestPublishedImageTag(t *testing.T) {
 		{version: "v2.3.0-4-gea1d73b-dirty", wantOK: false},
 		{version: "v2.3.0-dirty", wantOK: false},
 		{version: "v2.3.0+dirty", wantOK: false},
+		// A describe suffix after a pre-release names a commit after it.
+		{version: "v2.4.0-rc.1-3-gabc1234", wantOK: false},
+		{version: "v2.4.0-rc.1-3-gabc1234-dirty", wantOK: false},
+		{version: "2.4.0-rc.1-3-gabc1234", wantOK: false},
+		{version: "v2.4.0-rc.1-dirty", wantOK: false},
+		{version: "v2.4.0-beta.2", wantTag: "2.4.0-beta.2", wantOK: true},
 		// semver reads "v2.3" as "v2.3.0", but no image was pushed as "2.3".
 		{version: "v2.3", wantOK: false},
 		{version: "dev", wantOK: false},

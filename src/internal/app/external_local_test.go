@@ -200,6 +200,10 @@ func TestLocalWorkloadTranslate(t *testing.T) {
 		"base64 -d > '/scratch/ca.pem'":         "base64 -d > '/tmp/xdb-1/ca.pem'",
 		"-Djavax.net.ssl.trustStore=/scratch/x": "-Djavax.net.ssl.trustStore=/tmp/xdb-1/x",
 		"/data/scratch/x":                       "/data/scratch/x",
+		"/data/scratch/scratch":                 "/data/scratch/scratch",
+		"/data/scratch/scratch/x":               "/data/scratch/scratch/x",
+		"/scratch/scratch":                      "/tmp/xdb-1/scratch",
+		"/data/scratch /scratch":                "/data/scratch /tmp/xdb-1",
 		"/scratchpad":                           "/scratchpad",
 		"abc+/scratch+def":                      "abc+/scratch+def",
 		"no path at all":                        "no path at all",
@@ -208,6 +212,57 @@ func TestLocalWorkloadTranslate(t *testing.T) {
 	for in, want := range tests {
 		if got := w.translate(in); got != want {
 			t.Errorf("translate(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestLocalWorkloadEnvironmentDropsWhatClientsReadOnTheirOwn holds the child's
+// environment to what the Job's container would have: a PGSERVICE or
+// PGPASSFILE in this process's environment would point libpq at a connection
+// or a password the run never chose, so neither reaches the child, while the
+// image's own tool variables, the credentials and the sequence's variables do.
+func TestLocalWorkloadEnvironmentDropsWhatClientsReadOnTheirOwn(t *testing.T) {
+	t.Setenv("PGSERVICE", "inherited-service")
+	t.Setenv("PGPASSFILE", "/inherited/.pgpass")
+	t.Setenv("NEO4J_USERNAME", "inherited-user")
+	t.Setenv("JAVA_TOOL_OPTIONS", "-Dinherited=true")
+	t.Setenv("NEO4J_HOME", "/opt/neo4j")
+	t.Setenv("NEO4J_CONF", "/opt/neo4j/conf")
+	t.Setenv("NEO4J_LOGS", "/opt/neo4j/logs")
+	t.Setenv("JAVA_HOME", "/usr/lib/jvm/java-21-openjdk")
+
+	w := &localWorkload{
+		scratch:     "/tmp/xdb-1",
+		credentials: map[string]string{"PGUSER": "prefect-user", "PGPASSWORD": "pg-s3cr3t-value"},
+	}
+	env := w.environment(map[string]string{"PGSSLMODE": "require", "JAVA_OPTS": "-Dx=/scratch/ts"})
+
+	values := map[string][]string{}
+	for _, entry := range env {
+		key, value, _ := strings.Cut(entry, "=")
+		values[key] = append(values[key], value)
+	}
+
+	for _, key := range []string{"PGSERVICE", "PGPASSFILE", "NEO4J_USERNAME", "JAVA_TOOL_OPTIONS"} {
+		if got, ok := values[key]; ok {
+			t.Errorf("%s reached the child as %q, want it dropped", key, got)
+		}
+	}
+
+	want := map[string]string{
+		"PATH":       os.Getenv("PATH"),
+		"NEO4J_HOME": "/opt/neo4j",
+		"NEO4J_CONF": "/opt/neo4j/conf",
+		"NEO4J_LOGS": "/opt/neo4j/logs",
+		"JAVA_HOME":  "/usr/lib/jvm/java-21-openjdk",
+		"PGUSER":     "prefect-user",
+		"PGPASSWORD": "pg-s3cr3t-value",
+		"PGSSLMODE":  "require",
+		"JAVA_OPTS":  "-Dx=/tmp/xdb-1/ts",
+	}
+	for key, value := range want {
+		if got := values[key]; len(got) != 1 || got[0] != value {
+			t.Errorf("%s = %q, want exactly [%q]", key, got, value)
 		}
 	}
 }
