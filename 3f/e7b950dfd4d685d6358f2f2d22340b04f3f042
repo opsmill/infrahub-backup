@@ -1,0 +1,24 @@
+Dockerfile
+  s_33f105a6deb867::t_9c358d7b16fb98 37-38,56-69
+dev/adr/0017-database-tools-in-the-infrahub-backup-image.md
+  s_33f105a6deb867::t_396b65f3eefcd7 42
+  s_33f105a6deb867::t_148f48f1ca3663 46-48
+docs/docs/backup/external-database-direct-to-cloud.mdx
+  s_33f105a6deb867::t_7f6c52a162a372 50-52
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3fe7b950dfd4d685d6358f2f2d22340b04f3f042",
+  "prompts": {},
+  "sessions": {
+    "s_33f105a6deb867": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2564d676-32e7-45e0-82a1-111443df6e89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Benoit Kohler <benoit@opsmill.com>"
+    }
+  }
+}
