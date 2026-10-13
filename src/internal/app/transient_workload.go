@@ -1967,7 +1967,7 @@ type transientCopy struct {
 
 	// local is the same direction when the target is a scratch directory this
 	// process stands in for a workload with (direct mode, FR-032).
-	local func(w *localWorkload, src, dest string) error
+	local func(w *localWorkload, ctx context.Context, src, dest string) error
 }
 
 var (
@@ -2004,8 +2004,14 @@ var (
 // Kubernetes-only refusal, the bound, the context that carries it, and the
 // wrapping that turns a deadline into a message naming the pod.
 func (iops *InfrahubOps) copyAcrossTransientWorkload(direction transientCopy, pod, src, dest string) error {
+	bound := externalDBBound(iops.config)
+
 	if local := iops.localWorkloadFor(pod); local != nil {
-		return direction.local(local, src, dest)
+		err := boundedLocalCopy(bound, func(ctx context.Context) error {
+			return direction.local(local, ctx, src, dest)
+		})
+
+		return wrapExternalTimeout(err, bound, direction.operation, "the scratch directory "+local.scratch)
 	}
 
 	backend, err := iops.ensureBackend()
@@ -2018,7 +2024,6 @@ func (iops *InfrahubOps) copyAcrossTransientWorkload(direction transientCopy, po
 		return fmt.Errorf("cannot copy %s a transient workload in a %s deployment", direction.preposition, backend.Name())
 	}
 
-	bound := externalDBBound(iops.config)
 	ctx, cancel := context.WithTimeout(context.Background(), bound)
 	defer cancel()
 

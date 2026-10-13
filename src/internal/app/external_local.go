@@ -507,7 +507,7 @@ func (c cancelOnClose) Close() error {
 // staging, the counterpart of `kubectl cp pod:src dest`: dest becomes the file
 // or directory src was. A rename where both are on one filesystem, which they
 // are by default; a copy otherwise.
-func (w *localWorkload) copyOut(src, dest string) error {
+func (w *localWorkload) copyOut(ctx context.Context, src, dest string) error {
 	from, err := w.within(src)
 	if err != nil {
 		return err
@@ -523,11 +523,11 @@ func (w *localWorkload) copyOut(src, dest string) error {
 		}
 	}
 
-	return copyTree(from, dest)
+	return copyTreeContext(ctx, from, dest)
 }
 
 // copyIn places a file from the run's own staging in the scratch directory.
-func (w *localWorkload) copyIn(src, dest string) error {
+func (w *localWorkload) copyIn(ctx context.Context, src, dest string) error {
 	to, err := w.within(dest)
 	if err != nil {
 		return err
@@ -537,7 +537,7 @@ func (w *localWorkload) copyIn(src, dest string) error {
 		return err
 	}
 
-	return copyFile(src, to)
+	return copyFileContext(ctx, src, to)
 }
 
 // requireFree refuses an operation that needs more scratch space than the
@@ -566,19 +566,92 @@ func (w *localWorkload) release() {
 	}
 }
 
-// copyTree copies a file or a directory tree to dest, which becomes src, with
-// the copy helpers the run already stages its archive with.
-func copyTree(src, dest string) error {
+// copyTreeContext copies a file or a directory tree to dest, which becomes
+// src, and stops with ctx's error once ctx is done.
+func copyTreeContext(ctx context.Context, src, dest string) error {
 	info, err := os.Stat(src)
 	if err != nil {
 		return err
 	}
 
-	if info.IsDir() {
-		return copyDir(src, dest)
+	if !info.IsDir() {
+		return copyFileContext(ctx, src, dest)
 	}
 
-	return copyFile(src, dest)
+	if err := os.MkdirAll(dest, info.Mode()); err != nil {
+		return err
+	}
+
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		if err := copyTreeContext(ctx, filepath.Join(src, entry.Name()), filepath.Join(dest, entry.Name())); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// copyFileContext is copyFile, stopping with ctx's error between reads once
+// ctx is done.
+func copyFileContext(ctx context.Context, src, dst string) error {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
+
+	srcInfo, err := srcFile.Stat()
+	if err != nil {
+		return err
+	}
+
+	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, srcInfo.Mode())
+	if err != nil {
+		return err
+	}
+	defer dstFile.Close()
+
+	_, err = io.Copy(dstFile, contextReader{ctx: ctx, reader: srcFile})
+
+	return err
+}
+
+// contextReader is a reader that fails with ctx's error once ctx is done.
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	return r.reader.Read(p)
+}
+
+// boundedLocalCopy runs a copy in this process under bound, as the Job path's
+// copy runs under it. The copy stops between reads once the bound expires;
+// a copy stalled inside one read or write cannot be interrupted, so the run is
+// told of the timeout without waiting for it.
+func boundedLocalCopy(bound time.Duration, run func(ctx context.Context) error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), bound)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- run(ctx) }()
+
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // ---------------------------------------------------------------------------

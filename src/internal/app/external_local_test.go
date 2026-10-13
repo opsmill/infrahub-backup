@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -668,4 +669,50 @@ func TestLocalFreeSpaceReadsTheHost(t *testing.T) {
 	if free == 0 {
 		t.Error("localFreeSpace() = 0, want the free space of the test's temporary directory")
 	}
+}
+
+// TestDirectModeCopyIsBounded is a direct-mode copy under the bound every
+// external operation has: one stalled in a read returns at the bound, and one
+// that keeps making progress stops between reads.
+func TestDirectModeCopyIsBounded(t *testing.T) {
+	t.Run("a stalled copy returns at the bound", func(t *testing.T) {
+		stalled, unblock := io.Pipe()
+		defer unblock.Close()
+
+		start := time.Now()
+		err := boundedLocalCopy(100*time.Millisecond, func(context.Context) error {
+			_, err := io.Copy(io.Discard, stalled)
+
+			return err
+		})
+		if !errors.Is(err, context.DeadlineExceeded) || !isCommandTimeout(err) {
+			t.Fatalf("err = %v, want the bound's deadline", err)
+		}
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			t.Errorf("returned after %v, want at the 100ms bound", elapsed)
+		}
+	})
+
+	t.Run("a copy making progress stops once the bound expires", func(t *testing.T) {
+		src := filepath.Join(t.TempDir(), "endless")
+		if err := os.Symlink("/dev/zero", src); err != nil {
+			t.Skipf("no /dev/zero: %v", err)
+		}
+		dest := filepath.Join(t.TempDir(), "copy")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancel()
+
+		done := make(chan error, 1)
+		go func() { done <- copyTreeContext(ctx, src, dest) }()
+
+		select {
+		case err := <-done:
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("err = %v, want the deadline", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("the copy was still running 5s after its context expired")
+		}
+	})
 }
