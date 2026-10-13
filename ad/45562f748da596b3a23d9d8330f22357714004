@@ -1,0 +1,30 @@
+dev/adr/0008-transient-workload-for-external-databases.md
+  s_33f105a6deb867::t_d7ef9e907861ff 59-61
+docs/docs/backup/external-databases.mdx
+  s_33f105a6deb867::t_693ddd60289c6c 271
+  s_33f105a6deb867::t_d7ef9e907861ff 270,272,389-391
+dev/adr/0018-transient-workload-is-a-job.md
+  s_33f105a6deb867::t_d7ef9e907861ff 38-42
+dev/knowledge/external-database-backup.md
+  s_33f105a6deb867::t_d7ef9e907861ff 67-69,133-135
+specs/archive/007-external-database-backup/spec.md
+  s_33f105a6deb867::t_d7ef9e907861ff 308-309
+changelog/172.added.md
+  s_33f105a6deb867::t_693ddd60289c6c 1
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ad45562f748da596b3a23d9d8330f22357714004",
+  "prompts": {},
+  "sessions": {
+    "s_33f105a6deb867": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2564d676-32e7-45e0-82a1-111443df6e89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Benoit Kohler <benoit@opsmill.com>"
+    }
+  }
+}
