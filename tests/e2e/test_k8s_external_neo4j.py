@@ -249,15 +249,30 @@ async def test_tooling_newer_than_the_server_warns_and_continues(
 @pytest.mark.e2e
 @pytest.mark.k8s
 @requires_external_db(SERVICE_NEO4J, edition="enterprise")
-async def test_killing_the_tool_mid_capture_leaves_nothing_behind(
+async def test_killing_the_tool_mid_capture_leaves_only_what_the_cluster_removes(
     infrahub_k8s_external, external_topology, backup_binary, tmp_path
 ):
-    """Killed mid-capture: no surviving pod or Secret, and the deployment is not left quiesced.
+    """Killed mid-capture: what is left is removed by the cluster, and Infrahub still serves.
 
     Proves FR-011, FR-013 and SC-006. The kill is pinned to the moment the transient
-    workload reports ready, so the run is interrupted while it holds both a pod and the
-    Secret carrying the database credentials — the state a sleep-based kill would miss.
+    workload reports ready, so the run is interrupted while it holds a Job, its pod and,
+    when the run created one, the Secret carrying the database credentials — the state a
+    sleep-based kill would miss.
+
+    A killed tool cannot delete anything, so the objects are still there right after the
+    kill. ADR 0018 makes the cluster remove them without the tool: the Job's deadline ends
+    it, its time-to-live deletes it, and the garbage collector deletes the pod and the
+    Secret it owns. Waiting for the deadline (20 minutes or more) is not practical here, so
+    the case asserts that every object left carries what makes that happen, then deletes
+    the Job — the step the time-to-live would take — and asserts the garbage collector
+    removes the rest.
     """
+    from kr8s.asyncio.objects import Job as AsyncJob
+    from kr8s.asyncio.objects import Pod as AsyncPod
+    from kr8s.asyncio.objects import Secret as AsyncSecret
+
+    from tests.e2e.conftest import TRANSIENT_LABEL_MARKER
+
     namespace = infrahub_k8s_external["namespace"]
     image_args = external_db_image_args(infrahub_k8s_external)
     kubeconfig = infrahub_k8s_external["kubeconfig_path"]
@@ -276,14 +291,66 @@ async def test_killing_the_tool_mid_capture_leaves_nothing_behind(
     finally:
         proc.wait(timeout=120)
 
-    # A second run reaps the stray rather than adopting it, so the assertion is made
+    # A second run reaps the stray rather than adopting it, so the assertions are made
     # against the namespace as the kill left it, before anything else runs.
-    left_behind = await transient_objects(kubeconfig, namespace)
-    assert left_behind == [], (
-        f"a killed run left transient objects behind: {left_behind}. "
-        "The cluster reclaims them at their deadline, but FR-011 requires the objects to be "
-        "owned so that reclaiming is not the only thing that removes them"
+    api = await kr8s.asyncio.api(kubeconfig=kubeconfig)
+    jobs = [job async for job in AsyncJob.list(namespace=namespace, label_selector=TRANSIENT_LABEL_MARKER, api=api)]
+    pods = [pod async for pod in AsyncPod.list(namespace=namespace, label_selector=TRANSIENT_LABEL_MARKER, api=api)]
+    secrets = [
+        secret async for secret in AsyncSecret.list(namespace=namespace, label_selector=TRANSIENT_LABEL_MARKER, api=api)
+    ]
+    assert jobs, (
+        f"the kill landed while the workload was ready, so its Job must still exist: pods {[p.name for p in pods]}, "
+        f"secrets {[s.name for s in secrets]}"
     )
+
+    # The Job ends at its deadline and is deleted a fixed time after it finishes.
+    job_uids = set()
+    job_deadlines = set()
+    for job in jobs:
+        spec = job.raw["spec"]
+        deadline = spec.get("activeDeadlineSeconds")
+        assert isinstance(deadline, int) and deadline > 0, (
+            f"job {job.name} has no activeDeadlineSeconds ({deadline!r}), so nothing ends it without the tool"
+        )
+        assert spec.get("ttlSecondsAfterFinished") is not None, (
+            f"job {job.name} has no ttlSecondsAfterFinished, so the cluster never deletes it once it ends"
+        )
+        job_uids.add(job.raw["metadata"]["uid"])
+        job_deadlines.add(deadline)
+
+    # The pod belongs to the Job, so deleting the Job deletes it, and it restates the deadline
+    # because the Job controller does not copy it onto the pod (ADR 0018).
+    for pod in pods:
+        owners = pod.raw["metadata"].get("ownerReferences", [])
+        assert any(owner.get("kind") == "Job" and owner.get("uid") in job_uids for owner in owners), (
+            f"pod {pod.name} is not owned by the run's Job, so deleting the Job leaves it: {owners}"
+        )
+        pod_deadline = pod.raw["spec"].get("activeDeadlineSeconds")
+        assert pod_deadline in job_deadlines, (
+            f"pod {pod.name} has activeDeadlineSeconds {pod_deadline!r}, not the Job's deadline {job_deadlines}"
+        )
+
+    # A credential Secret, when the run created one, belongs to the Job. When the workload
+    # references the deployment's own Secret keys, no Secret exists and there is nothing to check.
+    for secret in secrets:
+        owners = secret.raw["metadata"].get("ownerReferences", [])
+        assert any(owner.get("kind") == "Job" and owner.get("uid") in job_uids for owner in owners), (
+            f"secret {secret.name} is not owned by the run's Job, so it outlives the workload: {owners}"
+        )
+
+    # Delete the Job as its time-to-live would, and nothing else: the garbage collector must
+    # remove the pod and the Secret on its own.
+    for job in jobs:
+        await job.async_delete(propagation_policy="Background")
+
+    left_behind = await transient_objects(kubeconfig, namespace)
+    for _ in range(60):
+        if not left_behind:
+            break
+        await asyncio.sleep(5)
+        left_behind = await transient_objects(kubeconfig, namespace)
+    assert left_behind == [], f"objects survived the deletion of the Job that owns them for 5 minutes: {left_behind}"
 
     # FR-013: Infrahub still serves. A killed backup must not leave a quiesced deployment.
     async with portforward_infrahub(kubeconfig, namespace):
