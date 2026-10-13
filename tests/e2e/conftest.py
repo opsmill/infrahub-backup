@@ -323,8 +323,8 @@ async def infrahub_k8s(
 # restore — an object store the *database host itself* can read, because an external
 # restore inverts the data path and the server fetches the artifact. None of that is
 # available from a vcluster created here, so the topology is supplied by the environment
-# and the external suites skip, by name, when it is absent. Provisioning it in CI is
-# tasks.md T072, which is still open.
+# and the external suites skip, by name, when it is absent. In CI, the enterprise leg of
+# the `e2e-tests-k8s` job provides it (tasks.md T072).
 #
 # Declared by:
 #
@@ -425,8 +425,8 @@ def _external_skip_reason(services: tuple[str, ...], edition: str = "", seed_sto
     if missing:
         return (
             f"needs {', '.join(missing)} hosted outside the Infrahub namespace: set "
-            f"{EXTERNAL_DB_ENV_VAR}={','.join(services)}. No CI topology provides one yet "
-            "(specs/archive/007-external-database-backup/tasks.md T072)"
+            f"{EXTERNAL_DB_ENV_VAR}={','.join(services)}. In CI, only the enterprise leg of e2e-tests-k8s "
+            "provides one (specs/archive/007-external-database-backup/tasks.md T072)"
         )
 
     unset = [

@@ -16,9 +16,9 @@ which is the point of pinning the edition rather than inferring it from what ans
 Every case here needs a database outside the namespace, which this suite cannot create:
 it needs a Neo4j Enterprise licence and a backup listener bound to a non-loopback address.
 The topology is declared by environment variables documented in `tests/e2e/conftest.py`,
-and each case skips *by name* until they are set. Provisioning it in CI is T072 in
-`specs/archive/007-external-database-backup/tasks.md`, which is still open — so a green run of
-this file that reports skips has proved nothing, and says so.
+and each case skips *by name* until they are set. In CI, the enterprise leg of `e2e-tests-k8s`
+provides it (T072 in `specs/archive/007-external-database-backup/tasks.md`). A green run of
+this file that reports skips has still proved nothing, and says so.
 """
 
 import asyncio

@@ -15,9 +15,9 @@ Restoring into an external Neo4j inverts the data path — the server fetches th
 itself via `seedURI` — so the round trip needs an object store the *database host* can
 read, not merely one this suite can reach. That, plus a Neo4j Enterprise licence outside
 the cluster, is why these cases skip by name until the environment declares the topology;
-see the external-topology block in `tests/e2e/conftest.py`. Provisioning it in CI is T072
-in `specs/archive/007-external-database-backup/tasks.md`, still open, so skips here are skips and
-prove nothing.
+see the external-topology block in `tests/e2e/conftest.py`. In CI, the enterprise leg of
+`e2e-tests-k8s` provides it (T072 in `specs/archive/007-external-database-backup/tasks.md`).
+Skips here are still skips and prove nothing.
 """
 
 import re

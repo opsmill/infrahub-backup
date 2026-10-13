@@ -506,20 +506,21 @@ need the external-database topology of T072, which neither this host nor CI prov
 2. Decide whether a TLS-only backup port must be supported, and file an issue if so.
 3. Bound the direct-mode copy and kill the child's process group (deferred low finding).
 
-
 ---
 
 # Addendum 2026-10-13: the external end-to-end suites run (T072, T175, T176)
 
-**Status: DONE for Phase 6.** T072, T175 and T176 are complete. T179 (TLS on the Neo4j backup port, [#178](https://github.com/opsmill/infrahub-backup/issues/178)) is open and outside Phase 6.
+**Status: DONE for Phase 6 except T179.** T072, T175 and T176 are complete. T179 (TLS on the Neo4j backup port, [#178](https://github.com/opsmill/infrahub-backup/issues/178)) is still open. `tasks.md` lists it under Phase 6D; this report recorded the problem under "Found during the run, outside this phase".
+
+T054 to T057 are now ticked, because the CI run below ran and passed their cases. T064 stays open: the one case that run skipped is the Community refusal, one of T064's diagnostic rows, and it needs an external Community server that this topology does not provide.
 
 ## Local-pass evidence
 
 | Test id | Type | Run command | Passed at | Environment context | Verbatim pass line |
 |---|---|---|---|---|---|
-| `test_k8s_external_neo4j.py` (11 cases) and `test_k8s_external_in_namespace.py` | e2e | `INFRAHUB_TESTING_EXTERNAL_DB=database uv run pytest -p no:pytest-infrahub-performance-test -v -m k8s tests/e2e/test_k8s_external_neo4j.py tests/e2e/test_k8s_external_in_namespace.py` | 2026-10-13 (local, after the last code change) | Docker Desktop, docker-driver vcluster, `neo4j:2025.10.1-enterprise` and `postgres:18-alpine` with self-signed TLS, MinIO, reached at `host.docker.internal` | `11 passed, 1 skipped` |
+| `test_k8s_external_neo4j.py` (11 cases) and `test_k8s_external_in_namespace.py` | e2e | `INFRAHUB_TESTING_EXTERNAL_DB=database uv run pytest -p no:pytest-infrahub-performance-test -v -m k8s tests/e2e/test_k8s_external_neo4j.py tests/e2e/test_k8s_external_in_namespace.py`, with the topology's other `INFRAHUB_TESTING_EXTERNAL_*` variables exported (the CI job's list is in `.github/workflows/ci.yml`); without them every case skips | 2026-10-13 (local, after the last code change) | Docker Desktop, docker-driver vcluster, `neo4j:2025.10.1-enterprise` and `postgres:18-alpine` with self-signed TLS, MinIO, reached at `host.docker.internal` | `11 passed, 1 skipped` |
 | `test_k8s_external_both.py` (5 cases) | e2e | same, with `INFRAHUB_TESTING_EXTERNAL_DB=database,task-manager-db` | 2026-10-13 (local) | same | `5 passed` |
-| both sessions above | e2e | CI job `e2e-tests-k8s (enterprise)` | 2026-10-13 ([run](https://github.com/opsmill/infrahub-backup/actions/runs/38412962425)) | GitHub runner, Docker bridge gateway | `11 passed, 1 skipped`; `5 passed` |
+| both sessions above | e2e | CI job `e2e-tests-k8s (enterprise)` | 2026-10-13, at `2bfed31` ([run](https://github.com/opsmill/infrahub-backup/actions/runs/38412962425)) | GitHub runner, Docker bridge gateway | `11 passed, 1 skipped`; `5 passed` |
 
 The skipped case needs an external Community server, which this topology does not provide.
 
@@ -528,10 +529,10 @@ The skipped case needs an external Community server, which this topology does no
 | Severity | Where | Finding | Outcome |
 |---|---|---|---|
 | high | `external_restore.go` `seedPrefix` | Every restore staged into one `seed/` folder; Neo4j reads the artifacts beside a seed as one backup chain, so a failed restore's staged copy made every later restore fail | Fixed `9ba780d`: one folder per artifact |
-| high | `external_restore.go` `failed` | A rejected seed is reported `offline` with a message that the failure marker did not match, so the restore waited the full 2-hour bound (T178) | Fixed: `offline` with a message ends the wait |
+| high | `external_restore.go` `failed` | A rejected seed is reported `offline` with a message that the failure marker did not match, so the restore waited the full 2-hour bound (T178) | Fixed `5707324`: `offline` with a message ends the wait |
 | medium | `environment_kubernetes.go` | The namespace check reported `exit status 1` without kubectl's message | Fixed `16c4a08` |
 | low | `external_restore.go` | The upload failure did not state that nothing was stopped | Fixed `9ba780d` |
-| — | FR-012 test | `neo4j-admin` exits 0 when one of two servers does not resolve; the PR author decided the test changes (T177) | Test changed |
+| — | FR-012 test | `neo4j-admin` exits 0 when one of two servers does not resolve; the PR author decided the test changes (T177) | Test changed in `ca4992e` |
 | — | TLS on port 6362 | Fails with both images; no client backup TLS policy | Issue [#178](https://github.com/opsmill/infrahub-backup/issues/178) |
 
-Test-only corrections: the suites need `--external-db-insecure-tls` and `--external-db-scratch-size` (new `INFRAHUB_TESTING_EXTERNAL_INSECURE_TLS` and `_SCRATCH_SIZE`), the both-external overlay needs `prefect-server.secret`, and five assertions predated the current code (permission sets, a scale-to-zero race, `source_roles` for PostgreSQL, the `task-manager-db` component name, the after-run check).
+Test-only corrections: the suites need `--external-db-insecure-tls` and `--external-db-scratch-size` (new `INFRAHUB_TESTING_EXTERNAL_INSECURE_TLS` and `_SCRATCH_SIZE`), the both-external overlay needs `prefect-server.secret`, and five test corrections were needed (permission sets, a scale-to-zero race, `source_roles` for PostgreSQL, the `task-manager-db` component name, the after-run check).
