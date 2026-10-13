@@ -346,6 +346,31 @@ func TestParseNeo4jDatabaseStatuses(t *testing.T) {
 		}
 	})
 
+	t.Run("offline with a message ends the wait", func(t *testing.T) {
+		// Observed on 2025.10.1: a rejected seed leaves the database offline with
+		// the reason, and the marker above is not in it.
+		message := "The backup artifact (s3://infrahub-seed/seed/neo4j-2026-10-13T10-24-18.backup) to restore is not part of a valid backup chain."
+		verdict := classifySeedStatuses(parseNeo4jDatabaseStatuses(
+			showDatabaseOutput(`"offline", "` + message + `"`)))
+
+		if !verdict.Failed {
+			t.Error("verdict.Failed = false, want an offline database with a reason to end the wait instead of running out --external-db-timeout")
+		}
+		if !strings.Contains(verdict.Detail, "not part of a valid backup chain") {
+			t.Errorf("verdict.Detail = %q, want the server's own message carried through", verdict.Detail)
+		}
+	})
+
+	t.Run("offline without a message keeps waiting", func(t *testing.T) {
+		// A database being replaced can pass through offline with nothing to say.
+		for _, row := range []string{`"offline", ""`, `"starting", ""`} {
+			verdict := classifySeedStatuses(parseNeo4jDatabaseStatuses(showDatabaseOutput(row)))
+			if verdict.Online || verdict.Failed {
+				t.Errorf("%s: verdict = %+v, want neither: the database may still be starting", row, verdict)
+			}
+		}
+	})
+
 	t.Run("no rows is neither online nor failed", func(t *testing.T) {
 		// A database being replaced is briefly absent from the listing, and
 		// reading that as a failure would fail a restore that is working.

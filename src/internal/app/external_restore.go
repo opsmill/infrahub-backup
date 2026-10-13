@@ -848,7 +848,8 @@ const (
 
 	// neo4jOnlineStatus is the only status that means the seed was fetched,
 	// validated and loaded.
-	neo4jOnlineStatus = "online"
+	neo4jOnlineStatus  = "online"
+	neo4jOfflineStatus = "offline"
 
 	// neo4jSeedPollInterval is how often the database's status is read while it
 	// starts. It is a wait between reads rather than a budget: the window is
@@ -891,8 +892,21 @@ func (s neo4jDatabaseStatus) online() bool {
 // could not fetch or validate the artifact says so in the status message, and
 // waiting out the window after that only delays a failure the server has
 // already reported.
+//
+// Two shapes are read as that report: the marker below, and an `offline` state
+// that carries a message. The second was observed on 2025.10.1 for a seed the
+// server rejected ("The backup artifact (...) to restore is not part of a valid
+// backup chain."): the database went offline with that message within seconds,
+// and without this the run waited out the whole --external-db-timeout, two hours
+// by default, for a database that was never going to start. An `offline` state
+// with no message is not read as a failure, because a database being replaced
+// can pass through it.
 func (s neo4jDatabaseStatus) failed() bool {
-	return strings.Contains(strings.ToLower(s.Message), neo4jSeedFailureMarker)
+	if strings.Contains(strings.ToLower(s.Message), neo4jSeedFailureMarker) {
+		return true
+	}
+
+	return strings.EqualFold(strings.TrimSpace(s.Status), neo4jOfflineStatus) && strings.TrimSpace(s.Message) != ""
 }
 
 // describe renders one member's report for the failure an operator reads.
