@@ -271,21 +271,40 @@ func TestVerifySeedReadableRefusesAnUnreadableURI(t *testing.T) {
 // is written. Retention only recognises an object whose key is exactly the one
 // an archive of that name would have, so a segment deeper is invisible to it.
 func TestSeedPrefixKeepsTheStagedArtifactOutOfRetention(t *testing.T) {
+	const artifact = "neo4j-2026-10-13T10-24-18.backup"
+	folder := seedKeySegment + "/neo4j-2026-10-13T10-24-18"
+
 	for prefix, want := range map[string]string{
-		"":              seedKeySegment,
-		"backups":       "backups/" + seedKeySegment,
-		"backups/":      "backups/" + seedKeySegment,
-		"  /backups/  ": "backups/" + seedKeySegment,
+		"":              folder,
+		"backups":       "backups/" + folder,
+		"backups/":      "backups/" + folder,
+		"  /backups/  ": "backups/" + folder,
 	} {
-		if got := seedPrefix(prefix); got != want {
-			t.Errorf("seedPrefix(%q) = %q, want %q", prefix, got, want)
+		if got := seedPrefix(prefix, artifact); got != want {
+			t.Errorf("seedPrefix(%q, %q) = %q, want %q", prefix, artifact, got, want)
 		}
 	}
 
-	client := &S3Client{config: &S3Config{Bucket: "infrahub-backups", Prefix: seedPrefix("backups")}}
+	client := &S3Client{config: &S3Config{Bucket: "infrahub-backups", Prefix: seedPrefix("backups", artifact)}}
 	key := client.buildS3Key("infrahub_backup_2026-09-03_10-00-00.tar.gz")
 	if _, recognised := client.backupRefForKey(key); recognised {
 		t.Errorf("a staged artifact at %q is recognised as a retention candidate, want it invisible to retention", key)
+	}
+}
+
+// TestSeedPrefixGivesEachArtifactItsOwnFolder pins that two artifacts never
+// share a folder. A Neo4j server reads the artifacts beside a seed as one backup
+// chain, so an earlier restore's staged copy left in the same folder makes the
+// next seed fail ("is not part of a valid backup chain").
+func TestSeedPrefixGivesEachArtifactItsOwnFolder(t *testing.T) {
+	first := seedPrefix("backups", "neo4j-2026-10-13T10-17-43.backup")
+	second := seedPrefix("backups", "neo4j-2026-10-13T10-24-18.backup")
+
+	if first == second {
+		t.Fatalf("two artifacts share the staging folder %q, so one restore's leftover breaks the next", first)
+	}
+	if again := seedPrefix("backups", "neo4j-2026-10-13T10-17-43.backup"); again != first {
+		t.Errorf("restaging the same artifact moved it from %q to %q, want the same folder", first, again)
 	}
 }
 

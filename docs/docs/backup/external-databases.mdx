@@ -133,9 +133,12 @@ S3-compatible stores work, not only AWS. For a self-hosted store such as MinIO, 
 each Neo4j server's environment. The built-in `s3` provider honours that endpoint, so you do not
 need an AWS account to use restore.
 
-The staged copy is written one key segment deeper than your archives, under `seed/` beneath the
-configured `--s3-prefix`. Retention only recognizes archive keys, so a staged seed is never a
-pruning candidate.
+The staged copy is written below your archives, at `seed/<artifact name>/` beneath the configured
+`--s3-prefix`. Retention only recognizes archive keys, so a staged seed is never a pruning
+candidate. Each artifact gets a folder of its own because a Neo4j server reads the other backup
+files beside a seed as one backup chain and refuses the seed when they do not form one. A restore
+that fails leaves its staged copy in place so you can inspect it; delete it by hand once you no
+longer need it.
 
 :::warning
 Confirm both prerequisites with whoever administers your database before you rely on

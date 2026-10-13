@@ -528,7 +528,7 @@ func (iops *InfrahubOps) stageNeo4jSeed(workDir string) (restoreSeed, error) {
 				"No Infrahub service was stopped and no data was changed", err)
 	}
 
-	client, err := seedStoreClient(configured, configured.Bucket, seedPrefix(configured.Prefix))
+	client, err := seedStoreClient(configured, configured.Bucket, seedPrefix(configured.Prefix, filepath.Base(artifact)))
 	if err != nil {
 		return restoreSeed{}, fmt.Errorf("failed to reach the object store the restore artifact must be staged in: %w", err)
 	}
@@ -540,7 +540,13 @@ func (iops *InfrahubOps) stageNeo4jSeed(workDir string) (restoreSeed, error) {
 
 	uri, err := client.Upload(ctx, artifact)
 	if err != nil {
-		return restoreSeed{}, fmt.Errorf("failed to stage the restore artifact where the Neo4j servers can fetch it: %w", err)
+		// The same three elements as unreadableSeedArtifact: staging happens before
+		// anything is stopped, so a store this run cannot write to is refused with
+		// the deployment untouched, and the operator needs to read that first.
+		return restoreSeed{}, fmt.Errorf(
+			"failed to stage the restore artifact where the Neo4j servers can fetch it: %w. "+
+				"The bucket has to exist and be writable from here, and readable from the database host, because the Neo4j servers fetch the artifact themselves. "+
+				"No Infrahub service was stopped and no data was changed", err)
 	}
 
 	seed, err := verifySeedReadable(ctx, configured, uri)
@@ -566,16 +572,29 @@ func (iops *InfrahubOps) objectStore() *S3Config {
 	return iops.config.S3
 }
 
-// seedPrefix is the staged artifact's key prefix: one segment below wherever
-// the archives are written, or that segment alone where no prefix is
-// configured.
-func seedPrefix(prefix string) string {
+// seedPrefix is the staged artifact's key prefix: a folder of its own, named
+// after the artifact, under the seed segment below wherever the archives are
+// written (or under that segment alone where no prefix is configured).
+//
+// The folder of its own is what makes a restore independent of every earlier
+// one. A Neo4j server seeding from a `.backup` URI reads the other artifacts
+// beside it as one backup chain, and refuses the seed when they do not form one
+// ("is not part of a valid backup chain"): observed on 2025.10.1 against MinIO,
+// where the same artifact seeded alone and failed next to another. A failed
+// restore leaves its staged copy on purpose (discardStagedSeed), so with a shared
+// folder that copy broke every later restore into the same bucket, and the
+// database stayed offline until the confirmation timed out. Naming the folder
+// after the artifact keeps one artifact per folder without a run identifier:
+// restoring the same archive twice writes the same object again.
+func seedPrefix(prefix, artifact string) string {
+	folder := seedKeySegment + "/" + strings.TrimSuffix(artifact, neo4jSeedArtifactSuffix)
+
 	trimmed := strings.Trim(strings.TrimSpace(prefix), "/")
 	if trimmed == "" {
-		return seedKeySegment
+		return folder
 	}
 
-	return trimmed + "/" + seedKeySegment
+	return trimmed + "/" + folder
 }
 
 // verifySeedReadable reads the staged object back through a client built from
