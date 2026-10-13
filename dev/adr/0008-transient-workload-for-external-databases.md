@@ -57,8 +57,8 @@ wide:
 - Only a deployment with a database outside it needs new permissions (FR-019). A deployment whose
   databases are all internal needs none beyond what it needed before (FR-015). The permissions an
   external database needs are listed in ADR 0009. They are added to the write permissions the
-  Kubernetes path already needs to stop and restart Infrahub (`patch` on the workloads and their
-  `scale` resources).
+  Kubernetes path already needs to stop and restart Infrahub: `patch` on the `scale` resources of
+  its Deployments and StatefulSets, which `kubectl scale` writes to.
 - `infrahub-collect` does not inherit any of this. `--include-backup` refuses when a database
   resolves as external, naming `infrahub-backup create` as the tool that performs the capture, so
   ADR 0003's read-only guarantee stays unqualified and collect still needs only read and exec

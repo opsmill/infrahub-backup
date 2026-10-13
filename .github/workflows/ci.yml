@@ -137,7 +137,8 @@ jobs:
     if: |
       !cancelled() && !contains(needs.*.result, 'failure') &&
       (needs.files-changed.outputs.go == 'true' || needs.files-changed.outputs.python == 'true')
-    needs: ["files-changed", "test"]
+    # go-lint is listed so that its failure stops this job; `test` only inherits it as a skip.
+    needs: ["files-changed", "go-lint", "test"]
     runs-on:
       group: huge-runners
     # The enterprise leg also runs the two external-database sessions, each with its own

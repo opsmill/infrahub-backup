@@ -182,7 +182,8 @@ but the channel it would have configured takes no policy name.
 
 When you set `--project` (`INFRAHUB_PROJECT`) or `--k8s-namespace` (`INFRAHUB_K8S_NAMESPACE`), the
 command acts only on that deployment. If it cannot reach it, the command fails and does not look for
-another deployment on the same host.
+another deployment on the same host. If you set both, the command tries the Kubernetes namespace
+first and then the Docker Compose project, and fails only when it reaches neither.
 
 ### Docker Compose project detection
 
