@@ -27,18 +27,23 @@ import re
 import kr8s.asyncio
 import pytest
 from kr8s.asyncio.objects import Deployment as AsyncDeployment
+from kr8s.asyncio.objects import Pod as AsyncPod
 
 from tests.e2e.conftest import (
+    POD_EXEC_RULE,
     POD_READ_RULE,
     SERVICE_NEO4J,
     SERVICE_TASK_MANAGER_DB,
     UNREACHABLE_ENDPOINT,
+    WORKLOAD_READ_RULE,
     external_db_env,
     external_db_image_args,
+    external_topology_args,
     portforward_infrahub,
     requires_external_db,
     restricted_kubeconfig,
     transient_objects,
+    transient_objects_after_run,
 )
 from tests.helpers.utils import (
     find_latest_backup,
@@ -154,7 +159,7 @@ async def test_mixed_topology_reports_and_records_the_external_neo4j(
     assert metadata.get("capture_complete") is not False, "a retained artifact must not be an incomplete capture"
 
     # FR-011 / FR-023: nothing of the run's own survives it.
-    left_behind = await transient_objects(kubeconfig, namespace)
+    left_behind = await transient_objects_after_run(kubeconfig, namespace)
     assert left_behind == [], f"transient objects survived the run: {left_behind}"
 
 
@@ -183,6 +188,7 @@ async def test_tooling_older_than_the_server_aborts_before_writing_anything(
             namespace,
             "--external-db-image",
             older_image,
+            *external_topology_args(),
             "--backup-dir",
             str(backup_dir),
             "create",
@@ -229,6 +235,7 @@ async def test_tooling_newer_than_the_server_warns_and_continues(
             namespace,
             "--external-db-image",
             newer_image,
+            *external_topology_args(),
             "--backup-dir",
             str(backup_dir),
             "create",
@@ -268,7 +275,6 @@ async def test_killing_the_tool_mid_capture_leaves_only_what_the_cluster_removes
     removes the rest.
     """
     from kr8s.asyncio.objects import Job as AsyncJob
-    from kr8s.asyncio.objects import Pod as AsyncPod
     from kr8s.asyncio.objects import Secret as AsyncSecret
 
     from tests.e2e.conftest import TRANSIENT_LABEL_MARKER
@@ -321,7 +327,11 @@ async def test_killing_the_tool_mid_capture_leaves_only_what_the_cluster_removes
 
     # The pod belongs to the Job, so deleting the Job deletes it, and it restates the deadline
     # because the Job controller does not copy it onto the pod (ADR 0018).
+    # A pod already being deleted belongs to an earlier run whose Job is gone, which is the
+    # cleanup this case asserts, not a pod of this run.
     for pod in pods:
+        if pod.raw["metadata"].get("deletionTimestamp"):
+            continue
         owners = pod.raw["metadata"].get("ownerReferences", [])
         assert any(owner.get("kind") == "Job" and owner.get("uid") in job_uids for owner in owners), (
             f"pod {pod.name} is not owned by the run's Job, so deleting the Job leaves it: {owners}"
@@ -373,7 +383,6 @@ async def test_credentials_are_reclaimed_with_the_workload_without_the_tool(
     """
     import kr8s.asyncio
     from kr8s.asyncio.objects import Job as AsyncJob
-    from kr8s.asyncio.objects import Pod as AsyncPod
     from kr8s.asyncio.objects import Secret as AsyncSecret
 
     from tests.e2e.conftest import TRANSIENT_LABEL_MARKER, TRANSIENT_OBJECT_PREFIX
@@ -496,7 +505,7 @@ async def test_one_unreachable_endpoint_of_several_is_not_a_retained_artifact(
         "an incomplete capture must not be retained: retention and latest-backup selection "
         "would both treat a retained archive as restorable"
     )
-    left_behind = await transient_objects(kubeconfig, namespace)
+    left_behind = await transient_objects_after_run(kubeconfig, namespace)
     assert left_behind == [], f"transient objects survived the failed run: {left_behind}"
 
 
@@ -544,7 +553,7 @@ async def test_scratch_space_too_small_fails_cleanly(infrahub_k8s_external, exte
     assert re.search(r"scratch|space|storage|ephemeral", combined, re.IGNORECASE), (
         f"the failure must name the scratch space as the condition, not just fail:\n{combined}"
     )
-    left_behind = await transient_objects(kubeconfig, namespace)
+    left_behind = await transient_objects_after_run(kubeconfig, namespace)
     assert left_behind == [], f"transient objects survived the failed run: {left_behind}"
 
 
@@ -614,7 +623,7 @@ async def test_external_community_is_refused_for_its_mechanism_not_a_missing_ser
     )
 
     assert _archives(backup_dir) == [], f"a refused capture must retain nothing:\n{combined}"
-    left_behind = await transient_objects(kubeconfig, namespace)
+    left_behind = await transient_objects_after_run(kubeconfig, namespace)
     assert left_behind == [], f"transient objects survived the refusal: {left_behind}"
 
 
@@ -648,6 +657,15 @@ async def test_an_undiscoverable_endpoint_names_where_discovery_looked(
 
     try:
         await server.scale(0)
+        # Scaling returns before the pod has gone, and a terminating pod still answers an
+        # exec, so the run would read the address from it. Wait until no pod is left.
+        selector = ",".join(f"{k}={v}" for k, v in server.raw["spec"]["selector"]["matchLabels"].items())
+        for _ in range(60):
+            if not [pod async for pod in AsyncPod.list(namespace=namespace, label_selector=selector, api=api)]:
+                break
+            await asyncio.sleep(2)
+        else:
+            pytest.fail(f"infrahub-server pods ({selector}) still exist two minutes after scaling to zero")
 
         result = run_cli(
             backup_binary,
@@ -776,7 +794,9 @@ async def test_absent_pod_creation_permission_names_the_verbs_and_resource(
     kubeconfig = infrahub_k8s_external["kubeconfig_path"]
     backup_dir = tmp_path / "backups"
 
-    async with restricted_kubeconfig(kubeconfig, namespace, rules=[POD_READ_RULE], name="xdb-nocreate") as restricted:
+    async with restricted_kubeconfig(
+        kubeconfig, namespace, rules=[POD_READ_RULE, WORKLOAD_READ_RULE, POD_EXEC_RULE], name="xdb-nocreate"
+    ) as restricted:
         result = run_cli(
             backup_binary,
             ["--k8s-namespace", namespace, *image_args, "--backup-dir", str(backup_dir), "create", "--force"],

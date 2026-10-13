@@ -21,8 +21,9 @@ from tests.e2e.conftest import (
     DIRECT_MODE_RULES,
     SERVICE_NEO4J,
     external_db_env,
+    external_topology_args,
     requires_external_db,
-    transient_objects,
+    transient_objects_after_run,
 )
 
 # The line the run logs when it takes direct mode, from src/internal/app/external_local.go,
@@ -51,8 +52,9 @@ def _kubectl(kubeconfig: str, namespace: str, *args: str, stdin: str | None = No
 
 
 def _runner_manifests(namespace: str, image: str, env: dict[str, str]) -> str:
+    flags = " ".join(external_topology_args())
     script = (
-        f"infrahub-backup --k8s-namespace {namespace} --backup-dir {BACKUP_DIR} create --force "
+        f"infrahub-backup --k8s-namespace {namespace} {flags} --backup-dir {BACKUP_DIR} create --force "
         f"&& echo {ARCHIVE_MARKER} && ls -1 {BACKUP_DIR}"
     )
     return yaml.dump_all(
@@ -158,7 +160,7 @@ async def test_a_run_inside_the_namespace_captures_with_no_transient_workload(in
             f"expected exactly one artifact in {BACKUP_DIR}, got {archives}:\n{output}"
         )
 
-        left_behind = await transient_objects(kubeconfig, namespace)
+        left_behind = await transient_objects_after_run(kubeconfig, namespace)
         assert left_behind == [], f"a direct-mode run left transient objects in the namespace: {left_behind}"
     finally:
         _kubectl(

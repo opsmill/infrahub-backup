@@ -32,7 +32,7 @@ from tests.e2e.conftest import (
     external_db_image_args,
     portforward_infrahub,
     requires_external_db,
-    transient_objects,
+    transient_objects_after_run,
 )
 from tests.helpers.utils import (
     find_latest_backup,
@@ -202,14 +202,21 @@ async def test_both_databases_external_are_both_captured(
             f"external_location does not mark {service} external: {external_location}"
         )
         assert source_endpoints.get(service), f"source_endpoints records no endpoint for {service}: {source_endpoints}"
-        assert source_roles.get(service), f"source_roles records no observed roles for {service}: {source_roles}"
 
-    assert set(metadata.get("components", [])) >= {"database", "task-manager"}, (
+    # Roles are observed for Neo4j only. PostgreSQL has none to observe, so its entry is absent
+    # rather than `unknown`, which would claim an observation the run never made
+    # (contracts/artifact-and-metadata.md, `source_roles`).
+    assert source_roles.get(SERVICE_NEO4J), f"source_roles records no observed roles for Neo4j: {source_roles}"
+    assert SERVICE_TASK_MANAGER_DB not in source_roles, (
+        f"source_roles records roles for PostgreSQL, which has none to observe: {source_roles}"
+    )
+
+    assert set(metadata.get("components", [])) >= {"database", "task-manager-db"}, (
         f"an artifact of both databases must list both components: {metadata.get('components')}"
     )
     assert metadata.get("capture_complete") is not False, "a retained artifact must not be an incomplete capture"
 
-    left_behind = await transient_objects(kubeconfig, namespace)
+    left_behind = await transient_objects_after_run(kubeconfig, namespace)
     assert left_behind == [], f"transient objects survived the run: {left_behind}"
 
 
@@ -362,7 +369,7 @@ async def test_full_round_trip_through_both_external_databases(
         await verify_infrahub_data(url, token, seed)
 
     # FR-011 / FR-023: and the restore left nothing of its own behind either.
-    left_behind = await transient_objects(kubeconfig, namespace)
+    left_behind = await transient_objects_after_run(kubeconfig, namespace)
     assert left_behind == [], f"transient objects survived the restore: {left_behind}"
 
 
@@ -442,11 +449,14 @@ async def test_an_unreadable_artifact_uri_is_refused_before_anything_destructive
     assert unreachable_bucket in combined, f"the refusal does not name the location it tried to stage into:\n{combined}"
     # Operator action: the server-side prerequisite, which is what separates this from an
     # ordinary object-store error — the remedy is on the database host, not here.
-    assert re.search(r"servers? (fetch|can read)|from the database host", combined, re.IGNORECASE), (
+    assert re.search(r"servers? (can )?(fetch|read)|from the database host", combined, re.IGNORECASE), (
         f"the refusal does not name the server-side prerequisite, so an operator cannot tell it "
         f"from a bucket typo on this host:\n{combined}"
     )
-    assert UNTOUCHED_CLAIM in combined, f"the refusal does not state that nothing was touched:\n{combined}"
+    # The staging refusals open a sentence with the claim, so its first letter is capitalised.
+    assert UNTOUCHED_CLAIM.lower() in combined.lower(), (
+        f"the refusal does not state that nothing was touched:\n{combined}"
+    )
 
     # The claim, verified independently: FR-007 requires the refusal to come before the
     # destructive step, and the deployment still serving the *current* data is the proof.
@@ -454,7 +464,7 @@ async def test_an_unreadable_artifact_uri_is_refused_before_anything_destructive
     async with portforward_infrahub(kubeconfig, namespace) as url:
         await verify_infrahub_data(url, token, seed)
 
-    left_behind = await transient_objects(kubeconfig, namespace)
+    left_behind = await transient_objects_after_run(kubeconfig, namespace)
     assert left_behind == [], f"transient objects survived the refused restore: {left_behind}"
 
 
@@ -516,7 +526,9 @@ async def test_a_readable_but_corrupt_artifact_fails_and_never_reports_success(
         f"a corrupt artifact produced a successful restore, so an operator is told their data "
         f"is back when it is not (FR-021):\n{combined}"
     )
-    assert not re.search(r"restore completed successfully|Restore complete", combined, re.IGNORECASE), (
+    # The run-level success line only: "PostgreSQL restore completed" reports one database,
+    # which may legitimately have been restored before the Neo4j seed failed.
+    assert not re.search(r'msg="Restore completed successfully', combined), (
         f"the run reported success alongside a non-zero exit:\n{combined}"
     )
     # Condition, resource and action. Whichever stage catches it — the archive read, the
@@ -527,5 +539,5 @@ async def test_a_readable_but_corrupt_artifact_fails_and_never_reports_success(
     )
 
     # FR-011: a restore that failed still gives back everything it created.
-    left_behind = await transient_objects(kubeconfig, namespace)
+    left_behind = await transient_objects_after_run(kubeconfig, namespace)
     assert left_behind == [], f"transient objects survived the failed restore: {left_behind}"

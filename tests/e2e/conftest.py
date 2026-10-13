@@ -1,3 +1,4 @@
+import asyncio
 import os
 import subprocess
 import time
@@ -362,10 +363,21 @@ async def infrahub_k8s(
 #       published image to default to, so every external case passes it with
 #       `--external-db-image`. The `external_db_image` fixture loads it into the session's
 #       vcluster; the cluster is created by pytest, so it cannot be loaded beforehand.
+#   INFRAHUB_TESTING_EXTERNAL_INSECURE_TLS
+#       `true` when the servers present self-signed certificates. Every external case
+#       then passes `--external-db-insecure-tls`: the tool verifies certificates by
+#       default (FR-029) and always encrypts PostgreSQL, so a server without TLS cannot
+#       serve these suites at all.
+#   INFRAHUB_TESTING_EXTERNAL_SCRATCH_SIZE
+#       A storage quantity such as `2Gi`, passed as `--external-db-scratch-size` on every
+#       external case. Needed until T158: Neo4j 2025.x reports no store size, so a capture
+#       without one refuses to start.
 
 EXTERNAL_DB_ENV_VAR = "INFRAHUB_TESTING_EXTERNAL_DB"
 EXTERNAL_HELM_VALUES_ENV_VAR = "INFRAHUB_TESTING_EXTERNAL_HELM_VALUES"
 EXTERNAL_DB_IMAGE_ENV_VAR = "INFRAHUB_TESTING_EXTERNAL_DB_IMAGE"
+EXTERNAL_INSECURE_TLS_ENV_VAR = "INFRAHUB_TESTING_EXTERNAL_INSECURE_TLS"
+EXTERNAL_SCRATCH_SIZE_ENV_VAR = "INFRAHUB_TESTING_EXTERNAL_SCRATCH_SIZE"
 
 # The deployment service names the tool resolves per service, as `docker compose` and the
 # Helm chart name them.
@@ -549,10 +561,23 @@ def _external_values_overlay(topology: dict) -> dict:
             env["INFRAHUB_DB_PASSWORD"] = topology["neo4j_password"]
 
     if SERVICE_TASK_MANAGER_DB in topology["services"]:
-        overlay["prefect-server"] = {"postgresql": {"enabled": False}}
         user = topology["postgres_username"] or "postgres"
         password = topology["postgres_password"] or "prefect"
         address = topology["postgres_address"]
+        host, _, port = address.rpartition(":") if ":" in address else (address, "", "5432")
+        # With its own PostgreSQL disabled, the prefect-server subchart builds the task
+        # manager's connection string from `secret`, and refuses to render without it.
+        overlay["prefect-server"] = {
+            "postgresql": {"enabled": False},
+            "secret": {
+                "create": True,
+                "username": user,
+                "password": password,
+                "host": host,
+                "port": port,
+                "database": "prefect",
+            },
+        }
         env["PREFECT_API_DATABASE_CONNECTION_URL"] = f"postgresql+asyncpg://{user}:{password}@{address}/prefect"
 
     # Both components that read the database get the same environment, each under its own
@@ -632,9 +657,30 @@ def external_db_image(vcluster: dict, external_topology: dict) -> str:
     return image
 
 
+def external_topology_args() -> list[str]:
+    """The flags the topology needs on every external run, whatever the case asserts.
+
+    `--external-db-insecure-tls` when the servers present a certificate nothing can verify:
+    the tool verifies certificates by default (FR-029) and always encrypts the PostgreSQL
+    connection, so a test topology with self-signed certificates has to opt out, as an
+    operator would. The channel stays encrypted.
+
+    `--external-db-scratch-size` when the topology declares one: Neo4j 2025.x reports no
+    store size, so a capture refuses to guess one (tasks.md T158). A case that passes its
+    own size later on the command line overrides this one, because the last value wins.
+    """
+    args: list[str] = []
+    if os.environ.get(EXTERNAL_INSECURE_TLS_ENV_VAR, "").strip().lower() in ("1", "true", "yes"):
+        args.append("--external-db-insecure-tls")
+    scratch = os.environ.get(EXTERNAL_SCRATCH_SIZE_ENV_VAR, "").strip()
+    if scratch:
+        args += ["--external-db-scratch-size", scratch]
+    return args
+
+
 def external_db_image_args(deployment: dict) -> list[str]:
-    """The root flags that select the image the external path runs, for a CLI invocation."""
-    return ["--external-db-image", deployment["external_db_image"]]
+    """The root flags that select how the external path runs, for a CLI invocation."""
+    return ["--external-db-image", deployment["external_db_image"], *external_topology_args()]
 
 
 # A Dockerfile, built with no context, that derives an image from the one under test whose
@@ -837,6 +883,11 @@ async def restricted_kubeconfig(kubeconfig_path: str, namespace: str, rules: lis
 # scenarios revoke. Kept in step with `transientWorkloadRBAC` in
 # src/internal/app/transient_workload.go, which is what the tool's own refusal names.
 POD_READ_RULE = {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list"]}
+# Where a database runs is settled from the namespace's workloads as well as its pods, so an
+# identity that is to reach the point of creating a workload needs to read both.
+WORKLOAD_READ_RULE = {"apiGroups": ["apps"], "resources": ["deployments", "statefulsets"], "verbs": ["get", "list"]}
+# The database address is read from the environment of a running Infrahub component.
+POD_EXEC_RULE = {"apiGroups": [""], "resources": ["pods/exec"], "verbs": ["create"]}
 TRANSIENT_WRITE_RULES = [
     {"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["create", "get", "delete"]},
     {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list", "watch", "delete"]},
@@ -879,6 +930,23 @@ async def transient_jobs(kubeconfig_path: str, namespace: str) -> list[str]:
         text=True,
     )
     return [line.replace("job.batch/", "job/") for line in result.stdout.split() if line]
+
+
+async def transient_objects_after_run(kubeconfig_path: str, namespace: str, timeout: float = 60) -> list[str]:
+    """`transient_objects` once the cluster has had `timeout` seconds to finish removing them.
+
+    The tool deletes the Job without waiting (ADR 0018), and the garbage collector then
+    deletes the Job's pod and Secret. Those can still be listed for a few seconds after the
+    run returns, which is the cleanup working, not an object surviving it. What FR-011 and
+    FR-023 forbid is an object the cluster does not remove, so this waits for the removal
+    and returns what is still there at the deadline.
+    """
+    deadline = time.monotonic() + timeout
+    found = await transient_objects(kubeconfig_path, namespace)
+    while found and time.monotonic() < deadline:
+        await asyncio.sleep(2)
+        found = await transient_objects(kubeconfig_path, namespace)
+    return found
 
 
 async def transient_objects(kubeconfig_path: str, namespace: str) -> list[str]:
