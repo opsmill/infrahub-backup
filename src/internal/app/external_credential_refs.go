@@ -39,8 +39,8 @@ import (
 //     URL, a Secret-backed variable on the task-manager pod held exactly the
 //     user or the password the URL carried when the environment was read.
 //
-// Anything short of that — an inline value, a ConfigMap, several envFrom
-// sources any of which could have supplied the variable, a pod that cannot be
+// Anything short of that — an inline value, a ConfigMap, a variable reached
+// only through envFrom (which names no keys), a pod that cannot be
 // read — falls back to the owned Secret, which is the behaviour every run had
 // before this file existed.
 
@@ -268,11 +268,14 @@ func (d podEnvDeclarations) execContainer() (podContainerEnv, bool) {
 //
 // It follows the precedence the kubelet applies: an `env` entry overrides
 // anything from `envFrom`, and of two `env` entries with one name the later
-// wins. An `envFrom` source names no keys, so a variable reached only through
-// one is attributed to it only when it is the *sole* source that could have
-// supplied it — one Secret whose prefix the name carries, and no ConfigMap
-// beside it. Two candidates means the answer would depend on what the Secrets
-// hold, and reading them is the permission this file exists to avoid needing.
+// wins. A variable reached only through `envFrom` is never attributed to a
+// Secret. An `envFrom` source names no keys and the kubelet silently skips a
+// key the Secret lacks, so a name that matches a source's prefix (an empty
+// prefix matches every name) does not show that the Secret holds the key: the
+// value may come from the image instead. A `secretKeyRef` to a missing key
+// would hold the transient container pending and block the run, and checking
+// that the key exists would mean reading the Secret, which is the permission
+// this file exists to avoid needing. Such a variable falls back.
 func (c podContainerEnv) secretKeyFor(variable string) (transientSecretKeyRef, string, bool) {
 	for i := len(c.env) - 1; i >= 0; i-- {
 		entry := c.env[i]
@@ -290,32 +293,21 @@ func (c podContainerEnv) secretKeyFor(variable string) (transientSecretKeyRef, s
 		}
 	}
 
-	var (
-		secretSources []podEnvFrom
-		configMaps    int
-	)
+	sources := 0
 	for _, source := range c.envFrom {
 		if !strings.HasPrefix(variable, source.prefix) || len(variable) == len(source.prefix) {
 			continue
 		}
-		switch {
-		case source.secretName != "":
-			secretSources = append(secretSources, source)
-		case source.configMapName != "":
-			configMaps++
+		if source.secretName != "" || source.configMapName != "" {
+			sources++
 		}
 	}
 
-	switch {
-	case len(secretSources) == 0 && configMaps == 0:
+	if sources == 0 {
 		return transientSecretKeyRef{}, fmt.Sprintf("the pod spec does not declare %s, so the image or its entrypoint sets it", variable), false
-	case len(secretSources) != 1 || configMaps != 0:
-		return transientSecretKeyRef{}, fmt.Sprintf("%s could come from any of %d envFrom sources, and telling which one would mean reading the Secrets", variable, len(secretSources)+configMaps), false
 	}
 
-	source := secretSources[0]
-
-	return transientSecretKeyRef{Name: source.secretName, Key: strings.TrimPrefix(variable, source.prefix)}, "", true
+	return transientSecretKeyRef{}, fmt.Sprintf("%s could come from %d envFrom source(s), which name no keys, so whether a Secret holds it would mean reading the Secret", variable, sources), false
 }
 
 // firstSecretKey is secretKeyFor over the candidate variables in order, the

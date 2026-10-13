@@ -64,25 +64,23 @@ func TestDeploymentCredentialRefs(t *testing.T) {
 			},
 		},
 		{
-			name: "envFrom secretRef maps the variable name, less its prefix, as the key",
+			// envFrom names no keys and the kubelet skips a key the Secret
+			// lacks, so a matching prefix does not show the Secret holds the
+			// variable; a mandatory secretKeyRef to a missing key would block
+			// the run, so the owned Secret is used instead.
+			name: "a sole envFrom secretRef with no prefix falls back",
 			listing: podEnvListing("",
 				"C\tinfrahub-server",
 				"F\t\tinfrahub-db\t",
 				"F\tAPP_\tunrelated\t"),
-			want: map[string]transientSecretKeyRef{
-				"NEO4J_USERNAME": {Name: "infrahub-db", Key: "INFRAHUB_DB_USERNAME"},
-				"NEO4J_PASSWORD": {Name: "infrahub-db", Key: "INFRAHUB_DB_PASSWORD"},
-			},
+			wantReason: "envFrom source",
 		},
 		{
-			name: "an envFrom prefix is stripped from the key",
+			name: "a sole envFrom secretRef whose prefix the variable carries falls back",
 			listing: podEnvListing("",
 				"C\tinfrahub-server",
 				"F\tINFRAHUB_DB_\tneo4j-auth\t"),
-			want: map[string]transientSecretKeyRef{
-				"NEO4J_USERNAME": {Name: "neo4j-auth", Key: "USERNAME"},
-				"NEO4J_PASSWORD": {Name: "neo4j-auth", Key: "PASSWORD"},
-			},
+			wantReason: "envFrom source",
 		},
 		{
 			name: "an inline value falls back",
@@ -124,7 +122,7 @@ func TestDeploymentCredentialRefs(t *testing.T) {
 				"C\tinfrahub-server",
 				"F\t\tfirst\t",
 				"F\t\tsecond\t"),
-			wantReason: "envFrom sources",
+			wantReason: "envFrom source",
 		},
 		{
 			name: "an envFrom Secret beside an envFrom ConfigMap falls back",
@@ -132,7 +130,7 @@ func TestDeploymentCredentialRefs(t *testing.T) {
 				"C\tinfrahub-server",
 				"F\t\tinfrahub-db\t",
 				"F\t\t\tsettings"),
-			wantReason: "envFrom sources",
+			wantReason: "envFrom source",
 		},
 		{
 			name: "a variable the spec does not declare falls back",

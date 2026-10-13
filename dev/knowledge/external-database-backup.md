@@ -62,16 +62,16 @@ on stdin. The credentials reach it in one of two ways (`external_credential_refs
 
 - **Reference the deployment's Secret.** When the username and password the run holds were both
   read from the deployment component's environment, and that component's running pod declares the
-  variables that held them as Secret keys (`env[].valueFrom.secretKeyRef`, or a single matching
-  `envFrom[].secretRef`), the Job maps those keys onto `NEO4J_USERNAME`/`NEO4J_PASSWORD` or
+  variables that held them as Secret keys (`env[].valueFrom.secretKeyRef`), the Job maps those keys onto `NEO4J_USERNAME`/`NEO4J_PASSWORD` or
   `PGUSER`/`PGPASSWORD` with `secretKeyRef` (never optional). No Secret is created. The pod spec is
   read with a jsonpath that returns references only, never inline values, and the decision is made
   once per database while the deployment is still up. For PostgreSQL the URL is a single value, so
   reuse needs variables beside it that held the same user and password; prefect-server renders
   `PREFECT_SERVER_DATABASE_USER`/`_PASSWORD` that way when `externalDatabase.usernameSecretKey` and
   `passwordSecretKey` are set. The default chart puts only the URL in a Secret, so it falls back.
-- **Owned Secret (fallback).** Operator-supplied credentials, inline values, ConfigMaps, ambiguous
-  `envFrom` sources or an unreadable pod: a credential Secret is created with an `ownerReference`
+- **Owned Secret (fallback).** Operator-supplied credentials, inline values, ConfigMaps, variables
+  reached only through `envFrom` (which names no keys, and whose Secret may lack the key while the
+  image sets the variable) or an unreadable pod: a credential Secret is created with an `ownerReference`
   to the Job (ADR 0009), exactly as before.
 
 | Role | When | Scratch | Hosts |
