@@ -430,3 +430,78 @@ server** (T158), so the documented "derived from the database size" default is d
 Findings recorded as T156–T161; the doc's five misleads as T161. The three HIGH items are the next
 fixes, in that order. Cluster and containers are left running for inspection; teardown commands are
 in the evidence file.
+
+---
+
+# Implementation report — Phase 6: database tools in the infrahub-backup image (run of 2026-10-12/13)
+
+**Status: INCOMPLETE.** Two end-to-end tasks (T175, T176) are written but have not run, because they
+need the external-database topology of T072, which neither this host nor CI provides.
+
+- Feature: ADR 0017, FR-030 to FR-033, requested in review of
+  [PR #172](https://github.com/opsmill/infrahub-backup/pull/172)
+- Spec dir: `specs/archive/007-external-database-backup`
+- Base commit: `a170ef0` · Head commit: `3fe7b95`
+
+## Chunk ledger
+
+| Chunk | Tasks | ✅ / ⚠️ / ❌ | Commits | Flagged upward |
+|---|---|---|---|---|
+| 6A The image carries the tools | 2 | 2 / 0 / 0 | `ea1d73b` | Base moved to Alpine 3.23 (3.21 and 3.22 have no PostgreSQL 18 client). Image 34 → 343.9 MiB. |
+| 6B The workload runs the infrahub-backup image | 5 | 5 / 0 / 0 | `48f6e95` | Development build = any version that is not a release semver tag. The uid stays explicit (1000) because the image names its user. |
+| 6C Direct mode in the namespace | 5 | 5 / 0 / 0 | `b5e87ad` | No new interface: a `local:` target is handled at four call sites. A development build is not refused in direct mode, because no image runs. |
+| 6D End-to-end | 3 | 1 / 2 / 0 | `e6abd08` | Image loaded into the vcluster nodes with `ctr import`. Version-gate cases build images reporting `4.0.0` and `2099.12.0`. Permission docs corrected: scaling needs `patch` on `deployments/scale` and `statefulsets/scale`. |
+| Review fixes | — | — | `90a088c`, `97461b9` | See review findings. |
+| Image size (asked by the PR author during the run) | — | — | `d1b3c2f`, `3fe7b95` | jlink runtime and unused jars removed: 343.9 → 208.7 → 156.4 MiB compressed (arm64). |
+
+## Tasks not completed
+
+- T175: the external suites now pass `--external-db-image` and the reworked version-gate and
+  credential cases, but have not run. Needs the T072 topology.
+- T176: `tests/e2e/test_k8s_external_in_namespace.py` is written and has not run, for the same reason.
+
+## Local-pass evidence
+
+| Test id | Type | Run command | Passed at (ISO 8601) | Environment | Verbatim pass line |
+|---|---|---|---|---|---|
+| `make docker-check-tools` (`scripts/check-image-tools.sh`) | integration | `make docker-check-tools` | 2026-10-13 (after `3fe7b95`) | macOS, Docker 29.4.0 (OrbStack), linux/arm64 | `All database tools present in infrahub-backup:check-tools`, `Image size: 163982501 bytes (156 MiB)` |
+| Image validation: remote backup (plain and with backup SSL policy), inspect, restore, consistency check, cypher-shell plain/ssc/TLS, pg_dump/pg_restore | integration | `scratchpad/image-slim/validate.sh`, `tls.sh` (not in the repo) | 2026-10-13 | Own Neo4j 2025.10.1 Enterprise and postgres:18-alpine on a dedicated network, linux/arm64 | `Backup command completed.`, `consistency check rc=0`, `pg_dump ok`, `pg_restore ok` |
+| `TestExternalDBFlagDefaults`, `TestExternalDBFlagsFromCommandLine`, `TestExternalDBImagesIgnoreEnvironment`, `TestExternalDBImageIsOneUnboundFlag`, `TestCheckVersionCompatibilityAbortNamesTheFlag`, `TestFailureMessageContract`, `TestDefaultExternalDBImageFollowsTheBuildVersion`, `TestDevelopmentBuildIsRefusedBeforeAnyKubectlCall`, `TestExternalDBImageFlagLiftsTheDevelopmentBuildRefusal`, `TestRestoreWorkloadSpec`, `TestBuildTransientPodManifestShape`, `TestBuildTransientPodManifestPostgresRunsAsItsOwnUser`, `TestTransientPodDeclaresANonRootUserForEveryService`, `TestBuildTransientPodManifestRejects`, `TestProbeWorkloadSpecNeedsNoStoreSize`, `TestPrepareExternalSourceWithSequencesTheGate` | unit | `go test -tags untested_go_version ./src/internal/app -count=1 -v -run '<name>'` | 2026-10-12T10:43:47Z | n/a | `--- PASS: <name>` for each |
+| `TestDetectDirectMode`, `TestDirectModeCreatesNothingInTheNamespace`, `TestDirectModeOutsideTheNamespaceKeepsTheJobPath`, `TestDirectModeIsStillRefusedForCollect`, `TestDirectModeProbeRunsLocallyWithCredentialsInTheEnvironment`, `TestDirectModeScratchIsRemovedOnEveryExitPath`, `TestDirectModeRestoreDumpFitReadsLocalFreeSpace`, `TestDirectModeCATrustLandsInScratch`, `TestLocalFreeSpaceReadsTheHost` | unit | `go test -tags untested_go_version ./src/internal/app/ -run '<name>' -count=1 -v` | 2026-10-12T10:56:49Z | n/a | `--- PASS: <name>` for each |
+| `TestLocalWorkloadTranslate`, `TestLocalWorkloadEnvironmentDropsWhatClientsReadOnTheirOwn`, `TestPublishedImageTag` | unit | `go test -tags untested_go_version ./src/internal/app/ -count=1 -run '<name>' -v` | 2026-10-13T07:59:38Z | n/a | `--- PASS: <name>` for each |
+| Full Go suite | unit | `go test -tags untested_go_version ./src/... -count=1` | 2026-10-13T07:59:47Z | n/a | `ok  infrahub-ops/src/internal/app 34.246s` |
+| `tests/e2e/test_k8s_external_neo4j.py` (all, including `test_killing_the_tool_mid_capture_leaves_only_what_the_cluster_removes`) | e2e | `INFRAHUB_TESTING_EXTERNAL_DB=database INFRAHUB_TESTING_EXTERNAL_NEO4J_ADDRESS=<host:7687> INFRAHUB_TESTING_EXTERNAL_NEO4J_EDITION=enterprise INFRAHUB_TESTING_EXTERNAL_DB_IMAGE=infrahub-backup:e2e-local uv run pytest -v -m k8s tests/e2e/test_k8s_external_neo4j.py` | deferred — local E2E not supported (needs T072) | — | collected; `17 skipped` with the topology absent |
+| `tests/e2e/test_k8s_external_both.py` | e2e | same, with the PostgreSQL variables | deferred — local E2E not supported (needs T072) | — | — |
+| `tests/e2e/test_k8s_external_in_namespace.py` | e2e | same, on `test_k8s_external_in_namespace.py` | deferred — local E2E not supported (needs T072) | — | — |
+
+## Review findings
+
+| Severity | File | Summary | Outcome |
+|---|---|---|---|
+| High | `tests/e2e/test_k8s_external_neo4j.py` | The killed-run test expected nothing left at once, but a Job is removed only after its deadline and time-to-live (ADR 0018) | Fixed in `90a088c` |
+| Low | `src/internal/app/external_local.go` | `/scratch` rewrite checked the remaining text, not the original string | Fixed in `97461b9` |
+| Low | `src/internal/app/external_local.go` | Direct-mode child processes inherited the pod's `PG*`, `NEO4J_*` and Java option variables | Fixed in `97461b9` |
+| Low | `src/internal/app/utils.go` | A `git describe` suffix after a pre-release tag counted as a published version | Fixed in `97461b9` |
+| Low | `src/internal/app/external_local.go` | Cancelling kills only the direct child process, and the local copy has no time limit | Deferred |
+| Info | `src/internal/app/external_local.go` | Any pod in the namespace with all tools on `PATH` takes direct mode; the version and edition gates still apply | Recorded |
+
+## Autonomous decisions
+
+- E2E tasks T175 and T176 are left open rather than marked done, because they have not run.
+- A development build is not refused in direct mode (FR-031 covers the case where an image runs).
+- amd64 could not be validated on this host (emulation does not work). CI now runs the tool check on
+  its amd64 runner; the backup and restore validation ran on arm64 only.
+- The image's `neo4j-admin` cannot write to cloud storage. The docs for the manual direct-to-cloud
+  procedure say so.
+
+## Found during the run, outside this phase
+
+- A capture fails when the Neo4j backup port (6362) requires TLS: `neo4j-admin` uses TLS on that port
+  only with its own backup SSL policy, and the tool sets none (`ClosedChannelException`). This is the
+  same on the vendor image and the new one. ADR 0015 covers Bolt and PostgreSQL, not the backup port.
+
+## Suggested next steps
+
+1. Provision the T072 topology in CI and run the three external suites (T175, T176).
+2. Decide whether a TLS-only backup port must be supported, and file an issue if so.
+3. Bound the direct-mode copy and kill the child's process group (deferred low finding).
