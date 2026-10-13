@@ -9,12 +9,12 @@ import (
 )
 
 func (k *KubernetesBackend) podSelectors(service string) []string {
-	return []string{
-		fmt.Sprintf("app.kubernetes.io/component=%s", service),
-		fmt.Sprintf("app=%s", service),
-		fmt.Sprintf("component=%s", service),
-		fmt.Sprintf("infrahub/service=%s", service),
+	selectors := make([]string, 0, len(serviceLabelKeys))
+	for _, key := range serviceLabelKeys {
+		selectors = append(selectors, fmt.Sprintf("%s=%s", key, service))
 	}
+
+	return selectors
 }
 
 // findPrimaryPod searches for a pod with primary role label (for HA PostgreSQL
@@ -91,12 +91,7 @@ func selectorMatchesLabels(selector string, labels map[string]string) bool {
 		return false
 	}
 
-	conditions := strings.Split(selector, ",")
-	for _, condition := range conditions {
-		condition = strings.TrimSpace(condition)
-		if condition == "" {
-			continue
-		}
+	for _, condition := range commaFields(selector) {
 		kv := strings.SplitN(condition, "=", 2)
 		if len(kv) != 2 {
 			if _, ok := labels[condition]; !ok {

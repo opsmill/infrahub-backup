@@ -657,3 +657,49 @@ func TestRestoreLatestFromS3Pool(t *testing.T) {
 		}
 	})
 }
+
+// TestRestoreLatestBackupReleasesTransientWorkloads is FR-011 at the entry
+// point that was missing it.
+//
+// `restore --latest --s3` runs the restore gate itself, before pulling an
+// object a refusal would make pointless — so this entry point is one that
+// creates transient workloads, and it had no deferred release. CreateBackup,
+// RestoreBackup, CreatePlakarBackup and the Plakar restore all defer one; two
+// doc comments asserted that a run had exactly one and that it was enough.
+//
+// The paths that leak are the ones between the two gates: the download fails,
+// or `task-manager-db`'s preparation fails after Neo4j's workload was already
+// recorded. Neither reaches RestoreBackup, so neither reaches its defer, and a
+// Pod and a Secret are left standing in the customer's namespace until their own
+// deadline.
+//
+// The workload here is seeded rather than created by the gate, because what is
+// under test is the exit path rather than the gate: an entry point must give
+// back whatever the run is holding, however it came to hold it, on every way out.
+func TestRestoreLatestBackupReleasesTransientWorkloads(t *testing.T) {
+	backend := testBackend()
+	cluster := &fakeCluster{uid: "u1"}
+
+	workload, err := backend.createTransientWorkloadWith(cluster.ops(), testCaptureSpec())
+	if err != nil {
+		t.Fatalf("createTransientWorkloadWith() = %v, want nil", err)
+	}
+
+	iops := &InfrahubOps{config: createRetentionConfig(t.TempDir(), RetentionConfig{}), backend: backend, executor: NewCommandExecutor()}
+
+	// An empty pool, which fails before RestoreBackup is ever entered — the
+	// same shape as a download that failed, and the shape the leak lived in.
+	if err := iops.RestoreLatestBackup(false, false, false, 0, "", true, false); err == nil {
+		t.Fatal("RestoreLatestBackup() = nil with nothing in the pool, want a refusal")
+	}
+
+	if workload.State != workloadStateReleased {
+		t.Errorf("workload State = %q, want %q: the run ended holding a pod in the customer's namespace", workload.State, workloadStateReleased)
+	}
+	if len(backend.transientWorkloads) != 0 {
+		t.Errorf("tracked %d workloads after the run ended, want none", len(backend.transientWorkloads))
+	}
+	if len(cluster.deleted) == 0 {
+		t.Error("nothing was deleted, want the transient pod removed on the way out (FR-011)")
+	}
+}

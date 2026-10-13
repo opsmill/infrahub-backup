@@ -30,6 +30,69 @@ async def wait_for_http(
     raise TimeoutError(msg)
 
 
+async def wait_for_database_query(
+    url: str,
+    token: str,
+    timeout: float = 300.0,
+    interval: float = 5.0,
+    consecutive: int = 3,
+) -> None:
+    """Poll a GraphQL query that reads the database until it answers without errors.
+
+    The server answers /api/config and /api/schema before it can reach its database
+    again, so neither proves a test's first mutation will succeed. One good answer is
+    not enough either: the server's workers reconnect one at a time, so the read must
+    succeed `consecutive` times in a row.
+    """
+    import asyncio
+    import time
+
+    query = {"query": "query { BuiltinTag(limit: 1) { count } }"}
+    headers = {"X-INFRAHUB-KEY": token}
+    last = "no response"
+    streak = 0
+    start = time.time()
+    async with httpx.AsyncClient() as client:
+        while time.time() - start < timeout:
+            try:
+                resp = await client.post(f"{url}/graphql", json=query, headers=headers, timeout=10)
+                body = resp.json()
+                if resp.status_code == 200 and not body.get("errors"):
+                    streak += 1
+                    if streak >= consecutive:
+                        return
+                    await asyncio.sleep(1)
+                    continue
+                last = f"{resp.status_code} {body.get('errors')}"
+            except (httpx.HTTPError, ValueError) as exc:
+                last = repr(exc)
+            streak = 0
+            await asyncio.sleep(interval)
+    msg = f"{url}/graphql could not read the database after {timeout}s (last: {last})"
+    raise TimeoutError(msg)
+
+
+async def _retry_while_database_unavailable(operation, timeout: float = 180.0, interval: float = 5.0):
+    """Run `operation()`, retrying while Infrahub answers that it cannot reach its database.
+
+    That 503 means the request did nothing, so running it again is safe. It still shows up
+    briefly after the database pod is replaced, even once a read has succeeded.
+    """
+    import asyncio
+    import time
+
+    from infrahub_sdk.exceptions import GraphQLError
+
+    start = time.time()
+    while True:
+        try:
+            return await operation()
+        except GraphQLError as exc:
+            if "Unable to connect to the database" not in str(exc) or time.time() - start > timeout:
+                raise
+            await asyncio.sleep(interval)
+
+
 async def seed_infrahub_data(infrahub_url: str, token: str) -> dict:
     """Create a BuiltinTag in Infrahub for backup/restore verification.
 
@@ -42,8 +105,12 @@ async def seed_infrahub_data(infrahub_url: str, token: str) -> dict:
     client = InfrahubClient(config=config)
 
     tag_name = f"e2e-backup-test-{uuid.uuid4().hex[:8]}"
-    tag = await client.create(kind="BuiltinTag", name=tag_name)
-    await tag.save()
+
+    async def create() -> None:
+        tag = await client.create(kind="BuiltinTag", name=tag_name)
+        await tag.save()
+
+    await _retry_while_database_unavailable(create)
 
     return {"tag_name": tag_name}
 
@@ -56,7 +123,9 @@ async def verify_infrahub_data(infrahub_url: str, token: str, expected: dict) ->
     config = InfrahubConfig(address=infrahub_url, api_token=token)
     client = InfrahubClient(config=config)
 
-    tag = await client.get(kind="BuiltinTag", name__value=expected["tag_name"])
+    tag = await _retry_while_database_unavailable(
+        lambda: client.get(kind="BuiltinTag", name__value=expected["tag_name"])
+    )
     assert tag.name.value == expected["tag_name"], f"Expected tag '{expected['tag_name']}' but got '{tag.name.value}'"
 
 
@@ -68,8 +137,8 @@ async def modify_infrahub_data(infrahub_url: str, token: str, data: dict) -> Non
     config = InfrahubConfig(address=infrahub_url, api_token=token)
     client = InfrahubClient(config=config)
 
-    tag = await client.get(kind="BuiltinTag", name__value=data["tag_name"])
-    await tag.delete()
+    tag = await _retry_while_database_unavailable(lambda: client.get(kind="BuiltinTag", name__value=data["tag_name"]))
+    await _retry_while_database_unavailable(tag.delete)
 
     # Verify deletion
     tags = await client.all(kind="BuiltinTag")
@@ -213,3 +282,67 @@ def get_s3_backup_key(
     if not backup_keys:
         raise FileNotFoundError(f"No backup files found in s3://{bucket}/{prefix}")
     return backup_keys[-1]
+
+
+def read_backup_metadata(archive: str | Path) -> dict:
+    """The `backup_information.json` inside a tarball artifact, parsed.
+
+    Every claim spec 007 makes about where a database lived is recorded here rather than in
+    the tool's output, so the external suites read the artifact rather than trusting a log
+    line: metadata that says a database was external is what a later restore dispatches on.
+    """
+    import json
+    import tarfile
+
+    with tarfile.open(archive, "r:gz") as tar:
+        member = tar.extractfile("backup/backup_information.json")
+        if member is None:
+            raise AssertionError(f"{Path(archive).name} is missing backup/backup_information.json")
+        return json.loads(member.read())
+
+
+def start_cli(
+    binary: str,
+    args: list[str],
+    env: dict[str, str] | None = None,
+    log_path: str | Path | None = None,
+) -> tuple[subprocess.Popen, Path]:
+    """Start a CLI binary without waiting for it, streaming its combined output to a file.
+
+    Returns the process and that file. Cases that interrupt the tool part-way need both:
+    the file is what `wait_for_cli_output` watches, so "killed mid-capture" can be pinned to
+    the step it is meant to interrupt instead of to a sleep that a slow host turns into
+    "killed before it started" — which would assert nothing.
+    """
+    import tempfile
+
+    run_env = {**os.environ, **(env or {})}
+    if log_path is None:
+        handle_fd, log_path = tempfile.mkstemp(prefix="infrahub-cli-", suffix=".log")
+        os.close(handle_fd)
+    log_path = Path(log_path)
+
+    with log_path.open("w") as handle:
+        proc = subprocess.Popen(
+            [binary, *args],
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            env=run_env,
+        )
+    return proc, log_path
+
+
+def wait_for_cli_output(log_path: str | Path, marker: str, timeout: float = 300.0, interval: float = 0.5) -> str:
+    """Wait until a started CLI's output contains `marker`; return everything written so far."""
+    import time
+
+    path = Path(log_path)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        text = path.read_text(errors="replace") if path.exists() else ""
+        if marker in text:
+            return text
+        time.sleep(interval)
+    raise TimeoutError(f"{path} did not contain {marker!r} within {timeout}s")

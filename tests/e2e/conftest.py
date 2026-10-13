@@ -1,3 +1,4 @@
+import asyncio
 import os
 import subprocess
 import time
@@ -9,11 +10,12 @@ import kr8s.asyncio
 import pytest
 import yaml
 from kr8s.asyncio.objects import Pod as AsyncPod
+from kr8s.asyncio.objects import Secret as AsyncSecret
 from kr8s.asyncio.objects import Service as AsyncService
 from testcontainers.core.container import DockerContainer
 
 from tests.conftest import _dump_namespace_logs
-from tests.helpers.utils import wait_for_http
+from tests.helpers.utils import wait_for_database_query, wait_for_http
 
 PROJECT_ROOT = Path(__file__).parent.resolve().parents[1]
 
@@ -56,9 +58,15 @@ def _dump_logs_on_failure(request):
         return
 
     vcluster = request.getfixturevalue("vcluster") if "vcluster" in request.fixturenames else None
-    infrahub_k8s = request.getfixturevalue("infrahub_k8s") if "infrahub_k8s" in request.fixturenames else None
-    if vcluster and infrahub_k8s:
-        _dump_namespace_logs(vcluster["kubeconfig_path"], infrahub_k8s["namespace"])
+    if not vcluster:
+        return
+
+    # Both deployment fixtures yield the same shape and live in different namespaces, and
+    # an external-topology test uses only the second, so dump whichever the test asked for.
+    for fixture in ("infrahub_k8s", "infrahub_k8s_external"):
+        deployment = request.getfixturevalue(fixture) if fixture in request.fixturenames else None
+        if deployment:
+            _dump_namespace_logs(vcluster["kubeconfig_path"], deployment["namespace"])
 
 
 # ---------------------------------------------------------------------------
@@ -92,7 +100,9 @@ def collect_binary() -> str:
 def minio_docker(request: pytest.FixtureRequest) -> dict:
     """Start a MinIO container using testcontainers for S3 testing."""
     container = (
-        DockerContainer("minio/minio:RELEASE.2025-09-07T16-13-09Z")
+        # minio/minio is no longer published on Docker Hub or quay.io; pgsty/minio is a
+        # community build of the same server, so the command and health endpoint are unchanged.
+        DockerContainer("pgsty/minio:RELEASE.2026-08-04T00-00-00Z")
         .with_exposed_ports(9000)
         .with_env("MINIO_ROOT_USER", "minioadmin")
         .with_env("MINIO_ROOT_PASSWORD", "minioadmin")
@@ -146,6 +156,10 @@ async def portforward_infrahub(kubeconfig_path: str, namespace: str):
     async with service.portforward(remote_port=8000, local_port="auto") as local_port:
         url = f"http://localhost:{local_port}"
         await wait_for_http(f"{url}/api/config", timeout=300.0, interval=5.0)
+        # /api/config (and even /api/schema) answer before the server can reach its
+        # database again after a restore or the database pod reset between tests, so wait
+        # for a query that reads the database.
+        await wait_for_database_query(url, INFRAHUB_ADMIN_TOKEN)
         yield url
 
 
@@ -203,29 +217,51 @@ async def reset_database_pod(infrahub_k8s):
 
 
 # ---------------------------------------------------------------------------
-# Fixture: infrahub_k8s
+# Helpers: Helm values and installation
 # ---------------------------------------------------------------------------
-@pytest.fixture(scope="session")
-async def infrahub_k8s(
-    vcluster: dict,
-    tmp_path_factory,
-) -> AsyncGenerator[dict, None]:
-    """Deploy Infrahub via Helm into vcluster."""
-    kubeconfig_path = vcluster["kubeconfig_path"]
-    namespace = "infrahub"
+def _deep_merge(base: dict, overlay: dict) -> dict:
+    """Merge `overlay` onto `base`, recursing into nested mappings.
 
-    # Prepare Helm values — enterprise wraps community values under "infrahub" key
-    values_path = FIXTURES_DIR / "helm" / "infrahub-values.yaml"
+    Helm values are trees, so an overlay that sets one leaf must not replace the whole
+    branch it lives on: the external-topology overlay adds keys beside the tuned probes
+    and resource presets in the base values rather than instead of them.
+    """
+    merged = dict(base)
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _infrahub_values_path(tmp_path_factory, overlay: dict | None = None):
+    """The Helm values file for a deployment, overlaid and wrapped for the edition.
+
+    Enterprise wraps the community values under an `infrahub` key, so an overlay is
+    applied to the community shape *before* wrapping: its keys name community values and
+    stay the same across both editions.
+    """
+    base_path = FIXTURES_DIR / "helm" / "infrahub-values.yaml"
+    if overlay is None and not _is_enterprise():
+        return base_path
+
+    with open(base_path) as f:
+        values = yaml.safe_load(f)
+    if overlay:
+        values = _deep_merge(values, overlay)
     if _is_enterprise():
-        with open(values_path) as f:
-            values = yaml.safe_load(f)
         global_values = values.pop("global", {})
-        wrapped = {"infrahub": values, "global": global_values}
-        values_path = tmp_path_factory.mktemp("helm") / "infrahub-values.yaml"
-        with open(values_path, "w") as f:
-            yaml.dump(wrapped, f)
+        values = {"infrahub": values, "global": global_values}
 
-    # Install Infrahub via Helm
+    values_path = tmp_path_factory.mktemp("helm") / "infrahub-values.yaml"
+    with open(values_path, "w") as f:
+        yaml.dump(values, f)
+    return values_path
+
+
+def _helm_install_infrahub(kubeconfig_path: str, namespace: str, values_path) -> None:
+    """Install Infrahub via Helm into a namespace and wait for it to be ready."""
     subprocess.run(
         [
             "helm",
@@ -251,6 +287,22 @@ async def infrahub_k8s(
         check=True,
     )
 
+
+# ---------------------------------------------------------------------------
+# Fixture: infrahub_k8s
+# ---------------------------------------------------------------------------
+@pytest.fixture(scope="session")
+async def infrahub_k8s(
+    vcluster: dict,
+    tmp_path_factory,
+) -> AsyncGenerator[dict, None]:
+    """Deploy Infrahub via Helm into vcluster."""
+    kubeconfig_path = vcluster["kubeconfig_path"]
+    namespace = "infrahub"
+
+    values_path = _infrahub_values_path(tmp_path_factory)
+    _helm_install_infrahub(kubeconfig_path, namespace, values_path)
+
     # Verify Infrahub is healthy with an initial port-forward
     async with portforward_infrahub(kubeconfig_path, namespace):
         pass  # health check happens inside the context manager
@@ -260,3 +312,660 @@ async def infrahub_k8s(
         "kubeconfig_path": kubeconfig_path,
         "token": INFRAHUB_ADMIN_TOKEN,
     }
+
+
+# ---------------------------------------------------------------------------
+# External database topology (spec 007-external-database-backup)
+# ---------------------------------------------------------------------------
+# A database that lives *outside* the Infrahub namespace cannot be stood up by this
+# suite. It needs a Neo4j Enterprise licence, a backup listener bound to a non-loopback
+# address (it defaults to localhost, so this is a server configuration change), and — for
+# restore — an object store the *database host itself* can read, because an external
+# restore inverts the data path and the server fetches the artifact. None of that is
+# available from a vcluster created here, so the topology is supplied by the environment
+# and the external suites skip, by name, when it is absent. In CI, the enterprise leg of
+# the `e2e-tests-k8s` job provides it (tasks.md T072).
+#
+# Declared by:
+#
+#   INFRAHUB_TESTING_EXTERNAL_DB
+#       Comma-separated deployment service names hosted outside the namespace:
+#       `database` (Neo4j), `task-manager-db` (PostgreSQL). External mode is decided per
+#       service, so `database` alone is the mixed topology and both names is the
+#       both-external one. Unset or empty means no external topology at all.
+#   INFRAHUB_TESTING_EXTERNAL_NEO4J_ADDRESS
+#       `host[:port][,host[:port]...]`, the shape Infrahub's own INFRAHUB_DB_ADDRESS
+#       carries. The port is Bolt (7687) — *not* the backup listener (6362), which the
+#       tool derives itself.
+#   INFRAHUB_TESTING_EXTERNAL_NEO4J_USERNAME / _PASSWORD
+#       Credentials for that server. Optional: the tool discovers them from the
+#       deployment's own components, and these only pin them for the test.
+#   INFRAHUB_TESTING_EXTERNAL_NEO4J_EDITION
+#       `enterprise` or `community`. Capture from an external Community server is refused
+#       by design (FR-008), so the round-trip cases need `enterprise` and the refusal case
+#       needs `community`; neither may silently run against the other.
+#   INFRAHUB_TESTING_EXTERNAL_POSTGRES_ADDRESS / _POSTGRES_USERNAME / _POSTGRES_PASSWORD
+#       The same, for the task manager's PostgreSQL.
+#   INFRAHUB_TESTING_EXTERNAL_SEED_BUCKET / _SEED_ENDPOINT / _SEED_ACCESS_KEY /
+#   _SEED_SECRET_KEY / _SEED_REGION / _SEED_PREFIX
+#       An object store the database server can read, for the `seedURI` staging a restore
+#       writes. The session's `minio_docker` container does NOT qualify: the tool can
+#       reach it and the database cannot, which is exactly the distinction that makes this
+#       topology hard to provide.
+#   INFRAHUB_TESTING_EXTERNAL_HELM_VALUES
+#       Optional path to a Helm values overlay pointing the chart at those endpoints,
+#       replacing the generated overlay below when the chart's keys differ from it.
+
+#   INFRAHUB_TESTING_EXTERNAL_DB_IMAGE
+#       The infrahub-backup image built from this checkout, as a local Docker tag that is
+#       not `latest` (the CI job tags it with the commit). The external path runs its
+#       database tools from this image (FR-031, ADR 0017), and a development build has no
+#       published image to default to, so every external case passes it with
+#       `--external-db-image`. The `external_db_image` fixture loads it into the session's
+#       vcluster; the cluster is created by pytest, so it cannot be loaded beforehand.
+#   INFRAHUB_TESTING_EXTERNAL_INSECURE_TLS
+#       `true` when the servers present self-signed certificates. Every external case
+#       then passes `--external-db-insecure-tls`: the tool verifies certificates by
+#       default (FR-029) and always encrypts PostgreSQL, so a server without TLS cannot
+#       serve these suites at all.
+#   INFRAHUB_TESTING_EXTERNAL_SCRATCH_SIZE
+#       A storage quantity such as `2Gi`, passed as `--external-db-scratch-size` on every
+#       external case. Needed until T158: Neo4j 2025.x reports no store size, so a capture
+#       without one refuses to start.
+
+EXTERNAL_DB_ENV_VAR = "INFRAHUB_TESTING_EXTERNAL_DB"
+EXTERNAL_HELM_VALUES_ENV_VAR = "INFRAHUB_TESTING_EXTERNAL_HELM_VALUES"
+EXTERNAL_DB_IMAGE_ENV_VAR = "INFRAHUB_TESTING_EXTERNAL_DB_IMAGE"
+EXTERNAL_INSECURE_TLS_ENV_VAR = "INFRAHUB_TESTING_EXTERNAL_INSECURE_TLS"
+EXTERNAL_SCRATCH_SIZE_ENV_VAR = "INFRAHUB_TESTING_EXTERNAL_SCRATCH_SIZE"
+
+# The deployment service names the tool resolves per service, as `docker compose` and the
+# Helm chart name them.
+SERVICE_NEO4J = "database"
+SERVICE_TASK_MANAGER_DB = "task-manager-db"
+
+# The endpoint variable each external service needs before its suite can run.
+EXTERNAL_ADDRESS_ENV_VARS = {
+    SERVICE_NEO4J: "INFRAHUB_TESTING_EXTERNAL_NEO4J_ADDRESS",
+    SERVICE_TASK_MANAGER_DB: "INFRAHUB_TESTING_EXTERNAL_POSTGRES_ADDRESS",
+}
+
+EXTERNAL_SEED_ENV_VARS = (
+    "INFRAHUB_TESTING_EXTERNAL_SEED_BUCKET",
+    "INFRAHUB_TESTING_EXTERNAL_SEED_ENDPOINT",
+    "INFRAHUB_TESTING_EXTERNAL_SEED_ACCESS_KEY",
+    "INFRAHUB_TESTING_EXTERNAL_SEED_SECRET_KEY",
+)
+
+# A host:port that resolves to nothing, for the "one endpoint of several unreachable"
+# case. `.invalid` is reserved by RFC 2606 precisely so it can never resolve.
+UNREACHABLE_ENDPOINT = "neo4j-does-not-exist.invalid:7687"
+
+
+def external_db_services() -> set[str]:
+    """The deployment services the environment declares as hosted outside the namespace."""
+    raw = os.environ.get(EXTERNAL_DB_ENV_VAR, "")
+    return {name.strip() for name in raw.split(",") if name.strip()}
+
+
+def external_neo4j_edition() -> str:
+    """The edition of the external Neo4j server, lowercased, or "" if undeclared."""
+    return os.environ.get("INFRAHUB_TESTING_EXTERNAL_NEO4J_EDITION", "").strip().lower()
+
+
+def _external_skip_reason(services: tuple[str, ...], edition: str = "", seed_store: bool = False) -> str | None:
+    """Why the external topology cannot serve these services, or None if it can.
+
+    Returns a reason naming both the missing piece of topology and the variable that
+    supplies it, because a skip whose reason does not say what is missing is
+    indistinguishable from a test that passed.
+    """
+    declared = external_db_services()
+    missing = [service for service in services if service not in declared]
+    if missing:
+        return (
+            f"needs {', '.join(missing)} hosted outside the Infrahub namespace: set "
+            f"{EXTERNAL_DB_ENV_VAR}={','.join(services)}. In CI, only the enterprise leg of e2e-tests-k8s "
+            "provides one (specs/archive/007-external-database-backup/tasks.md T072)"
+        )
+
+    unset = [
+        EXTERNAL_ADDRESS_ENV_VARS[service]
+        for service in services
+        if service in EXTERNAL_ADDRESS_ENV_VARS and not os.environ.get(EXTERNAL_ADDRESS_ENV_VARS[service])
+    ]
+    if unset:
+        return (
+            f"{EXTERNAL_DB_ENV_VAR} declares {', '.join(services)} external but does not say where: "
+            f"set {', '.join(unset)}"
+        )
+
+    if edition and external_neo4j_edition() != edition:
+        return (
+            f"needs the external Neo4j server to be {edition} (capture from an external Community "
+            f"server is refused by design, FR-008): set "
+            f"INFRAHUB_TESTING_EXTERNAL_NEO4J_EDITION={edition}"
+        )
+
+    if seed_store:
+        unset_seed = [name for name in EXTERNAL_SEED_ENV_VARS if not os.environ.get(name)]
+        if unset_seed:
+            return (
+                "needs an object store the external database server itself can read, for the "
+                f"seedURI staging a restore writes: set {', '.join(unset_seed)}. The suite's own "
+                "MinIO container does not qualify — the tool reaches it and the database does not"
+            )
+
+    return None
+
+
+def requires_external_db(*services: str, edition: str = "", seed_store: bool = False):
+    """Skip unless the environment provides these services outside the namespace.
+
+    `edition` pins the external Neo4j edition the case is written for, and `seed_store`
+    additionally requires the object store a restore stages its seed into.
+    """
+    reason = _external_skip_reason(services, edition=edition, seed_store=seed_store)
+    return pytest.mark.skipif(reason is not None, reason=reason or "")
+
+
+@pytest.fixture(scope="session")
+def external_topology() -> dict:
+    """The external database endpoints and credentials the environment declares.
+
+    Skips as well as the marker on each case does, so that a case which forgets the marker
+    cannot pass by finding no external database and quietly testing the internal path.
+    """
+    services = tuple(sorted(external_db_services()))
+    reason = _external_skip_reason(services or (SERVICE_NEO4J,))
+    if reason is not None:
+        pytest.skip(reason)
+
+    return {
+        "services": set(services),
+        "neo4j_address": os.environ.get("INFRAHUB_TESTING_EXTERNAL_NEO4J_ADDRESS", ""),
+        "neo4j_username": os.environ.get("INFRAHUB_TESTING_EXTERNAL_NEO4J_USERNAME", ""),
+        "neo4j_password": os.environ.get("INFRAHUB_TESTING_EXTERNAL_NEO4J_PASSWORD", ""),
+        "neo4j_edition": external_neo4j_edition(),
+        "postgres_address": os.environ.get("INFRAHUB_TESTING_EXTERNAL_POSTGRES_ADDRESS", ""),
+        "postgres_username": os.environ.get("INFRAHUB_TESTING_EXTERNAL_POSTGRES_USERNAME", ""),
+        "postgres_password": os.environ.get("INFRAHUB_TESTING_EXTERNAL_POSTGRES_PASSWORD", ""),
+    }
+
+
+@pytest.fixture(scope="session")
+def external_seed_store(external_topology: dict) -> dict:
+    """The object store a restore stages its seed into, which the *database* must reach."""
+    unset = [name for name in EXTERNAL_SEED_ENV_VARS if not os.environ.get(name)]
+    if unset:
+        pytest.skip(
+            "needs an object store the external database server itself can read, for the seedURI "
+            f"staging a restore writes: set {', '.join(unset)}"
+        )
+
+    return {
+        "bucket": os.environ["INFRAHUB_TESTING_EXTERNAL_SEED_BUCKET"],
+        "endpoint": os.environ["INFRAHUB_TESTING_EXTERNAL_SEED_ENDPOINT"],
+        "access_key": os.environ["INFRAHUB_TESTING_EXTERNAL_SEED_ACCESS_KEY"],
+        "secret_key": os.environ["INFRAHUB_TESTING_EXTERNAL_SEED_SECRET_KEY"],
+        "region": os.environ.get("INFRAHUB_TESTING_EXTERNAL_SEED_REGION", "us-east-1"),
+        "prefix": os.environ.get("INFRAHUB_TESTING_EXTERNAL_SEED_PREFIX", ""),
+    }
+
+
+def _external_values_overlay(topology: dict) -> dict:
+    """Helm values pointing the chart at the external endpoints instead of its own.
+
+    The chart keys were confirmed against the published chart on 2026-09-03 --
+    `oci://registry.opsmill.io/opsmill/chart/infrahub:4.33.2`, appVersion 1.11.2, which
+    pulls anonymously -- so this no longer needs the
+    INFRAHUB_TESTING_EXTERNAL_HELM_VALUES override for the keys' sake. That override
+    remains for a chart whose keys have since moved.
+
+    What that confirmation found:
+
+    - `neo4j.enabled` is real, and `neo4j.nameOverride` is `database` -- which is also
+      why the tool's service name matches. Disabling the subchart is what leaves no
+      `database` workload in the namespace, which is the condition that puts the tool
+      into external mode in the first place.
+    - `prefect-server.postgresql.enabled` is real.
+    - **`global.infrahubEnv` does not exist.** The chart's `global` block carries only
+      `kubernetesClusterDomain`, `infrahubRepository`, `infrahubImageFlavor`,
+      `imagePullPolicy`, `imagePullSecrets` and `commonLabels`. Environment is per
+      component, and the two that read the database nest it under the component's own
+      name again: `infrahubServer.infrahubServer.env` and
+      `infrahubTaskWorker.infrahubTaskWorker.env` (each ships `INFRAHUB_DB_TYPE: neo4j`
+      by default). Helm does not reject an unknown values key, so the previous shape was
+      accepted in silence and left every component pointed at the Neo4j the overlay had
+      just disabled -- a failure that would have read as a broken topology rather than
+      as a wrong key. The singly-nested `<component>.env` is wrong the same silent way;
+      only the doubly-nested path reaches the pod.
+
+    Verified by rendering, not by reading: `helm template` with the shape below emits
+    `INFRAHUB_DB_ADDRESS` into both pod specs, and disabling the subchart leaves
+    `postgresql`, `message-queue` and `cache-master` as the only StatefulSets with no
+    workload or service named `database` anywhere in the output -- which is the
+    condition that puts the tool into external mode.
+    """
+    env: dict[str, str] = {}
+    overlay: dict = {}
+
+    if SERVICE_NEO4J in topology["services"]:
+        # Stop the chart deploying its own Neo4j, and point every component at the
+        # external one the way Infrahub itself reads the endpoint.
+        overlay["neo4j"] = {"enabled": False}
+        env["INFRAHUB_DB_ADDRESS"] = topology["neo4j_address"]
+        if topology["neo4j_username"]:
+            env["INFRAHUB_DB_USERNAME"] = topology["neo4j_username"]
+        if topology["neo4j_password"]:
+            env["INFRAHUB_DB_PASSWORD"] = topology["neo4j_password"]
+
+    if SERVICE_TASK_MANAGER_DB in topology["services"]:
+        user = topology["postgres_username"] or "postgres"
+        password = topology["postgres_password"] or "prefect"
+        address = topology["postgres_address"]
+        host, _, port = address.rpartition(":") if ":" in address else (address, "", "5432")
+        # With its own PostgreSQL disabled, the prefect-server subchart builds the task
+        # manager's connection string from `secret`, and refuses to render without it.
+        overlay["prefect-server"] = {
+            "postgresql": {"enabled": False},
+            "secret": {
+                "create": True,
+                "username": user,
+                "password": password,
+                "host": host,
+                "port": port,
+                "database": "prefect",
+            },
+        }
+        env["PREFECT_API_DATABASE_CONNECTION_URL"] = f"postgresql+asyncpg://{user}:{password}@{address}/prefect"
+
+    # Both components that read the database get the same environment, each under its own
+    # name twice. The chart has no single place to say this once; see the docstring.
+    if env:
+        for component in ("infrahubServer", "infrahubTaskWorker"):
+            overlay[component] = {component: {"env": dict(env)}}
+
+    return overlay
+
+
+def load_image_into_vcluster(image: str, cluster_name: str) -> None:
+    """Import a local Docker image into every node of a docker-driver vcluster.
+
+    The `vcluster` fixture creates the cluster with `--driver=docker`, which runs each node
+    as a Docker container (`vcluster.cp.<name>`, and `vcluster.node.<name>...` for any
+    worker) with its own containerd. Those nodes do not see the host's Docker images, so
+    the image is streamed into each node's `k8s.io` containerd namespace, which is the one
+    the kubelet reads. A pod then starts from it with `imagePullPolicy: IfNotPresent`,
+    which the transient Job sets; a `latest` tag would default to `Always` and be pulled.
+    """
+    names = subprocess.run(
+        ["docker", "ps", "--format", "{{.Names}}"], check=True, capture_output=True, text=True
+    ).stdout.split()
+    nodes = [
+        name
+        for name in names
+        if (name.startswith("vcluster.cp.") or name.startswith("vcluster.node.")) and cluster_name in name
+    ]
+    if not nodes:
+        raise RuntimeError(f"found no node container for vcluster {cluster_name} to load {image} into")
+
+    for node in nodes:
+        save = subprocess.Popen(["docker", "save", image], stdout=subprocess.PIPE)
+        try:
+            subprocess.run(
+                ["docker", "exec", "-i", node, "ctr", "-n", "k8s.io", "images", "import", "--all-platforms", "-"],
+                stdin=save.stdout,
+                check=True,
+                capture_output=True,
+            )
+        finally:
+            if save.stdout:
+                save.stdout.close()
+            if save.wait() != 0:
+                raise RuntimeError(f"docker save {image} failed; build it first")
+
+
+def _require_pinned_tag(image: str) -> None:
+    """Refuse an image reference that a pod would pull rather than take from the node."""
+    last = image.rsplit("/", 1)[-1]
+    if ":" not in last or last.endswith(":latest") or "@" in last:
+        pytest.fail(
+            f"{EXTERNAL_DB_IMAGE_ENV_VAR}={image} must be a local tag other than `latest`, such as "
+            "`infrahub-backup:e2e-local`: the image is loaded into the cluster, not pulled"
+        )
+
+
+@pytest.fixture(scope="session")
+def external_db_image(vcluster: dict, external_topology: dict) -> str:
+    """The infrahub-backup image under test, loaded into the session's vcluster.
+
+    Depends on `external_topology` so that a session with no external database skips
+    before anything is built or loaded. With the topology declared and no image, the case
+    fails rather than skips: a development build refuses the external path without
+    `--external-db-image`, so a skip here would hide every external case.
+    """
+    image = os.environ.get(EXTERNAL_DB_IMAGE_ENV_VAR, "").strip()
+    if not image:
+        pytest.fail(
+            f"the external topology is declared but {EXTERNAL_DB_IMAGE_ENV_VAR} is not: build the "
+            "image from this checkout (`docker build -t infrahub-backup:e2e-local .`) and set "
+            f"{EXTERNAL_DB_IMAGE_ENV_VAR}=infrahub-backup:e2e-local"
+        )
+    _require_pinned_tag(image)
+    load_image_into_vcluster(image, vcluster["cluster_name"])
+    return image
+
+
+def external_topology_args() -> list[str]:
+    """The flags the topology needs on every external run, whatever the case asserts.
+
+    `--external-db-insecure-tls` when the servers present a certificate nothing can verify:
+    the tool verifies certificates by default (FR-029) and always encrypts the PostgreSQL
+    connection, so a test topology with self-signed certificates has to opt out, as an
+    operator would. The channel stays encrypted.
+
+    `--external-db-scratch-size` when the topology declares one: Neo4j 2025.x reports no
+    store size, so a capture refuses to guess one (tasks.md T158). A case that passes its
+    own size later on the command line overrides this one, because the last value wins.
+    """
+    args: list[str] = []
+    if os.environ.get(EXTERNAL_INSECURE_TLS_ENV_VAR, "").strip().lower() in ("1", "true", "yes"):
+        args.append("--external-db-insecure-tls")
+    scratch = os.environ.get(EXTERNAL_SCRATCH_SIZE_ENV_VAR, "").strip()
+    if scratch:
+        args += ["--external-db-scratch-size", scratch]
+    return args
+
+
+def external_db_image_args(deployment: dict) -> list[str]:
+    """The root flags that select how the external path runs, for a CLI invocation."""
+    return ["--external-db-image", deployment["external_db_image"], *external_topology_args()]
+
+
+# A Dockerfile, built with no context, that derives an image from the one under test whose
+# `neo4j-admin --version` reports a chosen version and which otherwise runs the real tool.
+# The FR-006 gate compares what `neo4j-admin --version` reports in the workload with what
+# the live server reports, so this provokes either direction of the gate against the real
+# server, whatever its version, without a second Neo4j distribution in the test.
+_TOOLING_VERSION_DOCKERFILE = """\
+FROM {base}
+USER root
+RUN set -eu; \\
+    real="$(command -v neo4j-admin)"; \\
+    mv "$real" "$real.real"; \\
+    printf '#!/bin/sh\\nif [ "$1" = "--version" ]; then echo "{version}"; exit 0; fi\\nexec "%s.real" "$@"\\n' \\
+      "$real" > "$real"; \\
+    chmod 0755 "$real"
+USER infrahub
+"""
+
+
+def build_tooling_image_reporting(base: str, version: str) -> str:
+    """Build an image from `base` whose neo4j-admin reports `version`, and return its tag."""
+    repository, _, tag = base.rpartition(":")
+    derived = f"{repository}:{tag}-neo4j-admin-{version}"
+    subprocess.run(
+        ["docker", "build", "-t", derived, "-"],
+        input=_TOOLING_VERSION_DOCKERFILE.format(base=base, version=version),
+        text=True,
+        check=True,
+    )
+    return derived
+
+
+@pytest.fixture(scope="session")
+def tooling_image_reporting(vcluster: dict, external_db_image: str):
+    """A factory for images whose neo4j-admin reports a given version, loaded into the vcluster."""
+
+    def build(version: str) -> str:
+        derived = build_tooling_image_reporting(external_db_image, version)
+        load_image_into_vcluster(derived, vcluster["cluster_name"])
+        return derived
+
+    return build
+
+
+@pytest.fixture(scope="session")
+async def infrahub_k8s_external(
+    vcluster: dict,
+    external_topology: dict,
+    external_db_image: str,
+    tmp_path_factory,
+) -> AsyncGenerator[dict, None]:
+    """Deploy Infrahub into vcluster pointed at the external database(s) by env.
+
+    Deliberately a second namespace rather than a reconfiguration of `infrahub_k8s`: the
+    internal deployment is what the FR-015 no-regression cases run against, and a session
+    that runs both topologies must not have the external one perturb it.
+    """
+    kubeconfig_path = vcluster["kubeconfig_path"]
+    namespace = "infrahub-external"
+
+    override = os.environ.get(EXTERNAL_HELM_VALUES_ENV_VAR)
+    if override:
+        with open(override) as f:
+            overlay = yaml.safe_load(f) or {}
+    else:
+        overlay = _external_values_overlay(external_topology)
+
+    values_path = _infrahub_values_path(tmp_path_factory, overlay=overlay)
+    _helm_install_infrahub(kubeconfig_path, namespace, values_path)
+
+    async with portforward_infrahub(kubeconfig_path, namespace):
+        pass  # health check happens inside the context manager
+
+    yield {
+        "namespace": namespace,
+        "kubeconfig_path": kubeconfig_path,
+        "token": INFRAHUB_ADMIN_TOKEN,
+        "external_services": set(external_topology["services"]),
+        "external_db_image": external_db_image,
+    }
+
+
+def external_db_env(topology: dict) -> dict[str, str]:
+    """Environment for a CLI invocation against the external topology.
+
+    The tool discovers credentials from the deployment's own components; passing them here
+    as well pins what the test ran against, so a discovery regression shows up as a
+    discovery test failing rather than as every case in these suites going red.
+    """
+    env: dict[str, str] = {}
+    if topology.get("neo4j_username"):
+        env["INFRAHUB_DB_USERNAME"] = topology["neo4j_username"]
+    if topology.get("neo4j_password"):
+        env["INFRAHUB_DB_PASSWORD"] = topology["neo4j_password"]
+    return env
+
+
+# The label every transient object the external paths create carries, and the selector the
+# tool's own stray reaper uses. Kept in step with `transientLabelMarker` in
+# src/internal/app/transient_workload.go.
+TRANSIENT_LABEL_MARKER = "infrahub-backup/transient"
+
+# The name prefix those objects carry, deliberately containing no deployment service name
+# as a substring. Kept in step with `transientObjectPrefix` in the same file.
+TRANSIENT_OBJECT_PREFIX = "infrahub-backup-xdb"
+
+
+@asynccontextmanager
+async def restricted_kubeconfig(kubeconfig_path: str, namespace: str, rules: list[dict], name: str):
+    """A kubeconfig for an identity holding exactly `rules` in `namespace`, and nothing else.
+
+    The diagnostic scenarios for FR-002 and FR-019 are about what the tool does when the
+    cluster refuses it, and the only faithful way to provoke a refusal is to run as an
+    identity that does not hold the verb. Editing the tool's own behaviour to simulate one
+    would test the simulation; revoking a verb on the ambient kubeconfig would revoke it
+    for the whole session.
+
+    So a ServiceAccount, a Role carrying the supplied rules, and a RoleBinding are created
+    for the duration of the case, and the token is written into a kubeconfig pointed at the
+    same API server. Everything is removed on the way out, including on a failure, so the
+    next case runs against the session's own identity.
+    """
+    with open(kubeconfig_path) as f:
+        ambient = yaml.safe_load(f)
+    cluster = ambient["clusters"][0]
+
+    def kubectl(*args: str, capture: bool = False) -> str:
+        result = subprocess.run(
+            ["kubectl", "--kubeconfig", kubeconfig_path, "-n", namespace, *args],
+            check=True,
+            capture_output=capture,
+            text=True,
+        )
+        return result.stdout if capture else ""
+
+    manifests = yaml.dump_all(
+        [
+            {"apiVersion": "v1", "kind": "ServiceAccount", "metadata": {"name": name}},
+            {
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "Role",
+                "metadata": {"name": name},
+                "rules": rules,
+            },
+            {
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "RoleBinding",
+                "metadata": {"name": name},
+                "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": name},
+                "subjects": [{"kind": "ServiceAccount", "name": name, "namespace": namespace}],
+            },
+        ]
+    )
+
+    restricted_path = Path(kubeconfig_path).with_name(f"kubeconfig-{name}.yaml")
+    try:
+        subprocess.run(
+            ["kubectl", "--kubeconfig", kubeconfig_path, "-n", namespace, "apply", "-f", "-"],
+            input=manifests,
+            check=True,
+            text=True,
+        )
+        token = kubectl("create", "token", name, "--duration", "30m", capture=True).strip()
+
+        with open(restricted_path, "w") as f:
+            yaml.dump(
+                {
+                    "apiVersion": "v1",
+                    "kind": "Config",
+                    "clusters": [cluster],
+                    "users": [{"name": name, "user": {"token": token}}],
+                    "contexts": [
+                        {
+                            "name": name,
+                            "context": {
+                                "cluster": cluster["name"],
+                                "user": name,
+                                "namespace": namespace,
+                            },
+                        }
+                    ],
+                    "current-context": name,
+                },
+                f,
+            )
+
+        yield str(restricted_path)
+    finally:
+        restricted_path.unlink(missing_ok=True)
+        subprocess.run(
+            ["kubectl", "--kubeconfig", kubeconfig_path, "-n", namespace, "delete", "-f", "-", "--ignore-not-found"],
+            input=manifests,
+            check=False,
+            text=True,
+        )
+
+
+# The RBAC an external-database run needs, split at the two points the diagnostic
+# scenarios revoke. Kept in step with `transientWorkloadRBAC` in
+# src/internal/app/transient_workload.go, which is what the tool's own refusal names.
+POD_READ_RULE = {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list"]}
+# Where a database runs is settled from the namespace's workloads as well as its pods, so an
+# identity that is to reach the point of creating a workload needs to read both.
+WORKLOAD_READ_RULE = {"apiGroups": ["apps"], "resources": ["deployments", "statefulsets"], "verbs": ["get", "list"]}
+# The database address is read from the environment of a running Infrahub component.
+POD_EXEC_RULE = {"apiGroups": [""], "resources": ["pods/exec"], "verbs": ["create"]}
+TRANSIENT_WRITE_RULES = [
+    {"apiGroups": ["batch"], "resources": ["jobs"], "verbs": ["create", "get", "delete"]},
+    {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list", "watch", "delete"]},
+    {"apiGroups": [""], "resources": ["pods/exec"], "verbs": ["create"]},
+    {"apiGroups": [""], "resources": ["secrets"], "verbs": ["create", "list", "delete"]},
+]
+
+# What a run inside the namespace needs when it takes direct mode (FR-032): the permissions
+# of a backup whose databases run inside the deployment, and nothing on jobs or secrets.
+# Kept in step with "Permissions in this mode" in docs/docs/backup/external-databases.mdx.
+# `kubectl scale` patches the `scale` subresource, which `patch` on the workload itself
+# does not cover, and workload resolution lists deployments and statefulsets by label.
+DIRECT_MODE_RULES = [
+    {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list"]},
+    {"apiGroups": [""], "resources": ["pods/exec"], "verbs": ["create"]},
+    {"apiGroups": [""], "resources": ["pods/log"], "verbs": ["get"]},
+    {"apiGroups": ["apps"], "resources": ["deployments", "statefulsets"], "verbs": ["get", "list", "patch"]},
+    {"apiGroups": ["apps"], "resources": ["deployments/scale", "statefulsets/scale"], "verbs": ["get", "patch"]},
+]
+
+
+async def transient_jobs(kubeconfig_path: str, namespace: str) -> list[str]:
+    """Every Job in the namespace carrying the transient marker, as `job/name`."""
+    result = subprocess.run(
+        [
+            "kubectl",
+            "--kubeconfig",
+            kubeconfig_path,
+            "-n",
+            namespace,
+            "get",
+            "jobs",
+            "-l",
+            TRANSIENT_LABEL_MARKER,
+            "-o",
+            "name",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return [line.replace("job.batch/", "job/") for line in result.stdout.split() if line]
+
+
+async def transient_objects_after_run(kubeconfig_path: str, namespace: str, timeout: float = 60) -> list[str]:
+    """`transient_objects` once the cluster has had `timeout` seconds to finish removing them.
+
+    The tool deletes the Job without waiting (ADR 0018), and the garbage collector then
+    deletes the Job's pod and Secret. Those can still be listed for a few seconds after the
+    run returns, which is the cleanup working, not an object surviving it. What FR-011 and
+    FR-023 forbid is an object the cluster does not remove, so this waits for the removal
+    and returns what is still there at the deadline.
+    """
+    deadline = time.monotonic() + timeout
+    found = await transient_objects(kubeconfig_path, namespace)
+    while found and time.monotonic() < deadline:
+        await asyncio.sleep(2)
+        found = await transient_objects(kubeconfig_path, namespace)
+    return found
+
+
+async def transient_objects(kubeconfig_path: str, namespace: str) -> list[str]:
+    """Every transient external-database object in the namespace, as `kind/name`.
+
+    The suites assert this list is empty after a run: a surviving Job, pod or Secret is
+    what FR-011 and FR-023 forbid, and the marker label is how the tool's own reaper finds
+    them, so selecting on it is selecting exactly what the tool claims to clean up. The
+    workload is a Job that owns its pod and its Secret (ADR 0018), so the Job is listed too.
+    """
+    api = await kr8s.asyncio.api(kubeconfig=kubeconfig_path)
+    found: list[str] = await transient_jobs(kubeconfig_path, namespace)
+    # kr8s listings are typed as able to yield raw dicts as well as objects; they only do so
+    # when asked for raw output, which these are not, so the dict arm is skipped rather than
+    # handled twice.
+    async for pod in AsyncPod.list(namespace=namespace, label_selector=TRANSIENT_LABEL_MARKER, api=api):
+        if not isinstance(pod, dict):
+            found.append(f"pod/{pod.name}")
+    async for secret in AsyncSecret.list(namespace=namespace, label_selector=TRANSIENT_LABEL_MARKER, api=api):
+        if not isinstance(secret, dict):
+            found.append(f"secret/{secret.name}")
+    return found

@@ -1,0 +1,1 @@
+When `--k8s-namespace` is set and the namespace cannot be checked, the error now includes what `kubectl` reported, such as a `forbidden` refusal or a missing namespace, instead of only `exit status 1`.

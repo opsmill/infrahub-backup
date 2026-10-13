@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path"
@@ -25,6 +27,37 @@ const (
 	s3ListTimeout = 5 * time.Minute
 	// s3DeleteTimeout bounds the removal of a single object.
 	s3DeleteTimeout = 2 * time.Minute
+	// s3StatTimeout bounds a single object's metadata read, which is one
+	// request and carries no payload.
+	s3StatTimeout = 2 * time.Minute
+
+	// credentialProbeDialTimeout bounds how long the credential chain waits to
+	// *connect* while it looks for credentials.
+	//
+	// With no credentials in the environment and no ~/.aws/credentials, the
+	// chain falls through to the IAM provider, which reaches for the
+	// instance-metadata service at the link-local 169.254.169.254. On a host
+	// that has one that answers in milliseconds; on a host that has none — a
+	// laptop, a CI runner, an on-prem server, a Kubernetes node whose IMDS is
+	// blocked — the address is not refused, it is blackholed, so every attempt
+	// waited out the transport's 30-second dial timeout. minio-go retries a
+	// request ten times, and each retry needs credentials again, so a single
+	// object read against an endpoint it could not reach spent its whole
+	// s3StatTimeout probing an address that was never going to answer: 125
+	// seconds of a two-minute bound, for a HEAD that failed in the first
+	// millisecond.
+	//
+	// One second is what AWS's own SDKs allow the metadata service by default
+	// (AWS_METADATA_SERVICE_TIMEOUT), and for the same reason: a link-local
+	// service either answers at once or is not there.
+	//
+	// It bounds the dial and not the request, which matters because minio-go
+	// hands the same client the STS AssumeRoleWithWebIdentity exchange that
+	// IRSA on EKS depends on — a real round trip to sts.<region>.amazonaws.com
+	// that may legitimately take longer than a second. A dial bound cannot
+	// refuse that exchange; it only refuses to keep waiting on a connection
+	// nothing is answering.
+	credentialProbeDialTimeout = time.Second
 )
 
 // S3Config holds S3-related configuration
@@ -87,11 +120,11 @@ func NewS3Client(cfg *S3Config) (*S3Client, error) {
 
 	// Resolve credentials from the standard AWS sources (environment variables,
 	// ~/.aws/credentials, and instance/role metadata).
-	creds := credentials.NewChainCredentials([]credentials.Provider{
-		&credentials.EnvAWS{},
-		&credentials.FileAWSCredentials{},
-		&credentials.IAM{},
-	})
+	providers, err := credentialProviders()
+	if err != nil {
+		return nil, err
+	}
+	creds := credentials.NewChainCredentials(providers)
 
 	client, err := minio.New(host, &minio.Options{
 		Creds:        creds,
@@ -108,6 +141,43 @@ func NewS3Client(cfg *S3Config) (*S3Client, error) {
 		client: client,
 		config: cfg,
 	}, nil
+}
+
+// credentialProviders is the chain every S3 client resolves credentials
+// through: the environment, then ~/.aws/credentials, then the instance or role
+// metadata the IAM provider reaches over the network.
+//
+// The IAM provider is given a client of this tool's own rather than the
+// package's http.DefaultClient, because that is the only place the metadata
+// probe can be bounded — see credentialProbeDialTimeout for what an unbounded
+// one costs a run whose object store is unreachable.
+func credentialProviders() ([]credentials.Provider, error) {
+	transport, err := minio.DefaultTransport(true)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create the credential transport: %w", err)
+	}
+	// Everything else stays the library's own default — the proxy from the
+	// environment, the TLS floor, SSL_CERT_FILE, the handshake and
+	// response-header bounds — so this is one delta and not a second transport
+	// policy.
+	transport.DialContext = credentialProbeDialer().DialContext
+
+	return []credentials.Provider{
+		&credentials.EnvAWS{},
+		&credentials.FileAWSCredentials{},
+		&credentials.IAM{Client: &http.Client{Transport: transport}},
+	}, nil
+}
+
+// credentialProbeDialer is the dialer the credential chain connects with. It is
+// a named constructor so the bound it carries can be asserted: a zero Timeout
+// here is the 125-second object read credentialProbeDialTimeout describes, and
+// nothing else in a run reports it as anything but slowness.
+func credentialProbeDialer() *net.Dialer {
+	return &net.Dialer{
+		Timeout:   credentialProbeDialTimeout,
+		KeepAlive: 30 * time.Second,
+	}
 }
 
 // ValidateConfig validates the S3 configuration for upload/download operations
@@ -241,6 +311,28 @@ func (c *S3Client) Upload(ctx context.Context, localPath string) (string, error)
 	logrus.Infof("Upload complete: %s", s3URI)
 
 	return s3URI, nil
+}
+
+// Stat reports the size of one object, and is how the restore path establishes
+// that the artifact it staged is actually readable at the URI it will hand to a
+// database server (FR-007).
+//
+// It is a separate read rather than a check on the upload's own result: an
+// upload reports what the writer believes it wrote, and the question the
+// pre-flight has to answer is whether a *reader* addressing that URI finds the
+// object. So the caller builds a client from the URI it will publish and asks
+// this, which is the closest a client on the operator's host can get to the
+// read the database server will perform.
+func (c *S3Client) Stat(ctx context.Context, key string) (int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, s3StatTimeout)
+	defer cancel()
+
+	info, err := c.client.StatObject(ctx, c.config.Bucket, key, minio.StatObjectOptions{})
+	if err != nil {
+		return 0, fmt.Errorf("failed to read s3://%s/%s: %w", c.config.Bucket, key, err)
+	}
+
+	return info.Size, nil
 }
 
 // Download downloads a file from S3 to a local path

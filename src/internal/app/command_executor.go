@@ -64,6 +64,22 @@ func (ce *CommandExecutor) runCommand(name string, args ...string) (string, erro
 	return strings.TrimSpace(string(output)), err
 }
 
+// runCommandSeparate is runCommand with the output streams kept apart: stdout
+// first, stderr second. It is the unbounded sibling of
+// runCommandSeparateContext, for the same callers — those that parse stdout as
+// data — when no bound applies; see that function for what a merged stream does
+// to such a caller.
+func (ce *CommandExecutor) runCommandSeparate(name string, args ...string) (string, string, error) {
+	var stdout, stderr bytes.Buffer
+	cmd := exec.Command(name, args...)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+
+	return strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String()), err
+}
+
 // timeoutError marks a command that exceeded its allotted execution time. Its
 // message is exactly "timed out after <duration>" so orchestrators can surface
 // it verbatim (e.g. as a bundle manifest failure reason).
@@ -89,16 +105,42 @@ func formatCommandTimeout(d time.Duration) string {
 // is killed once timeout elapses (or ctx is cancelled) and the returned error
 // is a *timeoutError when the timeout expired.
 func (ce *CommandExecutor) runCommandContext(ctx context.Context, timeout time.Duration, name string, args ...string) (string, error) {
+	return ce.runBounded(ctx, timeout, false, name, args...)
+}
+
+// runCommandContextKillGroup is runCommandContext for a command whose
+// children must not outlive its timeout: the command runs in a process group
+// of its own and the whole group is killed when the timeout expires, so a
+// `docker compose start` reported as timed out has stopped. On Windows only
+// the command itself is killed. The command no longer receives the
+// terminal's Ctrl-C, so it is kept to the bounded docker calls of the
+// database readiness wait rather than applied to every bounded command.
+func (ce *CommandExecutor) runCommandContextKillGroup(ctx context.Context, timeout time.Duration, name string, args ...string) (string, error) {
+	return ce.runBounded(ctx, timeout, true, name, args...)
+}
+
+func (ce *CommandExecutor) runBounded(ctx context.Context, timeout time.Duration, killGroup bool, name string, args ...string) (string, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(cctx, name, args...)
+	if killGroup {
+		killProcessGroupOnCancel(cmd)
+	}
+	// Killing the command does not close the output pipe that a child it
+	// spawned still holds (the docker CLI runs `compose` as a plugin child), so
+	// without a bound on that wait the call outlives its timeout.
+	cmd.WaitDelay = commandWaitDelay
 	output, err := cmd.CombinedOutput()
 	if err != nil && errors.Is(cctx.Err(), context.DeadlineExceeded) {
 		return strings.TrimSpace(string(output)), &timeoutError{timeout: timeout}
 	}
 	return strings.TrimSpace(string(output)), err
 }
+
+// commandWaitDelay is how long runBounded waits for a killed command's
+// output pipe to close before it abandons it.
+const commandWaitDelay = 2 * time.Second
 
 // runCommandSeparateContext is the timeout-bounded variant of runCommand that
 // keeps the command's output streams apart: stdout is returned first, stderr
@@ -275,6 +317,49 @@ func (ce *CommandExecutor) runCommandWritePipe(stdin io.Reader, name string, arg
 
 	wait := func() error {
 		if err := cmd.Wait(); err != nil {
+			stderrStr := strings.TrimSpace(stderrBuf.String())
+			if stderrStr != "" {
+				return fmt.Errorf("%w: %s", err, stderrStr)
+			}
+			return err
+		}
+		return nil
+	}
+
+	return wait, nil
+}
+
+// runCommandWritePipeContext is the timeout-bounded variant of
+// runCommandWritePipe: the command is killed once timeout elapses (or ctx is
+// cancelled) and wait() returns a *timeoutError when the timeout expired. The
+// internal context is released when wait() is called.
+//
+// It exists because a manifest piped to `kubectl create` is how a transient
+// external-database workload is created, and that call had no bound at all
+// (FR-025).
+func (ce *CommandExecutor) runCommandWritePipeContext(ctx context.Context, timeout time.Duration, stdin io.Reader, name string, args ...string) (func() error, error) {
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+
+	cmd := exec.CommandContext(cctx, name, args...)
+	logrus.Debugf("exec write-pipe (timeout %s): %s %s", timeout, name, strings.Join(args, " "))
+
+	cmd.Stdin = stdin
+
+	// Capture stderr for error reporting
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return nil, err
+	}
+
+	wait := func() error {
+		defer cancel()
+		if err := cmd.Wait(); err != nil {
+			if errors.Is(cctx.Err(), context.DeadlineExceeded) {
+				return &timeoutError{timeout: timeout}
+			}
 			stderrStr := strings.TrimSpace(stderrBuf.String())
 			if stderrStr != "" {
 				return fmt.Errorf("%w: %s", err, stderrStr)

@@ -31,6 +31,10 @@ func (d *DockerBackend) Info() string {
 	return d.project
 }
 
+// RuntimeCommand names the tool this backend shells out to, so a run that found
+// neither runtime can say which ones it looked for (FR-018).
+func (*DockerBackend) RuntimeCommand() string { return "docker" }
+
 func (d *DockerBackend) Detect() error {
 	if err := d.executor.runCommandQuiet("docker", "--version"); err != nil {
 		// If user explicitly specified Docker project, this is a hard error
@@ -446,8 +450,7 @@ func (d *DockerBackend) Start(services ...string) error {
 	}
 	args := append([]string{"start"}, services...)
 	cmd := d.composeArgs(args...)
-	_, err := d.executor.runCommand("docker", cmd...)
-	return err
+	return composeLifecycleError(d.executor.runCommand("docker", cmd...))
 }
 
 func (d *DockerBackend) Stop(services ...string) error {
@@ -456,7 +459,20 @@ func (d *DockerBackend) Stop(services ...string) error {
 	}
 	args := append([]string{"stop"}, services...)
 	cmd := d.composeArgs(args...)
-	_, err := d.executor.runCommand("docker", cmd...)
+	return composeLifecycleError(d.executor.runCommand("docker", cmd...))
+}
+
+// composeLifecycleError carries what `docker compose start|stop` printed into
+// the error it returns. Compose explains a refusal only in its output — "dependency
+// failed to start: container ... exited (0)" — and an exit status alone left a
+// failed restore reporting nothing but "exit status 1".
+func composeLifecycleError(output string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if output = strings.TrimSpace(output); output != "" {
+		return fmt.Errorf("%w: %s", err, output)
+	}
 	return err
 }
 
@@ -464,6 +480,14 @@ func (d *DockerBackend) IsRunning(service string) (bool, error) {
 	cmd := d.composeArgs("ps", service)
 	output, err := d.executor.runCommand("docker", cmd...)
 	if err != nil {
+		// A service the compose project does not define is not running, which
+		// is what an optional service (task-manager-background-svc on an older
+		// stack) looks like. stopAppContainers fails the run on an error, so
+		// reporting this one as an error would refuse every backup and restore
+		// of such a stack.
+		if strings.Contains(output, "no such service") {
+			return false, nil
+		}
 		return false, err
 	}
 	return strings.Contains(output, "Up"), nil
