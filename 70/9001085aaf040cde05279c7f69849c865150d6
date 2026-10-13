@@ -1,0 +1,27 @@
+specs/archive/007-external-database-backup/tasks.md
+  s_33f105a6deb867::t_514e150b1e7b2a 281
+src/internal/app/app.go
+  s_33f105a6deb867::t_42f5daf3e0256a 427-435,456-458,466-470,488-491
+src/internal/app/external_requirements_test.go
+  s_33f105a6deb867::t_58eb0b608c86a9 236-281
+docs/docs/reference/configuration.mdx
+  s_33f105a6deb867::t_e3fb9ee2ff5f3f 183-186
+changelog/+explicit-target-pins-backend.fixed.md
+  s_33f105a6deb867::t_242a63102ef2e7 1
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "709001085aaf040cde05279c7f69849c865150d6",
+  "prompts": {},
+  "sessions": {
+    "s_33f105a6deb867": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2564d676-32e7-45e0-82a1-111443df6e89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Benoit Kohler <benoit@opsmill.com>"
+    }
+  }
+}
