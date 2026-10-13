@@ -466,14 +466,16 @@ async def test_credentials_are_reclaimed_with_the_workload_without_the_tool(
 @pytest.mark.e2e
 @pytest.mark.k8s
 @requires_external_db(SERVICE_NEO4J, edition="enterprise")
-async def test_one_unreachable_endpoint_of_several_is_not_a_retained_artifact(
+async def test_one_unreachable_endpoint_of_several_still_captures_the_database(
     infrahub_k8s_external, external_topology, backup_binary, tmp_path
 ):
-    """One endpoint of several unreachable: nothing is retained that looks complete.
+    """One endpoint of several unreachable: the database is captured, and the run says so.
 
-    Proves FR-012, and it is the case the quickstart says to write first: a partially
-    successful capture and an outright failure are indistinguishable by exit status, so an
-    artifact retained after one is the most likely source of a silently unusable backup.
+    FR-012 asks that every requested database be captured. With one reachable server and one
+    that does not resolve, `neo4j-admin` 2025.10.1 exits 0 and writes a backup of the whole
+    database from the reachable server (observed 2026-10-13), so the capture is complete and
+    is kept (tasks.md T177). What the case pins is that the unreachable endpoint is not
+    silent: the run names it in a warning, and the archive records the capture as complete.
     """
     namespace = infrahub_k8s_external["namespace"]
     image_args = external_db_image_args(infrahub_k8s_external)
@@ -499,14 +501,18 @@ async def test_one_unreachable_endpoint_of_several_is_not_a_retained_artifact(
     )
 
     combined = result.stdout + result.stderr
-    assert result.returncode != 0, f"a capture that reached only some endpoints must not report success:\n{combined}"
-    assert "incomplete" in combined, f"the failure does not say the capture was incomplete:\n{combined}"
-    assert _archives(backup_dir) == [], (
-        "an incomplete capture must not be retained: retention and latest-backup selection "
-        "would both treat a retained archive as restorable"
+    assert result.returncode == 0, (
+        f"a capture of the whole database from the reachable server must succeed:\n{combined}"
     )
+    unreachable_host = UNREACHABLE_ENDPOINT.split(":", 1)[0]
+    assert re.search(rf"level=warning.*could not reach.*{re.escape(unreachable_host)}", combined), (
+        f"the run does not warn about the endpoint it could not reach:\n{combined}"
+    )
+    assert len(_archives(backup_dir)) == 1, f"expected the one archive of this run:\n{combined}"
+    metadata = read_backup_metadata(find_latest_backup(backup_dir))
+    assert metadata.get("capture_complete") is not False, f"the archive is not recorded as complete: {metadata}"
     left_behind = await transient_objects_after_run(kubeconfig, namespace)
-    assert left_behind == [], f"transient objects survived the failed run: {left_behind}"
+    assert left_behind == [], f"transient objects survived the run: {left_behind}"
 
 
 @pytest.mark.e2e
