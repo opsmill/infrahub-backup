@@ -1,0 +1,43 @@
+tests/e2e/test_k8s_external_in_namespace.py
+  s_33f105a6deb867::t_9ab775f243989d 57
+  s_33f105a6deb867::t_a949b4c9451ae6 24,55
+  s_33f105a6deb867::t_99b0c68803b2c1 26,163
+tests/e2e/test_k8s_external_both.py
+  s_33f105a6deb867::t_ead40144afbfde 206-213,452,459,529-531
+  s_33f105a6deb867::t_338caad48c7c9f 214
+  s_33f105a6deb867::t_99b0c68803b2c1 35,219,372,467,542
+  s_33f105a6deb867::t_a9990439f1b99a 456-458
+tests/e2e/conftest.py
+  s_33f105a6deb867::t_d37f75fc92041b 366-370
+  s_33f105a6deb867::t_99b0c68803b2c1 935-949
+  s_33f105a6deb867::t_13240b9f5d550c 671,673,682
+  s_33f105a6deb867::t_d42fb4827486af 379
+  s_33f105a6deb867::t_1d8905fe3f6677 1,889-890
+  s_33f105a6deb867::t_2f283863278863 567-580
+  s_33f105a6deb867::t_a949b4c9451ae6 660,683
+  s_33f105a6deb867::t_313ab0bf3d4f7a 371-374,380,661-670,672,674-678,886-888
+  s_33f105a6deb867::t_22cbdb63626e2d 679-680,950-951
+tests/e2e/test_k8s_external_neo4j.py
+  s_33f105a6deb867::t_99b0c68803b2c1 46,162,508,556,626
+  s_33f105a6deb867::t_a949b4c9451ae6 38,41,191,238,797,799
+  s_33f105a6deb867::t_ae80d7bbdd3521 30
+  s_33f105a6deb867::t_57d8d62654f111 660-668
+  s_33f105a6deb867::t_9ab775f243989d 330-331,333-334
+  s_33f105a6deb867::t_1d8905fe3f6677 33,798
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "afa67f1986026bfc9198743ac9dfc3c28827620c",
+  "prompts": {},
+  "sessions": {
+    "s_33f105a6deb867": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2564d676-32e7-45e0-82a1-111443df6e89",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Benoit Kohler <benoit@opsmill.com>"
+    }
+  }
+}
