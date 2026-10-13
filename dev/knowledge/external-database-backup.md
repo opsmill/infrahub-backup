@@ -64,8 +64,9 @@ on stdin. The credentials reach it in one of two ways (`external_credential_refs
   read from the deployment component's environment, and that component's running pod declares the
   variables that held them as Secret keys (`env[].valueFrom.secretKeyRef`), the Job maps those keys onto `NEO4J_USERNAME`/`NEO4J_PASSWORD` or
   `PGUSER`/`PGPASSWORD` with `secretKeyRef` (never optional). No Secret is created. The pod spec is
-  read with a jsonpath that returns references only, never inline values, and the decision is made
-  once per database while the deployment is still up. For PostgreSQL the URL is a single value, so
+  read with a jsonpath that returns references only, never inline values. The decision is
+  remembered once per database after a pod spec was read, while the deployment is still up; when
+  the read fails, that workload carries an owned Secret and a later workload reads again. For PostgreSQL the URL is a single value, so
   reuse needs variables beside it that held the same user and password; prefect-server renders
   `PREFECT_SERVER_DATABASE_USER`/`_PASSWORD` that way when `externalDatabase.usernameSecretKey` and
   `passwordSecretKey` are set. The default chart puts only the URL in a Secret, so it falls back.
@@ -129,8 +130,9 @@ Customer side (documented, verified by the end-to-end suite, not assumable by th
    credentials configured server-side for `CloudSeedProvider`.
 3. A privately signed server certificate has its CA recorded in the deployment (`_TLS_CA_FILE` or
    `sslrootcert`), or the operator opts out of verification.
-4. In an air-gapped cluster, the `infrahub-backup` image at the binary's version is mirrored and
-   its pull secret named. It is the only image to mirror.
+4. In an air-gapped cluster where the tool creates transient Jobs, the image they run is mirrored
+   and its pull secret named: by default the `infrahub-backup` image at the binary's version, or
+   the image given with `--external-db-image`. It is the only image the tool pulls.
 
 Cluster side, in the Infrahub namespace: `create`, `get`, `delete` on jobs; `get`, `list`,
 `watch`, `delete` on pods; `create` on `pods/exec`. `watch` is needed by `kubectl wait`. `create`,

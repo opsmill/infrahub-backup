@@ -267,6 +267,9 @@ no Job and no Secret in the namespace.
   - for Neo4j: `neo4j-admin`, `cypher-shell`, `keytool`, `sh`, `tar`, `rm`, `mkdir`, `ls` and
     `base64`
   - for PostgreSQL: `pg_dump`, `pg_restore`, `psql`, `sh`, `rm` and `base64`
+- The container's temporary directory (`TMPDIR`, or `/tmp` when it is unset) is a path made only
+  of letters, digits and the characters `/`, `.`, `_`, `-` and `+`. If you point `TMPDIR` at a larger
+  volume, keep its path to those characters.
 
 In every other case, including any run from outside the cluster, `infrahub-backup` uses the
 transient Job. Each run logs one line at the `info` level that names the mode it took and why, for
@@ -383,8 +386,9 @@ pull secret with `--external-db-image-pull-secrets`. If your namespace enforces 
 security standard, the failure names the security context requirement instead — check the service
 account and priority class your namespace admits pods under. If the pod waits with
 `CreateContainerConfigError` and names a Secret key, the Job reads the database credentials from
-the same Secret as your Infrahub pods, and that Secret no longer holds the key. Restore the key, or
-restart the Infrahub pods so that they and the tool read the same credentials.
+the same Secret as your Infrahub pods, and that Secret no longer holds the key. Restore the key in
+that Secret, then run the command again. Restarting the Infrahub pods does not help: pods that read
+the same key cannot start without it either.
 
 ### `infrahub-collect --include-backup` refuses to run
 

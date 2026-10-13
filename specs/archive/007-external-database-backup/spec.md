@@ -305,7 +305,8 @@ utilities installed, take and restore a backup with no cluster-side workload cre
   `--external-db-image-neo4j` and `--external-db-image-postgres`, and MUST stay unbound from the
   environment for the reason FR-027 gives. A binary whose version has no published image (a
   development build) MUST refuse the external path before creating anything, naming
-  `--external-db-image`, unless that flag is set.
+  `--external-db-image`, unless that flag is set. The refusal applies only to a run that needs a
+  transient workload: direct mode (FR-032) runs no image and is not refused.
 - **FR-032**: When `infrahub-backup` itself runs as a pod in the target namespace and finds the
   tools it needs on its own `PATH`, it MUST run them in its own process and MUST create no
   transient workload and no Secret. Credentials MUST reach those tools only through the child

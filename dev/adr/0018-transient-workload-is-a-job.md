@@ -35,9 +35,11 @@ decision at the time.
 
 ## Consequences
 
-- When the tool is killed, the cluster removes everything the run created without help: the
-  deadline ends the Job, the time-to-live deletes it, and the garbage collector deletes its pod
-  and its credential Secret.
+- When the tool is killed, the cluster removes everything the run created without help, as long
+  as its Job, time-to-live and garbage-collection controllers are running: the deadline ends the
+  Job, the time-to-live deletes it, and the garbage collector deletes its pod and its credential
+  Secret. Without the Job controller, the kubelet still ends the pod at its own deadline, but the
+  Job and its Secret stay until that controller runs again.
 - The namespace must grant `create`, `get` and `delete` on jobs, in addition to the pod
   permissions. ADR 0009 lists the full set.
 - Two deadlines must agree: the Job's and the pod's. Both come from
