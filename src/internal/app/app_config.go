@@ -337,11 +337,21 @@ func (iops *InfrahubOps) fetchPostgresCredentials() error {
 
 // applyPostgresEnvironment applies the task-manager's `env` dump: the
 // connection URL's credentials and endpoint, and — when this read is what
-// supplied both the user and the password — which variables beside the URL
-// held them.
+// supplied both the user and the password the run now holds — which variables
+// beside the URL held them.
+//
+// The test is on the values this read applied, not on what was in place
+// before it. applyPrefectConnection replaces each value the URL carries, so an
+// operator who supplied only part of a connection — a user without a
+// password — ends up holding the deployment's pair, and that pair is the one
+// the transient workload should read. A URL that carries no password leaves
+// the operator's in place, and a pair the deployment never held together is
+// not recorded (see deploymentCredentialSource).
 func (iops *InfrahubOps) applyPostgresEnvironment(envOut string) {
-	userBefore, passwordBefore := iops.config.PostgresUsername, iops.config.PostgresPassword
-	iops.applyPrefectConnection(prefectConnectionFromEnvironment(envOut))
+	connConfig := iops.applyPrefectConnection(prefectConnectionFromEnvironment(envOut))
+	if connConfig == nil || connConfig.User == "" || connConfig.Password == "" {
+		return
+	}
 
 	// The user and password arrive inside the connection URL, which is one
 	// value and, in the default chart, one Secret key — nothing a client can
@@ -351,14 +361,12 @@ func (iops *InfrahubOps) applyPostgresEnvironment(envOut string) {
 	// Secret keys. Which variables those are is settled here, while the
 	// values they held are still at hand, so the decision later needs only
 	// the pod spec and never the values again.
-	if userBefore == "" && passwordBefore == "" && iops.config.PostgresUsername != "" && iops.config.PostgresPassword != "" {
-		env := envValues(envOut)
-		iops.recordDeploymentCredentials(serviceTaskManagerDB, deploymentCredentialSource{
-			component: componentTaskManager,
-			username:  envNamesHolding(env, iops.config.PostgresUsername, prefectUserEnvVars),
-			password:  envNamesHolding(env, iops.config.PostgresPassword, prefectPasswordEnvVars),
-		})
-	}
+	env := envValues(envOut)
+	iops.recordDeploymentCredentials(serviceTaskManagerDB, deploymentCredentialSource{
+		component: componentTaskManager,
+		username:  envNamesHolding(env, iops.config.PostgresUsername, prefectUserEnvVars),
+		password:  envNamesHolding(env, iops.config.PostgresPassword, prefectPasswordEnvVars),
+	})
 }
 
 // prefectConnectionFromEnvironment picks the task-manager connection URL out of
@@ -408,10 +416,12 @@ func (iops *InfrahubOps) applyPostgresDefaults() {
 // parsed, because an unreadable URL applied nothing — recording the read anyway
 // suppressed the deployment-side read that would have supplied the endpoint:
 // one typo in an operator's environment, and it was never discovered at all.
-func (iops *InfrahubOps) applyPrefectConnection(connStr string) {
+// It returns the parsed connection, or nil when nothing was applied, so a
+// caller can tell which values this call supplied.
+func (iops *InfrahubOps) applyPrefectConnection(connStr string) *pgx.ConnConfig {
 	connConfig := parsePrefectConnection(connStr)
 	if connConfig == nil {
-		return
+		return nil
 	}
 
 	if connConfig.Database != "" {
@@ -426,6 +436,8 @@ func (iops *InfrahubOps) applyPrefectConnection(connStr string) {
 
 	iops.applyPrefectEndpoint(connStr)
 	iops.discoveredPostgres.read = true
+
+	return connConfig
 }
 
 // applyPrefectEndpointFrom applies only where the task-manager database lives,

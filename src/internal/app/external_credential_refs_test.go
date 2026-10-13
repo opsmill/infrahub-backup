@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -283,13 +284,40 @@ func TestApplyPostgresEnvironmentRecordsProvenance(t *testing.T) {
 		}
 	})
 
-	t.Run("credentials the operator supplied record nothing", func(t *testing.T) {
+	t.Run("a partial operator URL is replaced by the deployment's pair, which is recorded", func(t *testing.T) {
 		iops := NewInfrahubOps()
-		iops.applyPrefectConnection("postgresql://operator:operator-pw@db.example:5432/prefect")
+		iops.applyPrefectConnection("postgresql://operator@db.example:5432/prefect")
 		iops.applyPostgresEnvironment("PREFECT_SERVER_DATABASE_CONNECTION_URL=postgresql://prefect:pg-secret@db.example/prefect\nPREFECT_SERVER_DATABASE_USER=prefect\nPREFECT_SERVER_DATABASE_PASSWORD=pg-secret\n")
 
+		if iops.config.PostgresUsername != "prefect" || iops.config.PostgresPassword != "pg-secret" {
+			t.Fatalf("credentials = %q/%q, want the deployment's prefect/pg-secret", iops.config.PostgresUsername, iops.config.PostgresPassword)
+		}
+		got, ok := iops.deploymentCredentials[serviceTaskManagerDB]
+		if !ok {
+			t.Fatal("deploymentCredentials[task-manager-db] not recorded although the deployment supplied both values in use")
+		}
+		want := deploymentCredentialSource{
+			component: componentTaskManager,
+			username:  []string{"PREFECT_SERVER_DATABASE_USER"},
+			password:  []string{"PREFECT_SERVER_DATABASE_PASSWORD"},
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("deploymentCredentials[task-manager-db] = %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("a deployment URL without a password keeps the operator's and records nothing", func(t *testing.T) {
+		t.Setenv("PGPASSWORD", "")
+		t.Setenv("PGPASSFILE", filepath.Join(t.TempDir(), "absent"))
+		iops := NewInfrahubOps()
+		iops.applyPrefectConnection("postgresql://operator:operator-pw@db.example:5432/prefect")
+		iops.applyPostgresEnvironment("PREFECT_SERVER_DATABASE_CONNECTION_URL=postgresql://prefect@db.example/prefect\nPREFECT_SERVER_DATABASE_USER=prefect\nPREFECT_SERVER_DATABASE_PASSWORD=operator-pw\n")
+
+		if iops.config.PostgresPassword != "operator-pw" {
+			t.Fatalf("PostgresPassword = %q, want the operator's", iops.config.PostgresPassword)
+		}
 		if _, ok := iops.deploymentCredentials[serviceTaskManagerDB]; ok {
-			t.Error("deploymentCredentials[task-manager-db] recorded although the operator's credentials were already in place")
+			t.Error("deploymentCredentials[task-manager-db] recorded for a pair mixing operator and deployment values")
 		}
 	})
 }
