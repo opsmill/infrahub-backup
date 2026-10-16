@@ -119,6 +119,7 @@ var (
 	_ separateExecer        = (*DockerBackend)(nil)
 	_ separateReplicaExecer = (*DockerBackend)(nil)
 	_ contextCopier         = (*DockerBackend)(nil)
+	_ replicaCopier         = (*DockerBackend)(nil)
 	_ editionDetector       = (*DockerBackend)(nil)
 )
 
@@ -200,7 +201,8 @@ func parseComposePSContainers(output string) ([]composePSContainer, error) {
 
 // replicasFromComposePS converts compose ps entries for one service into
 // Replicas sorted by container name: every replica of a scaled service
-// appears, each carrying its human-meaningful container name.
+// appears, each carrying its human-meaningful container name, and a container
+// in any state other than running is marked Stopped.
 // Pod stays empty and Restarted false — previous logs do not exist on Docker.
 func replicasFromComposePS(service string, containers []composePSContainer) []Replica {
 	replicas := []Replica{}
@@ -208,7 +210,11 @@ func replicasFromComposePS(service string, containers []composePSContainer) []Re
 		if container.Service != service || container.Name == "" {
 			continue
 		}
-		replicas = append(replicas, Replica{Service: service, Container: container.Name})
+		replicas = append(replicas, Replica{
+			Service:   service,
+			Container: container.Name,
+			Stopped:   container.State != "running",
+		})
 	}
 	sort.Slice(replicas, func(i, j int) bool {
 		return replicas[i].Container < replicas[j].Container
@@ -435,6 +441,25 @@ func (d *DockerBackend) CopyFromContext(ctx context.Context, timeout time.Durati
 	source := fmt.Sprintf("%s:%s", service, src)
 	cmd := d.composeArgs("cp", source, dest)
 	if _, err := d.executor.runCommandContext(ctx, timeout, "docker", cmd...); err != nil {
+		return err
+	}
+	return nil
+}
+
+// dockerReplicaCopyArgs builds the docker cp arguments that copy src out of
+// one container by name.
+func dockerReplicaCopyArgs(replica Replica, src, dest string) []string {
+	return []string{"cp", fmt.Sprintf("%s:%s", replica.Container, src), dest}
+}
+
+// CopyFromReplica copies a file out of one specific container by name, unlike
+// CopyFromContext which targets a compose service. On a scaled service the two
+// can resolve to different containers: `docker compose exec` runs in the
+// lowest-numbered running container, while `docker compose cp` without
+// --index reads from the first container the daemon lists, so a file written
+// by an exec must be copied out of the same named container.
+func (d *DockerBackend) CopyFromReplica(ctx context.Context, timeout time.Duration, replica Replica, src, dest string) error {
+	if _, err := d.executor.runCommandContext(ctx, timeout, "docker", dockerReplicaCopyArgs(replica, src, dest)...); err != nil {
 		return err
 	}
 	return nil
