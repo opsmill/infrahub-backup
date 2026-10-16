@@ -51,7 +51,7 @@ Environment variables and configuration values whose key names contain `password
 
 ## Files a default collection writes inside containers
 
-A default collection does not stop, restart, or scale any workload, and creates, changes, and deletes no Kubernetes objects. It writes two temporary files inside a container through `pods/exec` and deletes them before it finishes. [What a collection changes in your deployment](./index.mdx#what-a-collection-changes-in-your-deployment) lists the files.
+A default collection does not stop, restart, or scale any workload, and creates, changes, and deletes no Kubernetes objects. It writes two temporary files inside a container through `pods/exec`, and runs `rm -f` through `pods/exec` to delete them before it finishes. If `rm -f` fails, `infrahub-collect` prints a warning, and the file remains in the container. [What a collection changes in your deployment](./index.mdx#what-a-collection-changes-in-your-deployment) lists the files.
 
 ## Namespace detection requires access to all namespaces
 
@@ -64,7 +64,7 @@ With a Role that is limited to the Infrahub namespace:
 
 ## Additional permissions for `--benchmark`
 
-`--benchmark` creates a pod named `infrahub-collect-benchmark-<collection ID>` in the Infrahub namespace from the `registry.opsmill.io/opsmill/bench` image, or from the image set in the `INFRAHUB_BENCHMARK_IMAGE` environment variable. `infrahub-collect` waits for the pod to start, reads its output while it runs, and deletes the pod afterwards, including when the benchmark times out. The node that runs the pod must be able to pull the image.
+`--benchmark` creates a pod in the Infrahub namespace from the `registry.opsmill.io/opsmill/bench` image, or from the image set in the `INFRAHUB_BENCHMARK_IMAGE` environment variable. The pod name contains the collection ID, for example `infrahub-collect-benchmark-20260702-141530` for collection ID `20260702_141530`. `infrahub-collect` waits for the pod to start, reads its output while it runs, and runs `kubectl delete pod` afterwards, including when the benchmark times out. If that command fails, `infrahub-collect` prints no message, and the pod remains in the namespace. The node that runs the pod must be able to pull the image.
 
 | API group | Resource | Verbs | What `infrahub-collect` uses it for |
 |---|---|---|---|

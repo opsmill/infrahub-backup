@@ -8,14 +8,16 @@ Use Infrahub Collect to gather everything OpsMill support needs to investigate a
 
 A default collection, without `--benchmark` or `--include-backup`, reads logs and status from your deployment. Unlike `infrahub-backup create`, it never stops, restarts, or scales any container or pod, so you can run it against a production instance at any time, including while the instance is degraded. If a service is down, collection continues with the rest and records the failure in the manifest. A partial bundle is still a useful bundle — a degraded instance is precisely when you need one.
 
-A default collection writes two temporary files inside a container and deletes each one when the collector that wrote it finishes, including when that collector fails:
+A default collection writes two temporary files inside a container. When the collector that wrote a file finishes, including when that collector fails, `infrahub-collect` runs `rm -f` in the container to delete the file:
 
 - `/tmp/infrahubops_collect_prefect_events.py` in a `task-worker` container, or in the `task-manager` container when no task worker runs. This is a script that reads recent Prefect events, because the Prefect CLI has no command that prints events and exits.
 - `/tmp/infrahubops_telemetry_export.json` in a `task-worker` container. `infrahubctl telemetry export` writes this file, and `infrahub-collect` copies it into the bundle.
 
+If `rm -f` fails, `infrahub-collect` prints a warning that names the file and the service, the collection continues, and the file remains in the container. Delete the file by hand.
+
 Two opt-in flags change more than that:
 
-- `--benchmark` creates a container (Docker Compose) or a pod (Kubernetes) from the OpsMill benchmark image and deletes it after the benchmark.
+- `--benchmark` creates a container (Docker Compose) or a pod (Kubernetes) from the OpsMill benchmark image, and runs `docker rm -f` or `kubectl delete pod` to delete it after the benchmark. If that command fails, `infrahub-collect` prints no message, and the container or pod remains. Its name contains the collection ID, for example `infrahub-collect-benchmark-20260702-141530` for collection ID `20260702_141530`. Delete it with `docker rm -f <name>` or `kubectl delete pod <name> -n <namespace>`.
 - `--include-backup` runs the standard backup, which can stop the Infrahub services while the snapshot is taken.
 
 On Kubernetes, each of these modes needs different permissions. See [Kubernetes permissions for Infrahub Collect](./kubernetes-permissions.mdx).
