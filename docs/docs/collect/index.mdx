@@ -8,7 +8,7 @@ Use Infrahub Collect to gather everything OpsMill support needs to investigate a
 
 Collection changes no Infrahub data and no service state. Unlike `infrahub-backup create`, the collect command never stops, restarts, or scales any container or pod, so it is safe to run against a production instance at any time — including while the instance is degraded. If a service is down, collection continues with the rest and records the failure in the manifest. A partial bundle is still a useful bundle — a degraded instance is precisely when you need one.
 
-The only files the command writes inside the deployment are temporary files in `/tmp` of a container: the script that reads task-manager events, and the telemetry export in a `task-worker` container. The command deletes each file after it copies the result into the bundle. If deleting the telemetry export fails, the command logs a warning that names the file left in the container.
+The only files the command writes inside the deployment are temporary files in `/tmp` of a container: the script that reads task-manager events, and the telemetry export in a `task-worker` container. The command deletes each file as soon as it has used it. If a deletion fails, the command logs a warning that names the file left in the container.
 
 The binary is self-contained. By default, collection works offline: it uses your existing Docker or kubectl access and performs no network access beyond the deployment itself. The one exception is the opt-in `--benchmark`, which downloads a benchmark image.
 
