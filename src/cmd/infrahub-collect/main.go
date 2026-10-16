@@ -50,6 +50,10 @@ func main() {
 			if lines <= 0 {
 				return fmt.Errorf("--log-lines must be a positive integer, got %d", lines)
 			}
+			telemetryDays := viper.GetInt("telemetry-days")
+			if telemetryDays <= 0 {
+				return fmt.Errorf("--telemetry-days must be a positive integer, got %d", telemetryDays)
+			}
 
 			opts := app.CollectOptions{
 				OutputDir:      viper.GetString("output-dir"),
@@ -57,7 +61,7 @@ func main() {
 				IncludeBackup:  viper.GetBool("include-backup"),
 				IncludeQueries: viper.GetBool("include-queries"),
 				Benchmark:      viper.GetBool("benchmark"),
-				TelemetryDays:  viper.GetInt("telemetry-days"),
+				TelemetryDays:  telemetryDays,
 			}
 
 			return iops.CollectBundle(opts)

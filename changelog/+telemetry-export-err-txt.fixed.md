@@ -1,0 +1,1 @@
+When the telemetry export fails, `telemetry/telemetry-export.err.txt` now records the command, the error, and what `infrahubctl` printed, like the `.err.txt` file of every other failed command in the bundle. Before, the file held only the `infrahubctl` output and was missing when the export printed nothing, for example after a timeout.

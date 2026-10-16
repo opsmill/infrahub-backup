@@ -78,15 +78,42 @@ func TestTelemetryStartDate(t *testing.T) {
 }
 
 func TestTelemetryExportCommand(t *testing.T) {
-	cmd := telemetryExportCommand("2026-06-10")
+	cmd := telemetryExportCommand("/tmp/export.json", "2026-06-10")
 	want := []string{
 		"infrahubctl", "telemetry", "export",
-		"--output", telemetryExportContainerPath,
+		"--output", "/tmp/export.json",
 		"--start-date", "2026-06-10",
 	}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Errorf("telemetryExportCommand = %v, want %v", cmd, want)
 	}
+}
+
+// Two runs against the same deployment must not share the in-container export
+// file, or one run's cleanup deletes the other's export before it is copied.
+func TestNewTelemetryExportContainerPath_UniquePerRun(t *testing.T) {
+	first := newTelemetryExportContainerPath()
+	second := newTelemetryExportContainerPath()
+	for _, path := range []string{first, second} {
+		if !strings.HasPrefix(path, telemetryExportContainerPrefix) || !strings.HasSuffix(path, ".json") {
+			t.Errorf("container path %q, want %q<token>.json", path, telemetryExportContainerPrefix)
+		}
+	}
+	if first == second {
+		t.Errorf("two runs got the same container path %q", first)
+	}
+}
+
+// exportOutputArg returns the --output value of a recorded export command.
+func exportOutputArg(t *testing.T, command []string) string {
+	t.Helper()
+	for i, arg := range command {
+		if arg == "--output" && i+1 < len(command) {
+			return command[i+1]
+		}
+	}
+	t.Fatalf("export command %v has no --output value", command)
+	return ""
 }
 
 func newTelemetryCC(t *testing.T, backend EnvironmentBackend, opts CollectOptions) *collectContext {
@@ -108,7 +135,11 @@ func TestCollectTelemetry_Success(t *testing.T) {
 		t.Fatalf("ran %d commands %v, want exactly the export", len(backend.ranCommands), backend.ranCommands)
 	}
 	got := backend.ranCommands[0]
-	wantPrefix := []string{"infrahubctl", "telemetry", "export", "--output", telemetryExportContainerPath, "--start-date"}
+	containerPath := exportOutputArg(t, got)
+	if !strings.HasPrefix(containerPath, telemetryExportContainerPrefix) {
+		t.Errorf("export --output = %q, want a path under %q", containerPath, telemetryExportContainerPrefix)
+	}
+	wantPrefix := []string{"infrahubctl", "telemetry", "export", "--output", containerPath, "--start-date"}
 	if len(got) != len(wantPrefix)+1 {
 		t.Fatalf("export command = %v, want the fixed prefix plus a start-date value", got)
 	}
@@ -121,9 +152,9 @@ func TestCollectTelemetry_Success(t *testing.T) {
 		t.Errorf("--start-date %q is not an ISO 8601 date: %v", got[len(got)-1], err)
 	}
 
-	// The export was copied out of the in-container path into the bundle.
-	if backend.copiedSrc != telemetryExportContainerPath {
-		t.Errorf("copied from %q, want %q", backend.copiedSrc, telemetryExportContainerPath)
+	// The export was copied out of the path it was written to into the bundle.
+	if backend.copiedSrc != containerPath {
+		t.Errorf("copied from %q, want %q", backend.copiedSrc, containerPath)
 	}
 	exportPath := filepath.Join(cc.bundleDir, telemetryBundleDir, telemetryExportFilename)
 	data, err := os.ReadFile(exportPath)
@@ -135,8 +166,13 @@ func TestCollectTelemetry_Success(t *testing.T) {
 	}
 
 	// The in-container export file is cleaned up.
-	if !reflect.DeepEqual(backend.rmPaths, []string{telemetryExportContainerPath}) {
-		t.Errorf("cleanup rm paths = %v, want [%q]", backend.rmPaths, telemetryExportContainerPath)
+	if !reflect.DeepEqual(backend.rmPaths, []string{containerPath}) {
+		t.Errorf("cleanup rm paths = %v, want [%q]", backend.rmPaths, containerPath)
+	}
+
+	// A successful export leaves no failure record.
+	if _, statErr := os.Stat(dumpFailurePath(exportPath)); !os.IsNotExist(statErr) {
+		t.Errorf("a failure record was staged despite the export succeeding (stat err: %v)", statErr)
 	}
 }
 
@@ -181,21 +217,28 @@ func TestCollectTelemetry_ExportFailureSkips(t *testing.T) {
 				t.Errorf("skip reason = %q, want %q", skip.reason, tt.wantReason)
 			}
 
-			// The CLI's combined output is preserved; no export.json is staged.
-			errData, readErr := os.ReadFile(filepath.Join(cc.bundleDir, telemetryBundleDir, telemetryErrorFilename))
+			// The failure record holds the command, the error, and the CLI's
+			// combined output, like every other failed dump; no export.json
+			// is staged.
+			exportPath := filepath.Join(cc.bundleDir, telemetryBundleDir, telemetryExportFilename)
+			errData, readErr := os.ReadFile(dumpFailurePath(exportPath))
 			if readErr != nil {
-				t.Fatalf("telemetry output missing from bundle: %v", readErr)
+				t.Fatalf("telemetry failure record missing from bundle: %v", readErr)
 			}
-			if !strings.Contains(string(errData), tt.wantErrTxt) {
-				t.Errorf("preserved output = %q, want it to contain %q", errData, tt.wantErrTxt)
+			for _, want := range []string{"command: infrahubctl telemetry export", "error: exit status 2", tt.wantErrTxt} {
+				if !strings.Contains(string(errData), want) {
+					t.Errorf("failure record = %q, want it to contain %q", errData, want)
+				}
 			}
-			if _, statErr := os.Stat(filepath.Join(cc.bundleDir, telemetryBundleDir, telemetryExportFilename)); !os.IsNotExist(statErr) {
+			if _, statErr := os.Stat(exportPath); !os.IsNotExist(statErr) {
 				t.Errorf("a telemetry-export.json was staged despite the export failing (stat err: %v)", statErr)
 			}
 
-			// Cleanup still runs on the failure path, through the bounded path.
-			if !reflect.DeepEqual(backend.rmPaths, []string{telemetryExportContainerPath}) {
-				t.Errorf("cleanup rm paths = %v, want [%q]", backend.rmPaths, telemetryExportContainerPath)
+			// Cleanup still runs on the failure path, through the bounded
+			// path, against the file the export was told to write.
+			containerPath := exportOutputArg(t, backend.ranCommands[0])
+			if !reflect.DeepEqual(backend.rmPaths, []string{containerPath}) {
+				t.Errorf("cleanup rm paths = %v, want [%q]", backend.rmPaths, containerPath)
 			}
 		})
 	}
@@ -237,5 +280,31 @@ func TestCollectTelemetry_TimeoutSkips(t *testing.T) {
 	}
 	if !strings.Contains(got.Reason, "timed out after 300s") {
 		t.Errorf("skip reason = %q, want it to surface the timeout", got.Reason)
+	}
+}
+
+// A timeout produces no output at all; the bundle must still record the
+// attempt rather than leave the export missing with no explanation.
+func TestCollectTelemetry_TimeoutWritesFailureRecord(t *testing.T) {
+	backend := &telemetryTimeoutBackend{
+		telemetryBackend: *newTelemetryBackend(),
+		timeout:          collectTransferTimeout,
+	}
+	cc := newTelemetryCC(t, backend, CollectOptions{TelemetryDays: 30})
+
+	var skip *collectSkipError
+	if err := collectTelemetry(cc); !errors.As(err, &skip) {
+		t.Fatalf("collectTelemetry returned %v, want a *collectSkipError", err)
+	}
+
+	exportPath := filepath.Join(cc.bundleDir, telemetryBundleDir, telemetryExportFilename)
+	errData, err := os.ReadFile(dumpFailurePath(exportPath))
+	if err != nil {
+		t.Fatalf("telemetry failure record missing after a timeout: %v", err)
+	}
+	for _, want := range []string{"command: infrahubctl telemetry export", "timed out after 300s"} {
+		if !strings.Contains(string(errData), want) {
+			t.Errorf("failure record = %q, want it to contain %q", errData, want)
+		}
 	}
 }
