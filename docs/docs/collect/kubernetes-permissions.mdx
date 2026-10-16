@@ -84,6 +84,8 @@ With a Role that is limited to the Infrahub namespace:
 - with Infrahub Community, which runs Neo4j Community, scales the running `infrahub-server`, `task-worker`, `task-manager`, `task-manager-background-svc`, `cache`, and `message-queue` workloads to zero replicas before the dump and back to their previous replica count afterwards, so Infrahub is unavailable during the backup
 - with Infrahub Community, also copies a helper program into the `database` container and stops Neo4j for the dump, after which the `database` container restarts once
 
+Only a backup of Infrahub Community, which runs Neo4j Community, needs the permissions in the following table. With Infrahub Enterprise, the backup does not read the replica count of any workload and does not scale any workload. If the backup cannot determine the Neo4j edition in the `database` container, it runs the Infrahub Community steps and needs these permissions.
+
 | API group | Resource | Verbs | What `infrahub-collect` uses it for |
 |---|---|---|---|
 | `apps` | `deployments`, `statefulsets` | `get` | Reads the replica count of each workload before scaling it down |

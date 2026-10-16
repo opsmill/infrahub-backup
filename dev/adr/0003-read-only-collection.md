@@ -20,7 +20,7 @@ Two deliberate exceptions, both operating on the **tool's own** transient resour
 ## Consequences
 
 - Safe to run against a live or degraded production instance without risk of an outage attributable to the tool.
-- Kubernetes RBAC for a default collection needs only read verbs plus `create` on `pods/exec` — no permission to create, delete, or scale workloads. The two exceptions above need more: `--benchmark` creates, watches, attaches to, and deletes its own pod, and `--include-backup` patches the `deployments/scale` and `statefulsets/scale` subresources. `docs/docs/collect/kubernetes-permissions.mdx` lists the exact permissions.
+- Kubernetes RBAC for a default collection needs only read verbs plus `create` on `pods/exec` — no permission to create, delete, or scale workloads. The two exceptions above need more: `--benchmark` creates, watches, attaches to, and deletes its own pod, and `--include-backup` patches the `deployments/scale` and `statefulsets/scale` subresources when the database runs Neo4j Community or when the backup cannot determine the Neo4j edition. `docs/docs/collect/kubernetes-permissions.mdx` lists the exact permissions.
 - Interrupt handling is simpler: there is no workload state to restore on SIGINT, only a staging directory to clean up.
 
 ## Alternatives Considered
