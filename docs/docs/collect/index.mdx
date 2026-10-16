@@ -2,17 +2,19 @@
 title: Infrahub Collect
 ---
 
-Use Infrahub Collect to gather everything OpsMill support needs to investigate an issue — service logs, diagnostic status, configuration, Infrahub product telemetry, and metrics — into a single local archive. Run it when support asks for logs, or to attach diagnostic data to a support request. The same command produces the same bundle on Docker Compose and Kubernetes.
+Use Infrahub Collect to gather everything OpsMill support needs to investigate an issue — service logs, diagnostic status, configuration, Infrahub product telemetry (the daily usage snapshots that Infrahub stores in its own database, described in [Review before sharing](#review-before-sharing)), and metrics — into a single local archive. Run it when support asks for logs, or to attach diagnostic data to a support request. The same command produces the same bundle on Docker Compose and Kubernetes.
 
 ## Safe to run at any time
 
-Collection is strictly read-only. Unlike `infrahub-backup create`, the collect command never stops, restarts, or scales any container or pod, so it is safe to run against a production instance at any time — including while the instance is degraded. If a service is down, collection continues with the rest and records the failure in the manifest. A partial bundle is still a useful bundle — a degraded instance is precisely when you need one.
+Collection changes no Infrahub data and no service state. Unlike `infrahub-backup create`, the collect command never stops, restarts, or scales any container or pod, so it is safe to run against a production instance at any time — including while the instance is degraded. If a service is down, collection continues with the rest and records the failure in the manifest. A partial bundle is still a useful bundle — a degraded instance is precisely when you need one.
+
+The only files the command writes inside the deployment are temporary files in `/tmp` of a container: the script that reads task-manager events, and the telemetry export in a `task-worker` container. The command deletes each file after it copies the result into the bundle. If deleting the telemetry export fails, the command logs a warning that names the file left in the container.
 
 The binary is self-contained. By default, collection works offline: it uses your existing Docker or kubectl access and performs no network access beyond the deployment itself. The one exception is the opt-in `--benchmark`, which downloads a benchmark image.
 
 ## Collect or back up?
 
-A troubleshooting bundle contains diagnostics for support to read; a [backup](../backup/create.mdx) is a restorable snapshot of your data. They are separate operations with different safety profiles — collection is read-only, while a backup can stop containers while the snapshot is taken. When support asks for both, run `infrahub-collect create --include-backup` to produce them in one run.
+A troubleshooting bundle contains diagnostics for support to read; a [backup](../backup/create.mdx) is a restorable snapshot of your data. They are separate operations with different safety profiles — collection never stops a container, while a backup can stop containers while the snapshot is taken. When support asks for both, run `infrahub-collect create --include-backup` to produce them in one run.
 
 ## What a bundle contains
 
@@ -27,7 +29,7 @@ Each bundle is a single `tar.gz` archive. Inside, every file lives under a top-l
 | Task worker | Prefect worker state, one directory per replica |
 | Task manager | Work pools, work queues, recent flow runs, the pending and running flow and task runs, events, and automations |
 | Server | Version, installed packages, API information, configuration, schema, and masked environment variables |
-| Telemetry | The Infrahub product-telemetry snapshots stored in your Infrahub database, from the last 30 days by default (`--telemetry-days`) |
+| Telemetry | The Infrahub product-telemetry snapshots stored in your Infrahub database, by default from the current day and the 30 days before it (`--telemetry-days`); absent when the deployment has no snapshots in that window |
 | Metrics | Container resource usage |
 | Backup (opt-in) | A standalone backup produced by the standard backup behavior and referenced in the manifest, not embedded in the archive (`--include-backup`) |
 | Benchmark (opt-in) | Host resource benchmark results (`--benchmark`) |
@@ -40,9 +42,12 @@ Masking is based on key names: environment variables and configuration keys cont
 
 The telemetry export, `telemetry/telemetry-export.json`, is written exactly as `infrahubctl telemetry export` returns it, without masking. It holds the daily snapshots that Infrahub stores in its own database. Infrahub stores these snapshots even when reporting to OpsMill is turned off with `INFRAHUB_TELEMETRY_OPTOUT`, so bundles from opted-out deployments also contain them. Each snapshot records:
 
+- The snapshot's identifier, type, payload format, and the time Infrahub created it
 - The Infrahub version and the deployment identifier
+- A SHA-256 checksum that Infrahub stores to verify the snapshot's integrity
 - Whether Infrahub sent the snapshot to OpsMill
 - The telemetry payload, which the Infrahub documentation describes as anonymous usage data with no personally identifiable information:
+  - The Infrahub version, the deployment type, and the platform: Python version, operating system, and CPU architecture
   - Counters about the graph, schema, and features in use
   - Counts of active accounts, account groups, and open branches
   - Database, worker, and infrastructure statistics

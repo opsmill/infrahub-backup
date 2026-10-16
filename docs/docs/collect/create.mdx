@@ -102,7 +102,7 @@ INFO[0012] Collecting message-queue status...
 INFO[0013] Collecting cache status...
 INFO[0014] Collecting task-manager state...
 INFO[0016] Collecting server info...
-INFO[0017] Collecting telemetry export...
+INFO[0017] Collecting telemetry...
 INFO[0018] Collecting container metrics...
 INFO[0019] Creating compressed archive...
 INFO[0021] Bundle created: infrahub_bundles/support_bundle_20260702_141530.tar.gz
@@ -167,10 +167,10 @@ The bundle layout is identical on Docker Compose and Kubernetes. Inside the arch
 - `task-worker/` - Task worker state, one directory per replica
 - `task-manager/` - Work pools, work queues, recent flow runs, the pending and running flow and task runs, events, and automations
 - `server/` - Version, installed packages, API information, configuration, schema, worker schema-sync status (`infrahub_status.json`), environment variables
-- `telemetry/` - Infrahub product-telemetry snapshots from the last 30 days by default (`telemetry-export.json`), exported with `infrahubctl telemetry export`
+- `telemetry/` - Infrahub product-telemetry snapshots (`telemetry-export.json`), by default from the current day and the 30 days before it, exported with `infrahubctl telemetry export`
 - `metrics/` - Container resource metrics
 
-Each file holds the output of the command that produced it and nothing else, so a `.json` file always parses. When a command fails, its file is absent and a sibling `<name>.err.txt` records what ran, how it failed, and what the command reported — for example `task-manager/flow-runs.err.txt` in place of `flow-runs.json`. The manifest lists the same failure as a reason on the collector.
+Each file holds the output of the command that produced it and nothing else, so a `.json` file always parses. When a command fails, its file is absent and a sibling `<name>.err.txt` records what ran, how it failed, and what the command reported — for example `task-manager/flow-runs.err.txt` in place of `flow-runs.json`. The manifest lists the same failure as a reason on the collector. The telemetry collector records a failed export as `skipped` rather than `failed`, as described in [Change the telemetry time window](#change-the-telemetry-time-window).
 
 :::warning Review before sharing
 Masking is based on key names: environment variables and configuration keys containing `password`, `secret`, `token`, or `key` are replaced with `********` before they are written to the bundle. Secrets stored under other key names are not detected. Service logs are collected as-is, and database query logs (`--include-queries`) can contain customer data. The telemetry export is written without masking; see [what it contains](./index.mdx#review-before-sharing). Review the bundle contents before sharing.
@@ -221,7 +221,7 @@ The effective limit is recorded in the manifest, so support knows whether logs w
 
 ### Change the telemetry time window
 
-Every bundle includes the Infrahub product-telemetry snapshots stored in your Infrahub database. The collector runs `infrahubctl telemetry export` in the `task-worker` container and exports the snapshots from the last 30 days. To export a different number of days:
+When your Infrahub database stores product-telemetry snapshots, the bundle includes them in `telemetry/telemetry-export.json`. The collector runs `infrahubctl telemetry export` in a `task-worker` container. By default, it exports the snapshots created from 00:00 UTC on the date 30 days before the run until the run itself, which covers the current day and the 30 days before it. To export a different number of days:
 
 ```bash
 # Export 90 days of telemetry snapshots
@@ -232,9 +232,19 @@ export INFRAHUB_TELEMETRY_DAYS=90
 infrahub-collect create
 ```
 
-A value of `0` or less uses the 30-day default. No flag removes the telemetry export from the bundle.
+The value must be a positive integer. For `0`, a negative number, or a value that is not a number, `infrahub-collect create` exits with an error before it collects anything. No flag removes the telemetry export from the bundle.
 
-The manifest records the `telemetry` collector as `skipped` when the export produces no file — for example, when no snapshots exist in the time window, or when the deployment runs an Infrahub version earlier than 1.9.0, which does not store telemetry snapshots. When `infrahubctl` printed output, the bundle keeps it in `telemetry/telemetry-export.err.txt`.
+The manifest records the `telemetry` collector as `skipped`, and the bundle has no `telemetry-export.json`, in these cases:
+
+- No `task-worker` container is running. The reason is `service not deployed`.
+- `infrahubctl telemetry export` exits with an error. The reason quotes the error, and `telemetry/telemetry-export.err.txt` records the command, the error, and what `infrahubctl` printed. The export fails, for example, when:
+  - No snapshots exist in the time window. The reason is `no telemetry snapshots found in the requested window`.
+  - The deployment runs an Infrahub version earlier than 1.9.0, which does not store telemetry snapshots.
+  - `infrahubctl` cannot reach the Infrahub API, for example because `infrahub-server` is down.
+  - The API token configured in the `task-worker` container belongs to an account without the `READ_TELEMETRY` global permission.
+  - The export does not finish within 5 minutes.
+
+The manifest records the `telemetry` collector as `failed` only when the export succeeded but its file could not be copied into the bundle.
 
 ### Run a performance benchmark
 
