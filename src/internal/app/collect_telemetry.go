@@ -1,6 +1,7 @@
 package app
 
 import (
+	"crypto/rand"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,23 +20,21 @@ const telemetryBundleDir = "telemetry"
 // recognizable to anyone who has run the CLI directly.
 const telemetryExportFilename = "telemetry-export.json"
 
-// telemetryErrorFilename preserves infrahubctl's combined output whenever the
-// export produces no file, so support can read what the CLI reported (mirrors
-// the task-manager events.err.txt convention, FIX-8). The manifest still
-// records the skip reason.
-const telemetryErrorFilename = "telemetry-export.err.txt"
-
-// telemetryExportContainerPath is where infrahubctl writes the export inside
-// the task-worker container before it is copied into the bundle and removed.
-const telemetryExportContainerPath = "/tmp/infrahubops_telemetry_export.json"
+// telemetryExportContainerPrefix starts the path infrahubctl writes the export
+// to inside the task-worker container before it is copied into the bundle and
+// removed. Each run appends its own random token (newTelemetryExportContainerPath)
+// so two runs against the same deployment never overwrite or delete each
+// other's export.
+const telemetryExportContainerPrefix = "/tmp/infrahubops_telemetry_export_"
 
 // telemetryService is the container that ships a configured infrahubctl — the
 // same one infrahub-backup uses for `infrahubctl task list`, so its
 // INFRAHUB_ADDRESS / API token already point at the deployment's API.
 const telemetryService = "task-worker"
 
-// defaultTelemetryDays is the look-back window applied when --telemetry-days is
-// unset or non-positive: the last 30 days of telemetry snapshots.
+// defaultTelemetryDays is the look-back window applied when
+// CollectOptions.TelemetryDays is unset. The CLI defaults --telemetry-days to
+// the same value and rejects values below 1.
 const defaultTelemetryDays = 30
 
 // telemetryStartDateLayout formats the --start-date argument as an ISO 8601
@@ -46,15 +45,17 @@ const telemetryStartDateLayout = "2006-01-02"
 // telemetryCollector exports Infrahub product telemetry snapshots for the
 // configured look-back window (default 30 days) via `infrahubctl telemetry
 // export` inside the task-worker container and stages the JSON into
-// bundle/telemetry/. It is read-only: the export pulls stored snapshots
-// through the Infrahub API and mutates nothing in the deployment.
+// bundle/telemetry/. It changes no Infrahub data: the export reads stored
+// snapshots through the Infrahub API. Its only write is the temporary export
+// file inside the task-worker container, which it removes afterwards.
 //
 // The export producing nothing is not a bundle defect — a deployment may have
 // no telemetry snapshots in the window, or run an Infrahub version without the
-// telemetry API — so a failing export degrades to skipped (like --benchmark),
-// with the CLI's own output preserved for support. The collector is marked
+// telemetry API — so any failing export (including an unreachable API, a
+// permission error, or a timeout) degrades to skipped (like --benchmark), with
+// the attempt recorded in telemetry-export.err.txt. The collector is marked
 // failed only when the container cannot run commands at all (see
-// telemetryProbeCommand) or on a staging error (creating the directory,
+// telemetryProbeCommand) or on a local staging error (creating the directory,
 // copying the file out).
 func telemetryCollector() collector {
 	return collector{
@@ -66,7 +67,7 @@ func telemetryCollector() collector {
 
 // telemetryStartDate returns the ISO 8601 start-date argument for a look-back
 // window of days ending at now. A non-positive days falls back to the 30-day
-// default so a missing/invalid flag never widens the export unbounded.
+// default so an unset option never widens the export unbounded.
 func telemetryStartDate(now time.Time, days int) string {
 	if days <= 0 {
 		days = defaultTelemetryDays
@@ -82,14 +83,21 @@ func telemetryStartDate(now time.Time, days int) string {
 // apart.
 var telemetryProbeCommand = []string{"true"}
 
+// newTelemetryExportContainerPath returns a fresh in-container export path for
+// one run.
+func newTelemetryExportContainerPath() string {
+	return telemetryExportContainerPrefix + strings.ToLower(rand.Text()) + ".json"
+}
+
 // telemetryExportCommand builds the infrahubctl invocation that exports
-// snapshots from startDate onward to the in-container path. Only --start-date
-// is bounded: there are no future snapshots, so "from startDate" is exactly
-// "the last N days".
-func telemetryExportCommand(startDate string) []string {
+// snapshots from startDate onward to containerPath. Only --start-date is
+// bounded, and Infrahub compares it against snapshot timestamps stored in UTC,
+// so the window runs from 00:00 UTC on startDate to now: the N previous days
+// plus the current day.
+func telemetryExportCommand(containerPath, startDate string) []string {
 	return []string{
 		"infrahubctl", "telemetry", "export",
-		"--output", telemetryExportContainerPath,
+		"--output", containerPath,
 		"--start-date", startDate,
 	}
 }
@@ -99,6 +107,7 @@ func collectTelemetry(cc *collectContext) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create %s directory: %w", telemetryBundleDir, err)
 	}
+	exportPath := filepath.Join(dir, telemetryExportFilename)
 
 	// A failing export is skipped, but a container the tool cannot run commands
 	// in is an access or runtime failure like any other collector's, so it is
@@ -107,8 +116,9 @@ func collectTelemetry(cc *collectContext) error {
 		return fmt.Errorf("cannot run commands in the %s container: %w", telemetryService, withCommandOutput(err, output))
 	}
 
+	containerPath := newTelemetryExportContainerPath()
 	startDate := telemetryStartDate(time.Now(), cc.opts.TelemetryDays)
-	command := telemetryExportCommand(startDate)
+	command := telemetryExportCommand(containerPath, startDate)
 
 	// The export pages through the API, so it gets the transfer bound rather
 	// than the shorter status-dump bound.
@@ -118,25 +128,23 @@ func collectTelemetry(cc *collectContext) error {
 	// outcome. Routed through the bounded collect exec path so a wedged
 	// container cannot hang the run during cleanup.
 	defer func() {
-		if _, rmErr := cc.execDump(telemetryService, []string{"rm", "-f", telemetryExportContainerPath}); rmErr != nil {
-			logrus.Warnf("Failed to clean up telemetry export %s on %s: %v", telemetryExportContainerPath, telemetryService, rmErr)
+		if _, rmErr := cc.execDump(telemetryService, []string{"rm", "-f", containerPath}); rmErr != nil {
+			logrus.Warnf("Failed to clean up telemetry export %s on %s: %v", containerPath, telemetryService, rmErr)
 		}
 	}()
 
 	if err != nil {
-		// infrahubctl runs under combined output, so a failure merges its
-		// message/traceback into output. Preserve it beside the (absent)
-		// export so support sees what the CLI reported, then degrade to
-		// skipped: a missing export is not a bundle defect.
-		if strings.TrimSpace(output) != "" {
-			if writeErr := writeDumpFile(filepath.Join(dir, telemetryErrorFilename), output, nil); writeErr != nil {
-				logrus.Warnf("Failed to write telemetry export output: %v", writeErr)
-			}
+		// Record the attempt beside the (absent) export like every other
+		// failed dump: the command, the error, and infrahubctl's combined
+		// output (its message or traceback). Then degrade to skipped: a
+		// missing export is not a bundle defect.
+		if writeErr := writeDumpFailure(exportPath, command, err, output, "", nil); writeErr != nil {
+			logrus.Warnf("Failed to write telemetry export failure: %v", writeErr)
 		}
 		return &collectSkipError{reason: telemetrySkipReason(output, err)}
 	}
 
-	if err := cc.copyFrom(telemetryService, telemetryExportContainerPath, filepath.Join(dir, telemetryExportFilename)); err != nil {
+	if err := cc.copyFrom(telemetryService, containerPath, exportPath); err != nil {
 		return fmt.Errorf("failed to copy telemetry export from %s: %w", telemetryService, err)
 	}
 
