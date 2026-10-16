@@ -332,15 +332,17 @@ By default, the chart creates:
 
 ### Required permissions
 
-The backup process needs these Kubernetes permissions:
+The backup process needs these Kubernetes permissions, which match the Role the chart creates:
 
 | Resource | Verbs | Purpose |
 |----------|-------|---------|
 | `pods` | list, get | Discover Infrahub pods |
 | `pods/exec` | create | Execute backup commands in pods |
-| `deployments` | get, patch | Scale down/up during backup |
-| `statefulsets` | get, patch | Scale down/up during backup |
+| `deployments`, `statefulsets` | get, list | Find the workload of each service and read its replica count |
+| `deployments/scale`, `statefulsets/scale` | get, patch | Scale workloads down and up during the backup |
 | `pods/log` | get | Monitor backup progress |
+
+The tool scales workloads with `kubectl scale`, which changes the replica count through the `scale` subresource. A Role that grants `patch` on `deployments` and `statefulsets` but not on `deployments/scale` and `statefulsets/scale` does not allow it, so a backup of Infrahub Community fails when it tries to scale down the first workload. If you bind an existing ServiceAccount, grant the subresources by name.
 
 ### Network access to the API server
 

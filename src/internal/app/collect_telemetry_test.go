@@ -12,11 +12,14 @@ import (
 	"time"
 )
 
-// telemetryBackend scripts the infrahubctl telemetry export exec and the
-// copy-out, and records the cleanup rm, so collectTelemetry can be exercised
-// without a real container.
+// telemetryBackend scripts the probe and the infrahubctl telemetry export
+// exec and the copy-out, and records the cleanup rm, so collectTelemetry can be
+// exercised without a real container.
 type telemetryBackend struct {
 	fakeCollectBackend
+	probeErr    error
+	probeOutput string
+	probes      int
 	execErr     error
 	execOutput  string
 	ranCommands [][]string
@@ -26,10 +29,15 @@ type telemetryBackend struct {
 	rmPaths     []string
 }
 
-// ExecContext scripts the export and records the bounded rm cleanup. The
-// cleanup runs through cc.execDump → ExecContext (not the unbounded Exec), so
-// rm commands are separated out here rather than counted as export runs.
+// ExecContext scripts the probe and the export and records the bounded rm
+// cleanup. The probe and the cleanup run through cc.execDump → ExecContext (not
+// the unbounded Exec), so both are separated out here rather than counted as
+// export runs.
 func (b *telemetryBackend) ExecContext(ctx context.Context, timeout time.Duration, service string, command []string, opts *ExecOptions) (string, error) {
+	if reflect.DeepEqual(command, telemetryProbeCommand) {
+		b.probes++
+		return b.probeOutput, b.probeErr
+	}
 	if len(command) > 0 && command[0] == "rm" {
 		b.rmPaths = append(b.rmPaths, command[len(command)-1])
 		return "", nil
@@ -103,7 +111,11 @@ func TestCollectTelemetry_Success(t *testing.T) {
 		t.Fatalf("collectTelemetry failed: %v", err)
 	}
 
-	// The export ran with the fixed structure and an ISO-date --start-date.
+	// The probe ran once, then the export ran with the fixed structure and an
+	// ISO-date --start-date.
+	if backend.probes != 1 {
+		t.Errorf("probe ran %d times, want 1", backend.probes)
+	}
 	if len(backend.ranCommands) != 1 {
 		t.Fatalf("ran %d commands %v, want exactly the export", len(backend.ranCommands), backend.ranCommands)
 	}
@@ -201,14 +213,18 @@ func TestCollectTelemetry_ExportFailureSkips(t *testing.T) {
 	}
 }
 
-// telemetryTimeoutBackend times out the export exec, proving a command timeout
-// also degrades to skipped with the timeout surfaced in the reason.
+// telemetryTimeoutBackend times out the export exec (the probe succeeds),
+// proving an export timeout also degrades to skipped with the timeout surfaced
+// in the reason.
 type telemetryTimeoutBackend struct {
 	telemetryBackend
 	timeout time.Duration
 }
 
 func (b *telemetryTimeoutBackend) ExecContext(ctx context.Context, timeout time.Duration, service string, command []string, opts *ExecOptions) (string, error) {
+	if reflect.DeepEqual(command, telemetryProbeCommand) {
+		return "", nil
+	}
 	return "", &timeoutError{timeout: b.timeout}
 }
 
@@ -237,5 +253,69 @@ func TestCollectTelemetry_TimeoutSkips(t *testing.T) {
 	}
 	if !strings.Contains(got.Reason, "timed out after 300s") {
 		t.Errorf("skip reason = %q, want it to surface the timeout", got.Reason)
+	}
+}
+
+// TestCollectTelemetry_ProbeFailureFails covers a container the tool cannot run
+// commands in: an exec the API server refuses, or a probe that times out. Unlike
+// a failing export, that is recorded as failed, with what kubectl reported in
+// the reason, and the export never runs.
+func TestCollectTelemetry_ProbeFailureFails(t *testing.T) {
+	forbidden := `Error from server (Forbidden): pods "task-worker-0" is forbidden: User "system:serviceaccount:infrahub:infrahub-collect" cannot create resource "pods/exec" in API group "" in the namespace "infrahub"`
+	tests := []struct {
+		name        string
+		probeOutput string
+		probeErr    error
+		wantReason  string
+	}{
+		{
+			name:        "refused exec keeps the API server's message",
+			probeOutput: forbidden,
+			probeErr:    fmt.Errorf("exit status 1"),
+			wantReason:  "cannot run commands in the task-worker container: exit status 1: " + forbidden,
+		},
+		{
+			name:       "probe timeout collapses to the bare timeout reason",
+			probeErr:   &timeoutError{timeout: collectExecTimeout},
+			wantReason: "timed out after 60s",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			iops := NewInfrahubOps()
+			backend := newTelemetryBackend()
+			backend.probeOutput = tt.probeOutput
+			backend.probeErr = tt.probeErr
+			outputDir := filepath.Join(t.TempDir(), "bundles")
+			opts := CollectOptions{OutputDir: outputDir, LogLines: 100000, TelemetryDays: 30}
+
+			if err := iops.runCollectPlan(backend, opts, []collector{telemetryCollector()}); err != nil {
+				t.Fatalf("runCollectPlan failed: %v", err)
+			}
+
+			manifest, extracted := extractBundleManifest(t, findArchive(t, outputDir))
+			if len(manifest.Collectors) != 1 {
+				t.Fatalf("manifest has %d entries %+v, want 1", len(manifest.Collectors), manifest.Collectors)
+			}
+			got := manifest.Collectors[0]
+			if got.Name != "telemetry" || got.Status != collectorStatusFailed {
+				t.Fatalf("collector result = %+v, want telemetry failed", got)
+			}
+			if got.Reason != tt.wantReason {
+				t.Errorf("failure reason = %q, want %q", got.Reason, tt.wantReason)
+			}
+
+			// Nothing ran past the probe: no export, no cleanup, no staged export.
+			if len(backend.ranCommands) != 0 {
+				t.Errorf("export ran despite the failed probe: %v", backend.ranCommands)
+			}
+			if len(backend.rmPaths) != 0 {
+				t.Errorf("cleanup ran despite nothing being written: %v", backend.rmPaths)
+			}
+			exportPath := filepath.Join(extracted, "bundle", telemetryBundleDir, telemetryExportFilename)
+			if _, statErr := os.Stat(exportPath); !os.IsNotExist(statErr) {
+				t.Errorf("bundle contains %s despite the failed probe (stat err: %v)", telemetryExportFilename, statErr)
+			}
+		})
 	}
 }

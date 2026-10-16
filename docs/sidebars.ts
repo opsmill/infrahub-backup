@@ -31,6 +31,7 @@ const sidebars: SidebarsConfig = {
       items: [
         'collect/install',
         'collect/create',
+        'collect/kubernetes-permissions',
       ],
     },
     'self-update',
