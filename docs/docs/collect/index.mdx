@@ -2,7 +2,7 @@
 title: Infrahub Collect
 ---
 
-Use Infrahub Collect to gather everything OpsMill support needs to investigate an issue — service logs, diagnostic status, configuration, Infrahub product telemetry, and metrics — into a single local archive. Run it when support asks for logs, or to attach diagnostic data to a support request. The same command produces the same bundle on Docker Compose and Kubernetes.
+Use Infrahub Collect to gather everything OpsMill support needs to investigate an issue — service logs, diagnostic status, configuration, Infrahub product telemetry (the daily usage snapshots that Infrahub stores in its own database, described in [Review before sharing](#review-before-sharing)), and metrics — into a single local archive. Run it when support asks for logs, or to attach diagnostic data to a support request. The same command produces the same bundle on Docker Compose and Kubernetes.
 
 ## What a collection changes in your deployment
 
@@ -41,7 +41,7 @@ Each bundle is a single `tar.gz` archive. Inside, every file lives under a top-l
 | Task worker | Prefect worker state, one directory per replica |
 | Task manager | Work pools, work queues, recent flow runs, the pending and running flow and task runs, events, and automations |
 | Server | Version, installed packages, API information, configuration, schema, and masked environment variables |
-| Telemetry | The Infrahub product-telemetry snapshots stored in your Infrahub database, from the last 30 days by default (`--telemetry-days`) |
+| Telemetry | The Infrahub product-telemetry snapshots stored in your Infrahub database, by default from the current day and the 30 days before it (`--telemetry-days`); absent when the deployment has no snapshots in that window |
 | Metrics | Container resource usage |
 | Backup (opt-in) | A standalone backup produced by the standard backup behavior and referenced in the manifest, not embedded in the archive (`--include-backup`) |
 | Benchmark (opt-in) | Host resource benchmark results (`--benchmark`) |
@@ -54,9 +54,12 @@ Masking is based on key names: environment variables and configuration keys cont
 
 The telemetry export, `telemetry/telemetry-export.json`, is written exactly as `infrahubctl telemetry export` returns it, without masking. It holds the daily snapshots that Infrahub stores in its own database. Infrahub stores these snapshots even when reporting to OpsMill is turned off with `INFRAHUB_TELEMETRY_OPTOUT`, so bundles from opted-out deployments also contain them. Each snapshot records:
 
+- The snapshot's identifier, type, payload format, and the time Infrahub created it
 - The Infrahub version and the deployment identifier
+- A SHA-256 checksum that Infrahub stores to verify the snapshot's integrity
 - Whether Infrahub sent the snapshot to OpsMill
 - The telemetry payload, which the Infrahub documentation describes as anonymous usage data with no personally identifiable information:
+  - The Infrahub version, the deployment type, and the platform: Python version, operating system, and CPU architecture
   - Counters about the graph, schema, and features in use
   - Counts of active accounts, account groups, and open branches
   - Database, worker, and infrastructure statistics
