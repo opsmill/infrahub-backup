@@ -379,6 +379,7 @@ var (
 	_ separateExecer        = (*KubernetesBackend)(nil)
 	_ separateReplicaExecer = (*KubernetesBackend)(nil)
 	_ contextCopier         = (*KubernetesBackend)(nil)
+	_ replicaCopier         = (*KubernetesBackend)(nil)
 	_ deploymentDescriber   = (*KubernetesBackend)(nil)
 )
 
@@ -438,6 +439,22 @@ func (k *KubernetesBackend) CopyFromContext(ctx context.Context, timeout time.Du
 	}
 	source := fmt.Sprintf("%s/%s:%s", k.namespace, pod, src)
 	if _, err := k.executor.runCommandContext(ctx, timeout, "kubectl", "cp", source, dest); err != nil {
+		return err
+	}
+	return nil
+}
+
+// kubectlReplicaCopyArgs builds the kubectl cp arguments that copy src out of
+// one replica's pod container.
+func kubectlReplicaCopyArgs(namespace string, replica Replica, src, dest string) []string {
+	return []string{"cp", "-c", replica.Container, fmt.Sprintf("%s/%s:%s", namespace, replica.Pod, src), dest}
+}
+
+// CopyFromReplica copies a file out of one specific replica (pod container),
+// the copy counterpart of ExecReplica, so a file written by an exec in that
+// replica is read back from the same container.
+func (k *KubernetesBackend) CopyFromReplica(ctx context.Context, timeout time.Duration, replica Replica, src, dest string) error {
+	if _, err := k.executor.runCommandContext(ctx, timeout, "kubectl", kubectlReplicaCopyArgs(k.namespace, replica, src, dest)...); err != nil {
 		return err
 	}
 	return nil
