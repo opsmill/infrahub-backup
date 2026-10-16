@@ -1,0 +1,1 @@
+`infrahub-collect create` now exits with an error when `--telemetry-days` or `INFRAHUB_TELEMETRY_DAYS` is `0`, a negative number, or not a number. Before, these values exported 30 days of telemetry snapshots without a warning.
