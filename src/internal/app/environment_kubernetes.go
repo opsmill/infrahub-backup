@@ -508,7 +508,7 @@ func (k *KubernetesBackend) ServiceReplicas(service string) ([]Replica, error) {
 		args := kubectlContainerStatusArgs(k.namespace, pod)
 		output, err := k.executor.runCommandContext(context.Background(), collectExecTimeout, "kubectl", args...)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read container statuses for pod %s: %w", pod, err)
+			return nil, fmt.Errorf("failed to read container statuses for pod %s: %w", pod, withCommandOutput(err, output))
 		}
 		podReplicas, err := parsePodContainerStatuses(service, pod, output)
 		if err != nil {

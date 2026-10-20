@@ -58,6 +58,68 @@ esac
 	}
 }
 
+// TestKubernetesScale_KeepsKubectlError checks that a refused `kubectl scale`
+// reports what the API server said, not only "exit status 1", when the backup
+// scales a workload down (Stop) or back up (Start).
+func TestKubernetesScale_KeepsKubectlError(t *testing.T) {
+	const forbidden = `Error from server (Forbidden): deployments.apps "infrahub-server" is forbidden: User "collector" cannot patch resource "deployments/scale" in API group "apps" in the namespace "infrahub"`
+	// Workload lookups succeed (`get deployment -n ... -l ...` lists the
+	// workload, `get deployment infrahub-server ...` reads its replica count);
+	// every scale is refused.
+	installFakeCLI(t, "kubectl", `case "$1" in
+get) if [ "$3" = "infrahub-server" ]; then echo 2; else echo infrahub-server; fi ;;
+scale) echo '`+forbidden+`' >&2; exit 1 ;;
+esac
+`)
+
+	tests := map[string]struct {
+		scale    func(k *KubernetesBackend) error
+		replicas int
+	}{
+		"Stop":  {scale: func(k *KubernetesBackend) error { return k.Stop("infrahub-server") }, replicas: 0},
+		"Start": {scale: func(k *KubernetesBackend) error { return k.Start("infrahub-server") }, replicas: 1},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			k := NewKubernetesBackend(&Configuration{}, NewCommandExecutor())
+			k.namespace = "infrahub"
+			err := tt.scale(k)
+			if err == nil {
+				t.Fatal("scale succeeded, want the refused kubectl scale to fail")
+			}
+			want := fmt.Sprintf("failed to scale infrahub-server (deployment/infrahub-server) to %d replicas: exit status 1: %s", tt.replicas, forbidden)
+			if err.Error() != want {
+				t.Errorf("error = %q, want %q", err.Error(), want)
+			}
+		})
+	}
+}
+
+// TestServiceReplicas_KeepsKubectlError checks that a refused read of a pod's
+// container statuses reports what the API server said, not only "exit status
+// 1", so the log collectors record the missing `get` on pods in their reason.
+func TestServiceReplicas_KeepsKubectlError(t *testing.T) {
+	const pod = "infrahub-server-6d9f8-abcde"
+	const forbidden = `Error from server (Forbidden): pods "` + pod + `" is forbidden: User "collector" cannot get resource "pods" in API group "" in the namespace "infrahub"`
+	// Listing pods succeeds (`get pods ...`); reading one pod (`get pod <name>
+	// ...`) is refused.
+	installFakeCLI(t, "kubectl", `case "$1 $2" in
+"get pods") echo `+pod+` ;;
+"get pod") echo '`+forbidden+`' >&2; exit 1 ;;
+esac
+`)
+	k := NewKubernetesBackend(&Configuration{}, NewCommandExecutor())
+	k.namespace = "infrahub"
+
+	replicas, err := k.ServiceReplicas("infrahub-server")
+	if err == nil {
+		t.Fatalf("ServiceReplicas returned %v, want the refused kubectl get pod to fail", replicas)
+	}
+	if want := "failed to read container statuses for pod " + pod + ": exit status 1: " + forbidden; err.Error() != want {
+		t.Errorf("error = %q, want %q", err.Error(), want)
+	}
+}
+
 func TestSplitHelmChartLabel(t *testing.T) {
 	tests := []struct {
 		label       string
