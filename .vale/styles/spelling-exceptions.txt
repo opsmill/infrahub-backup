@@ -172,6 +172,7 @@ kbps
 kebab-case
 Keycloak
 Kriten
+kubeconfig
 kubectl
 LibreNMS
 list_devices
@@ -282,6 +283,7 @@ subchart
 subcommand
 subnet
 subnets
+subresource
 subresources
 subtyping
 Subtyping

@@ -314,7 +314,7 @@ These flags apply to all infrahub-collect commands:
 
 #### create
 
-Collects a troubleshooting bundle from the Infrahub instance. Collection is read-only: no container or pod is stopped, restarted, or scaled. Individual collector failures are recorded in the bundle manifest and do not abort the run.
+Collects a troubleshooting bundle from the Infrahub instance. A default collection does not stop, restart, or scale any container or pod. `--include-backup` runs the standard backup, which can stop the Infrahub services, and `--benchmark` creates a container or pod of its own and deletes it afterwards. Individual collector failures are recorded in the bundle manifest and do not abort the run. For the Kubernetes permissions each of these modes needs, see [Kubernetes permissions for Infrahub Collect](../collect/kubernetes-permissions.mdx).
 
 **Syntax:**
 
