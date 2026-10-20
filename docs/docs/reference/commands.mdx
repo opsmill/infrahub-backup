@@ -369,7 +369,7 @@ A single archive named `support_bundle_<timestamp>.tar.gz` in the output directo
 | Task-worker state | Prefect worker status, one directory per replica |
 | Task-manager state | Work pools, work queues, recent flow runs, events, and automations |
 | Server info | Versions, installed packages, API information/configuration/schema, masked environment variables |
-| Telemetry export | Infrahub product-telemetry snapshots from the current day and the `--telemetry-days` days before it, exported with `infrahubctl telemetry export` in a `task-worker` container; written without masking; skipped when `task-worker` is not running or when `infrahubctl telemetry export` exits with an error, such as when no snapshots exist |
+| Telemetry export | Infrahub product-telemetry snapshots from the current day and the `--telemetry-days` days before it, exported with `infrahubctl telemetry export` in a `task-worker` container; written without masking; skipped when the deployment has no `task-worker` container or when `infrahubctl telemetry export` exits with an error, such as when no snapshots exist; failed when `infrahub-collect` cannot run commands in the `task-worker` container |
 | Container metrics | Resource usage via `docker compose stats` or `kubectl top` |
 | Backup (opt-in) | Backup produced by the standard backup behavior (`--include-backup`) |
 | Benchmark (opt-in) | OpsMill benchmark results (`--benchmark`) |

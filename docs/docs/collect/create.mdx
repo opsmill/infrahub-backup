@@ -237,7 +237,7 @@ The value must be a positive integer. For `0`, a negative number, or a value tha
 
 The manifest records the `telemetry` collector as `skipped`, and the bundle has no `telemetry-export.json`, in these cases:
 
-- No `task-worker` container is running. The reason is `service not deployed`.
+- The deployment has no `task-worker` container. The reason is `service not deployed`.
 - `infrahubctl telemetry export` exits with an error. The reason quotes the error, and `telemetry/telemetry-export.err.txt` records the command, the error, and what `infrahubctl` printed. The export fails, for example, when:
   - No snapshots exist in the time window. The reason is `no telemetry snapshots found in the requested window`.
   - The deployment runs an Infrahub version earlier than 1.9.0, which does not store telemetry snapshots.
@@ -245,7 +245,10 @@ The manifest records the `telemetry` collector as `skipped`, and the bundle has 
   - The API token configured in the `task-worker` container belongs to an account without the `READ_TELEMETRY` global permission.
   - The export does not finish within 5 minutes.
 
-The manifest records the `telemetry` collector as `failed` only when the export succeeded but its file could not be copied into the bundle.
+The manifest records the `telemetry` collector as `failed` in these cases:
+
+- `infrahub-collect` cannot run commands in the `task-worker` container, for example because the Kubernetes API server refuses `pods/exec` or the container is stopped. Before the export, `infrahub-collect` runs `true` in the container to check this, and it runs no export when the check fails. The reason starts with `cannot run commands in the task-worker container` and includes the error that `kubectl` or `docker` reported. When the check does not finish within 60 seconds, the reason is `timed out after 60s`.
+- The export succeeded, but its file could not be copied into the bundle. The reason starts with `failed to copy telemetry export from task-worker`.
 
 ### Run a performance benchmark
 
