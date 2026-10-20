@@ -41,11 +41,20 @@ kubectl 1.31 and later first opens an exec session over the WebSocket protocol, 
 
 `create` on `pods/exec` lets the credentials run any command in any container of the namespace, including commands that print the passwords and tokens stored in environment variables. Kubernetes RBAC cannot limit this permission to specific commands. `infrahub-collect` uses it to run these programs:
 
-- In the `database` container: `ls`, and file copies from the Neo4j log directory
-- In the `message-queue` container: `rabbitmqctl` list and status commands
-- In the `cache` container: `redis-cli` commands that read server information, clients, configuration, and the slow log
-- In the `task-worker` containers, or in the `task-manager` container when no task worker runs: `prefect` list and status commands, `true` (to confirm that commands can run before the telemetry export), `infrahubctl telemetry export`, `printenv INFRAHUB_INTERNAL_ADDRESS`, and a Python script that reads recent Prefect events
+- In the `database` container: file copies from the Neo4j log directory, and, with `--include-queries`, `ls` through `sh -c` to list the files in that directory
+- In the `message-queue` container: `rabbitmqctl` list commands, `rabbitmqctl status`, and `rabbitmqctl environment`
+- In the `cache` container: `redis-cli` commands that read server information, clients, configuration, the slow log, and the number of keys
+- In each `task-worker` container: `prefect version`, `prefect config view`, and `prefect work-pool ls`
+- In one `task-worker` container:
+  - `printenv INFRAHUB_INTERNAL_ADDRESS`, which reads the address of the Infrahub API
+  - `true`, which confirms that commands can run before the telemetry export
+  - `infrahubctl telemetry export`
+- In one `task-worker` container, or in the `task-manager` container when no task worker runs:
+  - `prefect` commands that list work pools, work queues, flow runs, task runs, and automations, each started through `sh -c` so that `PREFECT_API_URL` points to the local Prefect server when the container does not set it
+  - `python`, which runs a script that reads recent Prefect events
 - In the `infrahub-server` container: `env`, and Python commands that read the Infrahub version, the installed packages, and responses from the Infrahub API
+
+When the API server audit log is enabled, it records the command of each exec request in the request URI. A command started through `sh -c` appears with `sh` as the program and the shell script as an argument. File copies appear as `tar`, because `kubectl cp` runs `tar` in the container, and the deletion of the two temporary files appears as `rm -f`.
 
 Environment variables and configuration values whose key names contain `password`, `secret`, `token`, or `key` are masked before they are written to the bundle. See [Review before sharing](./index.mdx#review-before-sharing).
 
