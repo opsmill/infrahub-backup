@@ -118,6 +118,8 @@ func (k *KubernetesBackend) scaleServices(services []string, replicas int) error
 }
 
 func (k *KubernetesBackend) scaleResource(kind, resource string, replicas int) error {
-	_, err := k.executor.runCommand("kubectl", "scale", "-n", k.namespace, fmt.Sprintf("%s/%s", kind, resource), fmt.Sprintf("--replicas=%d", replicas))
-	return err
+	if output, err := k.executor.runCommand("kubectl", "scale", "-n", k.namespace, fmt.Sprintf("%s/%s", kind, resource), fmt.Sprintf("--replicas=%d", replicas)); err != nil {
+		return withCommandOutput(err, output)
+	}
+	return nil
 }

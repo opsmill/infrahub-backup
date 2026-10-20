@@ -1,0 +1,1 @@
+Two `infrahub-collect create` runs against the same deployment at the same time no longer overwrite or delete each other's telemetry export. Each run now writes the export to its own temporary file in the `task-worker` container.
