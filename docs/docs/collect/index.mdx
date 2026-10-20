@@ -11,7 +11,7 @@ A default collection, without `--benchmark` or `--include-backup`, reads logs an
 A default collection writes two temporary files inside a container. When the collector that wrote a file finishes, including when that collector fails, `infrahub-collect` runs `rm -f` in the container to delete the file:
 
 - `/tmp/infrahubops_collect_prefect_events.py` in a `task-worker` container, or in the `task-manager` container when no task worker runs. This is a script that reads recent Prefect events, because the Prefect CLI has no command that prints events and exits.
-- `/tmp/infrahubops_telemetry_export.json` in a `task-worker` container. `infrahubctl telemetry export` writes this file, and `infrahub-collect` copies it into the bundle.
+- `/tmp/infrahubops_telemetry_export_<random>.json` in a `task-worker` container. `<random>` is a random string of lowercase letters and digits that differs on each run, so two collections against the same deployment at the same time do not overwrite or delete each other's file. `infrahubctl telemetry export` writes this file, and `infrahub-collect` copies it into the bundle.
 
 If `rm -f` fails, `infrahub-collect` prints a warning that names the file and the service, the collection continues, and the file remains in the container. Delete the file by hand.
 
