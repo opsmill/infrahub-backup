@@ -83,12 +83,18 @@ func (info *Neo4jEditionInfo) ResolveRestoreEdition(backupEdition string) (strin
 	return info.Edition, nil
 }
 
-// detectNeo4jEditionInfo detects the Neo4j edition and returns structured information
-func (iops *InfrahubOps) detectNeo4jEditionInfo(context string) *Neo4jEditionInfo {
+// detectBackupNeo4jEdition detects the Neo4j edition a backup is taken with.
+// Unlike a restore, a backup never falls back to Community when detection
+// fails: the Community workflow stops the Infrahub services, so a failed query
+// (for example one sent to a pod that is not Neo4j) must not cause an outage.
+func (iops *InfrahubOps) detectBackupNeo4jEdition() (*Neo4jEditionInfo, error) {
 	edition, err := iops.detectNeo4jEdition()
-	info := NewNeo4jEditionInfo(edition, err)
-	info.LogDetection(context)
-	return info
+	if err != nil {
+		return nil, fmt.Errorf("could not determine the Neo4j edition, so the backup was not started and no service was stopped; check that the database service resolves to the Neo4j server and that the Neo4j credentials are correct: %w", err)
+	}
+	info := NewNeo4jEditionInfo(edition, nil)
+	info.LogDetection("backup")
+	return info, nil
 }
 
 func (iops *InfrahubOps) detectNeo4jEdition() (string, error) {
@@ -101,6 +107,9 @@ func (iops *InfrahubOps) detectNeo4jEdition() (string, error) {
 		"CALL dbms.components() YIELD edition",
 	}, nil)
 	if err != nil {
+		if line := commandErrorLine(output); line != "" {
+			return "", fmt.Errorf("failed to query neo4j edition: %w: %s", err, line)
+		}
 		return "", fmt.Errorf("failed to query neo4j edition: %w", err)
 	}
 
