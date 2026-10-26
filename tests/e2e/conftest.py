@@ -96,25 +96,9 @@ GARAGE_RPC_SECRET = "a0b1c2d3e4f5061728394a5b6c7d8e9fa0b1c2d3e4f5061728394a5b6c7
 S3_ACCESS_KEY = "GKdeadbeefdeadbeefdeadbeef"
 S3_SECRET_KEY = "deadbeef" * 8
 S3_BUCKET = "backups"
-
-# Single node, so one copy of every block is all there is. The region matches
-# the one every S3 client in the suite signs requests for.
-GARAGE_CONFIG = """\
-metadata_dir = "/var/lib/garage/meta"
-data_dir = "/var/lib/garage/data"
-db_engine = "sqlite"
-replication_factor = 1
-
-rpc_bind_addr = "[::]:3901"
-rpc_public_addr = "127.0.0.1:3901"
-
-[s3_api]
-s3_region = "us-east-1"
-api_bind_addr = "[::]:3900"
-
-[admin]
-api_bind_addr = "[::]:3903"
-"""
+# Mounted from the checkout rather than written to a pytest temporary directory:
+# in the Kubernetes CI job, Garage did not start with its config mounted from /tmp.
+GARAGE_CONFIG_PATH = FIXTURES_DIR / "garage.toml"
 
 
 def _bootstrap_garage(admin_url: str) -> None:
@@ -171,25 +155,41 @@ def _bootstrap_garage(admin_url: str) -> None:
         time.sleep(1)
 
 
-@pytest.fixture(scope="session")
-def s3_server(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory) -> dict:
-    """Start a single-node Garage container that serves an S3 bucket for the tests."""
-    config_path = tmp_path_factory.mktemp("garage") / "garage.toml"
-    config_path.write_text(GARAGE_CONFIG)
+def _container_report(container: DockerContainer) -> str:
+    """Describe a container that did not start serving: its state, its mounts and its logs."""
+    wrapped = container.get_wrapped_container()
+    wrapped.reload()
+    state = wrapped.attrs.get("State", {})
+    mounts = ", ".join(
+        f"{mount.get('Source')} -> {mount.get('Destination')}" for mount in wrapped.attrs.get("Mounts", [])
+    )
+    stdout, stderr = container.get_logs()
+    logs = (stdout + stderr).decode(errors="replace").strip() or "<no output>"
+    return (
+        f"container {wrapped.short_id} is {state.get('Status')} (exit code {state.get('ExitCode')}), "
+        f"mounts: {mounts or '<none>'}\n{logs}"
+    )
 
+
+@pytest.fixture(scope="session")
+def s3_server(request: pytest.FixtureRequest) -> dict:
+    """Start a single-node Garage container that serves an S3 bucket for the tests."""
     container = (
         DockerContainer(GARAGE_IMAGE)
         .with_exposed_ports(3900, 3903)
         .with_env("GARAGE_RPC_SECRET", GARAGE_RPC_SECRET)
         .with_env("GARAGE_ADMIN_TOKEN", GARAGE_ADMIN_TOKEN)
-        .with_volume_mapping(str(config_path), "/etc/garage.toml", "ro")
+        .with_volume_mapping(str(GARAGE_CONFIG_PATH), "/etc/garage.toml", "ro")
     )
 
     container.start()
     request.addfinalizer(container.stop)
 
     host = container.get_container_host_ip()
-    _bootstrap_garage(f"http://{host}:{container.get_exposed_port(3903)}")
+    try:
+        _bootstrap_garage(f"http://{host}:{container.get_exposed_port(3903)}")
+    except Exception as exc:
+        raise RuntimeError(f"Garage did not start serving S3: {_container_report(container)}") from exc
 
     return {
         "endpoint": f"http://{host}:{container.get_exposed_port(3900)}",
