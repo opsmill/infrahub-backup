@@ -86,48 +86,116 @@ def collect_binary() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Fixture: minio_docker (testcontainers)
+# Fixture: s3_server (Garage, testcontainers)
 # ---------------------------------------------------------------------------
+GARAGE_IMAGE = "dxflrs/garage:v2.4.1"
+GARAGE_ADMIN_TOKEN = "infrahub-backup-e2e-admin-token"
+GARAGE_RPC_SECRET = "a0b1c2d3e4f5061728394a5b6c7d8e9fa0b1c2d3e4f5061728394a5b6c7d8e9f"
+# Garage only imports keys shaped like the ones it generates: "GK" and 24 hex
+# characters, with a 64-character hex secret. Fixed test values, not secrets.
+S3_ACCESS_KEY = "GKdeadbeefdeadbeefdeadbeef"
+S3_SECRET_KEY = "deadbeef" * 8
+S3_BUCKET = "backups"
+
+# Single node, so one copy of every block is all there is. The region matches
+# the one every S3 client in the suite signs requests for.
+GARAGE_CONFIG = """\
+metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+db_engine = "sqlite"
+replication_factor = 1
+
+rpc_bind_addr = "[::]:3901"
+rpc_public_addr = "127.0.0.1:3901"
+
+[s3_api]
+s3_region = "us-east-1"
+api_bind_addr = "[::]:3900"
+
+[admin]
+api_bind_addr = "[::]:3903"
+"""
+
+
+def _bootstrap_garage(admin_url: str) -> None:
+    """Make a fresh Garage node serve the test bucket.
+
+    A new node stores nothing until a layout is assigned, and the access key and
+    bucket have to be created through the admin API. The key may also create
+    buckets, which the retention tests do for each case.
+    """
+    import requests
+
+    def api(method: str, endpoint: str, payload: dict | None = None) -> dict:
+        resp = requests.request(
+            method,
+            f"{admin_url}/v2/{endpoint}",
+            headers={"Authorization": f"Bearer {GARAGE_ADMIN_TOKEN}"},
+            json=payload,
+            timeout=5,
+        )
+        resp.raise_for_status()
+        return resp.json() if resp.content else {}
+
+    deadline = time.time() + 30
+    while True:
+        try:
+            status = api("GET", "GetClusterStatus")
+            break
+        except requests.RequestException:
+            if time.time() > deadline:
+                raise
+            time.sleep(1)
+
+    node_id = status["nodes"][0]["id"]
+    api("POST", "UpdateClusterLayout", {"roles": [{"id": node_id, "zone": "e2e", "capacity": 10**9, "tags": []}]})
+    api("POST", "ApplyClusterLayout", {"version": status["layoutVersion"] + 1})
+
+    api("POST", "ImportKey", {"accessKeyId": S3_ACCESS_KEY, "secretAccessKey": S3_SECRET_KEY, "name": "e2e"})
+    api("POST", f"UpdateKey?id={S3_ACCESS_KEY}", {"allow": {"createBucket": True}})
+    bucket = api("POST", "CreateBucket", {"globalAlias": S3_BUCKET})
+    api(
+        "POST",
+        "AllowBucketKey",
+        {
+            "bucketId": bucket["id"],
+            "accessKeyId": S3_ACCESS_KEY,
+            "permissions": {"read": True, "write": True, "owner": True},
+        },
+    )
+
+    # The admin API reports healthy only once the layout is applied.
+    while requests.get(f"{admin_url}/health", timeout=5).status_code != 200:
+        if time.time() > deadline:
+            raise TimeoutError(f"Garage at {admin_url} did not become healthy")
+        time.sleep(1)
+
+
 @pytest.fixture(scope="session")
-def minio_docker(request: pytest.FixtureRequest) -> dict:
-    """Start a MinIO container using testcontainers for S3 testing."""
+def s3_server(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory) -> dict:
+    """Start a single-node Garage container that serves an S3 bucket for the tests."""
+    config_path = tmp_path_factory.mktemp("garage") / "garage.toml"
+    config_path.write_text(GARAGE_CONFIG)
+
     container = (
-        DockerContainer("registry.opsmill.io/external/minio:RELEASE.2025-09-07T16-13-09Z")
-        .with_exposed_ports(9000)
-        .with_env("MINIO_ROOT_USER", "minioadmin")
-        .with_env("MINIO_ROOT_PASSWORD", "minioadmin")
-        .with_kwargs(entrypoint="sh")
-        .with_command("-c 'mkdir -p /data/backups && minio server /data --console-address :9001'")
+        DockerContainer(GARAGE_IMAGE)
+        .with_exposed_ports(3900, 3903)
+        .with_env("GARAGE_RPC_SECRET", GARAGE_RPC_SECRET)
+        .with_env("GARAGE_ADMIN_TOKEN", GARAGE_ADMIN_TOKEN)
+        .with_volume_mapping(str(config_path), "/etc/garage.toml", "ro")
     )
 
     container.start()
     request.addfinalizer(container.stop)
 
-    # Get the mapped host port
     host = container.get_container_host_ip()
-    port = container.get_exposed_port(9000)
-    endpoint = f"http://{host}:{port}"
-
-    # Wait for MinIO to be ready
-    import requests
-
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        try:
-            resp = requests.get(f"{endpoint}/minio/health/ready", timeout=2)
-            if resp.status_code == 200:
-                break
-        except Exception:
-            pass
-        time.sleep(1)
-    else:
-        raise TimeoutError(f"MinIO at {endpoint} did not become ready")
+    _bootstrap_garage(f"http://{host}:{container.get_exposed_port(3903)}")
 
     return {
-        "endpoint": endpoint,
-        "access_key": "minioadmin",
-        "secret_key": "minioadmin",
-        "bucket": "backups",
+        "endpoint": f"http://{host}:{container.get_exposed_port(3900)}",
+        "access_key": S3_ACCESS_KEY,
+        "secret_key": S3_SECRET_KEY,
+        "bucket": S3_BUCKET,
     }
 
 

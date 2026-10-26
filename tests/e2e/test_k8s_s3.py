@@ -15,17 +15,16 @@ from tests.helpers.utils import (
 
 @pytest.mark.e2e
 @pytest.mark.k8s
-async def test_backup_restore_k8s_s3_tarball(reset_database_pod, infrahub_k8s, backup_binary, minio_docker, tmp_path):
+async def test_backup_restore_k8s_s3_tarball(reset_database_pod, infrahub_k8s, backup_binary, s3_server, tmp_path):
     """K8s: Create a tarball backup uploaded to S3, restore from S3, and verify."""
     token = infrahub_k8s["token"]
     namespace = infrahub_k8s["namespace"]
     kubeconfig = infrahub_k8s["kubeconfig_path"]
-    minio = minio_docker
 
     env = {
         "KUBECONFIG": kubeconfig,
-        "AWS_ACCESS_KEY_ID": minio["access_key"],
-        "AWS_SECRET_ACCESS_KEY": minio["secret_key"],
+        "AWS_ACCESS_KEY_ID": s3_server["access_key"],
+        "AWS_SECRET_ACCESS_KEY": s3_server["secret_key"],
     }
 
     # 1. Seed test data (fresh port-forward)
@@ -41,9 +40,9 @@ async def test_backup_restore_k8s_s3_tarball(reset_database_pod, infrahub_k8s, b
             "--backup-dir",
             str(tmp_path),
             "--s3-bucket",
-            minio["bucket"],
+            s3_server["bucket"],
             "--s3-endpoint",
-            minio["endpoint"],
+            s3_server["endpoint"],
             "--s3-region",
             "us-east-1",
             "create",
@@ -55,13 +54,13 @@ async def test_backup_restore_k8s_s3_tarball(reset_database_pod, infrahub_k8s, b
 
     # 3. Find the backup key in S3
     s3_key = get_s3_backup_key(
-        bucket=minio["bucket"],
+        bucket=s3_server["bucket"],
         prefix="",
-        endpoint=minio["endpoint"],
-        access_key=minio["access_key"],
-        secret_key=minio["secret_key"],
+        endpoint=s3_server["endpoint"],
+        access_key=s3_server["access_key"],
+        secret_key=s3_server["secret_key"],
     )
-    s3_uri = f"s3://{minio['bucket']}/{s3_key}"
+    s3_uri = f"s3://{s3_server['bucket']}/{s3_key}"
 
     # 4. Modify data (fresh port-forward)
     async with portforward_infrahub(kubeconfig, namespace) as url:
@@ -74,9 +73,9 @@ async def test_backup_restore_k8s_s3_tarball(reset_database_pod, infrahub_k8s, b
             "--k8s-namespace",
             namespace,
             "--s3-bucket",
-            minio["bucket"],
+            s3_server["bucket"],
             "--s3-endpoint",
-            minio["endpoint"],
+            s3_server["endpoint"],
             "--s3-region",
             "us-east-1",
             "restore",

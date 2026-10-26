@@ -44,9 +44,7 @@ def _newer_archive_name(name: str, ahead: timedelta = timedelta(hours=1)) -> str
 @pytest.mark.e2e
 @pytest.mark.docker
 class TestDockerS3(TestInfrahubDockerClient):
-    async def test_backup_restore_s3_tarball(
-        self, infrahub_compose, infrahub_port, backup_binary, minio_docker, tmp_path
-    ):
+    async def test_backup_restore_s3_tarball(self, infrahub_compose, infrahub_port, backup_binary, s3_server, tmp_path):
         """Create a tarball backup uploaded to S3, restore from S3, and verify.
 
         The upload keeps its local copy, so the restore below runs against the state
@@ -57,11 +55,10 @@ class TestDockerS3(TestInfrahubDockerClient):
         """
         url = f"http://localhost:{infrahub_port}"
         project = infrahub_compose.project_name
-        minio = minio_docker
 
         s3_env = {
-            "AWS_ACCESS_KEY_ID": minio["access_key"],
-            "AWS_SECRET_ACCESS_KEY": minio["secret_key"],
+            "AWS_ACCESS_KEY_ID": s3_server["access_key"],
+            "AWS_SECRET_ACCESS_KEY": s3_server["secret_key"],
         }
 
         # 1. Seed test data
@@ -76,9 +73,9 @@ class TestDockerS3(TestInfrahubDockerClient):
                 "--backup-dir",
                 str(tmp_path),
                 "--s3-bucket",
-                minio["bucket"],
+                s3_server["bucket"],
                 "--s3-endpoint",
-                minio["endpoint"],
+                s3_server["endpoint"],
                 "--s3-region",
                 "us-east-1",
                 "create",
@@ -95,13 +92,13 @@ class TestDockerS3(TestInfrahubDockerClient):
 
         # 3. Find the backup key in S3
         s3_key = get_s3_backup_key(
-            bucket=minio["bucket"],
+            bucket=s3_server["bucket"],
             prefix="",
-            endpoint=minio["endpoint"],
-            access_key=minio["access_key"],
-            secret_key=minio["secret_key"],
+            endpoint=s3_server["endpoint"],
+            access_key=s3_server["access_key"],
+            secret_key=s3_server["secret_key"],
         )
-        s3_uri = f"s3://{minio['bucket']}/{s3_key}"
+        s3_uri = f"s3://{s3_server['bucket']}/{s3_key}"
 
         # 6. Wait for Infrahub to recover
         await wait_for_http(f"{url}/api/config", timeout=180.0, interval=1.0)
@@ -118,9 +115,9 @@ class TestDockerS3(TestInfrahubDockerClient):
                 "--backup-dir",
                 str(tmp_path),
                 "--s3-bucket",
-                minio["bucket"],
+                s3_server["bucket"],
                 "--s3-endpoint",
-                minio["endpoint"],
+                s3_server["endpoint"],
                 "--s3-region",
                 "us-east-1",
                 "restore",
@@ -142,7 +139,7 @@ class TestDockerS3(TestInfrahubDockerClient):
         # 8. Verify the tag is back
         await verify_infrahub_data(url, ADMIN_TOKEN, seed)
 
-    async def test_restore_latest_from_s3(self, infrahub_compose, infrahub_port, backup_binary, minio_docker, tmp_path):
+    async def test_restore_latest_from_s3(self, infrahub_compose, infrahub_port, backup_binary, s3_server, tmp_path):
         """`restore --latest --s3` restores the newest object and spares the local copy.
 
         Quickstart Scenario 2: the S3 pool is the only pool consulted even when the local
@@ -157,7 +154,6 @@ class TestDockerS3(TestInfrahubDockerClient):
         """
         url = f"http://localhost:{infrahub_port}"
         project = infrahub_compose.project_name
-        minio = minio_docker
         backup_dir = tmp_path / "backups"
 
         # A prefix of this test's own, so the pool `--latest --s3` ranks holds nothing but
@@ -165,16 +161,16 @@ class TestDockerS3(TestInfrahubDockerClient):
         prefix = f"restore-latest-{uuid.uuid4().hex[:8]}"
 
         s3_env = {
-            "AWS_ACCESS_KEY_ID": minio["access_key"],
-            "AWS_SECRET_ACCESS_KEY": minio["secret_key"],
+            "AWS_ACCESS_KEY_ID": s3_server["access_key"],
+            "AWS_SECRET_ACCESS_KEY": s3_server["secret_key"],
         }
         s3_flags = [
             "--s3-bucket",
-            minio["bucket"],
+            s3_server["bucket"],
             "--s3-prefix",
             prefix,
             "--s3-endpoint",
-            minio["endpoint"],
+            s3_server["endpoint"],
             "--s3-region",
             "us-east-1",
         ]
@@ -207,11 +203,11 @@ class TestDockerS3(TestInfrahubDockerClient):
 
         assert (
             get_s3_backup_key(
-                bucket=minio["bucket"],
+                bucket=s3_server["bucket"],
                 prefix=prefix,
-                endpoint=minio["endpoint"],
-                access_key=minio["access_key"],
-                secret_key=minio["secret_key"],
+                endpoint=s3_server["endpoint"],
+                access_key=s3_server["access_key"],
+                secret_key=s3_server["secret_key"],
             )
             == f"{prefix}/{selected}"
         ), "the archive was not uploaded where the configured prefix says it should be"
@@ -235,7 +231,7 @@ class TestDockerS3(TestInfrahubDockerClient):
 
         # 6. The run says which archive it chose and out of which pool (FR-009).
         output = result.stdout + result.stderr
-        expected_line = f"Restoring latest backup {selected} from s3://{minio['bucket']}/{prefix}"
+        expected_line = f"Restoring latest backup {selected} from s3://{s3_server['bucket']}/{prefix}"
         assert expected_line in output, f"selection was not reported as {expected_line!r}:\n{output}"
         assert newer_local not in output, f"the newer local archive was consulted:\n{output}"
 
