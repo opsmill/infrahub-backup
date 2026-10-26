@@ -328,6 +328,7 @@ infrahub-collect create [flags]
 |------|-------------|---------|---------------------|
 | `--log-lines <n>` | Maximum log lines collected per container | `100000` | `INFRAHUB_LOG_LINES` |
 | `--include-backup` | Also create a backup using the standard backup behavior | `false` | `INFRAHUB_INCLUDE_BACKUP` |
+| `--include-task-manager-storage` | Also collect the storage breakdown of the task manager database (reads every row of its largest tables; up to 5 minutes per table; do not use while the task manager is being upgraded) | `false` | `INFRAHUB_INCLUDE_TASK_MANAGER_STORAGE` |
 | `--include-queries` | Include database query logs (may contain customer data) | `false` | `INFRAHUB_INCLUDE_QUERIES` |
 | `--benchmark` | Run the OpsMill benchmark and include its results (requires image download; skipped with a warning if unavailable) | `false` | `INFRAHUB_BENCHMARK` |
 
@@ -345,6 +346,9 @@ infrahub-collect create --log-lines=500000
 
 # Collect logs and a backup in one run
 infrahub-collect create --include-backup
+
+# Add the storage breakdown of the task manager database
+infrahub-collect create --include-task-manager-storage
 
 # Performance investigation with benchmark
 infrahub-collect create --benchmark
@@ -364,6 +368,8 @@ A single archive named `support_bundle_<timestamp>.tar.gz` in the output directo
 | Cache status | Redis info, client list, configuration, slow log, and database size |
 | Task-worker state | Prefect worker status, one directory per replica |
 | Task-manager state | Work pools, work queues, recent flow runs, events, and automations |
+| Task-manager database storage | Database size and, for each table, data, index, and TOAST sizes, estimated live and dead rows, and last manual and automatic vacuum times, in `task-manager-db/storage.json`. Collected in every run |
+| Task-manager database storage breakdown (opt-in) | Exact row counts and oldest and newest timestamps of each group of records in seven Prefect tables, in `task-manager-db/storage-breakdown.json` (`--include-task-manager-storage`) |
 | Server info | Versions, installed packages, API information/configuration/schema, masked environment variables |
 | Container metrics | Resource usage via `docker compose stats` or `kubectl top` |
 | Backup (opt-in) | Backup produced by the standard backup behavior (`--include-backup`) |

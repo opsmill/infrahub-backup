@@ -164,6 +164,7 @@ The bundle layout is identical on Docker Compose and Kubernetes. Inside the arch
 - `cache/` - Redis info, clients, configuration, and slow log
 - `task-worker/` - Task worker state, one directory per replica
 - `task-manager/` - Work pools, work queues, recent flow runs, the pending and running flow and task runs, events, and automations
+- `task-manager-db/` - Task manager database and table sizes (`storage.json`), and the storage breakdown (`storage-breakdown.json`) when you run `create` with `--include-task-manager-storage`
 - `server/` - Version, installed packages, API information, configuration, schema, worker schema-sync status (`infrahub_status.json`), environment variables
 - `metrics/` - Container resource metrics
 
@@ -225,6 +226,69 @@ infrahub-collect create --benchmark
 ```
 
 The benchmark requires downloading the OpsMill benchmark container image and measures whether the host meets Infrahub's resource requirements — disk IOPS, memory, and single-core CPU — rather than generating load against your instance. If the image cannot be pulled — for example in an air-gapped environment — the benchmark is skipped with a warning and the rest of the collection completes normally.
+
+### Include the storage breakdown of the task manager database
+
+Every bundle holds the size of the task manager database and of each of its tables, in `task-manager-db/storage.json`. If support asks which kinds of records use the space in the largest tables, collect a new bundle with the storage breakdown:
+
+```bash
+infrahub-collect create --include-task-manager-storage
+
+# Or via environment variable
+export INFRAHUB_INCLUDE_TASK_MANAGER_STORAGE=true
+infrahub-collect create
+```
+
+The breakdown reads every row of seven Prefect tables (`events`, `flow_run`, `task_run`, `flow_run_state`, `task_run_state`, `log`, and `artifact`), and writes the exact row count and the oldest and newest timestamps of each group of records to `task-manager-db/storage-breakdown.json`. Because the breakdown reads every row, it is not part of a default bundle. PostgreSQL stops the query on each table after 5 minutes, so the breakdown can take up to 5 minutes for each of the seven tables. The progress output names each table when its query starts, and reports the result when the query ends:
+
+```text
+INFO[0021] Collecting storage breakdown of table events (time limit 300s)
+INFO[0093] Table events: 5000000 rows in 42 groups (1m12s)
+INFO[0093] Collecting storage breakdown of table flow_run (time limit 300s)
+```
+
+A table that reaches the time limit is recorded as `failed` in `storage-breakdown.json`, and the other tables are still collected. The manifest then records the `task-manager-db-storage-breakdown` collector as `failed`, with a reason that names each failed table, for example `partial storage breakdown: log: timed out after 300s`. A table that does not exist in the deployed Prefect version is recorded as `absent`, not as a failure.
+
+:::warning
+Do not use `--include-task-manager-storage` while the task manager is being upgraded. Each breakdown query holds a lock on the table it reads, so a change to that table's schema during the upgrade can wait for up to 5 minutes.
+:::
+
+During an upgrade, the figures in `storage.json` can be missing as well, even without the flag. To measure the size of a table, the storage query waits for any lock that the upgrade holds on that table, so the query can reach its 60-second limit. The bundle then holds `task-manager-db/storage.err.txt` in place of `storage.json`, and the manifest records the `task-manager-db-storage` collector as `failed` with the reason `timed out after 60s`. If support needs these figures, collect a new bundle after the upgrade.
+
+#### Stop the `infrahub-collect` queries in the task manager database
+
+Stopping `infrahub-collect`, for example with Ctrl+C, does not stop a query that is already running in the database: PostgreSQL stops that query only when it reaches its time limit. Every query that `infrahub-collect` runs in the task manager database uses a read-only session with the PostgreSQL application name `infrahub-collect`. Because these sessions only read data, stopping them does not change any task manager data.
+
+To stop these queries at once, stop `infrahub-collect` first, then run this statement in the task manager database:
+
+```sql
+SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = 'infrahub-collect';
+```
+
+Stop `infrahub-collect` before you run the statement, because while `infrahub-collect` runs, it records the table whose query you stopped as failed and starts the query on the next table.
+
+Run the statement as the user that the task manager connects with. In the commands below, replace `<user>` and `<database>` with that user and the task manager database:
+
+<Tabs>
+<TabItem value="docker" label="Docker Compose" default>
+
+```bash
+docker compose -p <project> exec task-manager-db psql -U <user> -d <database> \
+  -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = 'infrahub-collect';"
+```
+
+</TabItem>
+<TabItem value="kubernetes" label="Kubernetes">
+
+```bash
+kubectl exec -n <namespace> <task-manager-db-pod> -- psql -U <user> -d <database> \
+  -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = 'infrahub-collect';"
+```
+
+On a CloudNativePG cluster, `infrahub-collect` runs its queries in the primary pod, so run the statement there. To find the primary pod, run `kubectl get pods -n <namespace> -l cnpg.io/instanceRole=primary`.
+
+</TabItem>
+</Tabs>
 
 ## Troubleshoot collection
 
