@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -139,4 +140,160 @@ func TestGetAllPodsWith_Branches(t *testing.T) {
 			t.Errorf("err = %v, want the wrapped kubectl failure", err)
 		}
 	})
+}
+
+// fakePod is one pod of a fakeNamespace: its name and labels.
+type fakePod struct {
+	name   string
+	labels map[string]string
+}
+
+// fakeNamespace answers the kubectl pod queries the pod resolvers make. It
+// evaluates label selectors against each pod's labels, so a test describes a
+// namespace by what every workload in it labels its pods with.
+type fakeNamespace []fakePod
+
+func (ns fakeNamespace) run(name string, args ...string) (string, error) {
+	// kubectl get pod <pod> -n <ns> -o jsonpath={.metadata.labels.<key>}
+	if len(args) > 2 && args[0] == "get" && args[1] == "pod" {
+		jsonpath := args[len(args)-1]
+		key := strings.TrimSuffix(strings.TrimPrefix(jsonpath, "jsonpath={.metadata.labels."), "}")
+		key = strings.ReplaceAll(key, `\.`, ".")
+		for _, pod := range ns {
+			if pod.name == args[2] {
+				return pod.labels[key], nil
+			}
+		}
+		return "", fmt.Errorf("pods %q not found", args[2])
+	}
+
+	// kubectl get pods -n <ns> [-l <selector>] -o jsonpath=...
+	selector := ""
+	for i, arg := range args {
+		if arg == "-l" && i+1 < len(args) {
+			selector = args[i+1]
+		}
+	}
+	names := []string{}
+	for _, pod := range ns {
+		if selector == "" || selectorMatchesLabels(selector, pod.labels) {
+			names = append(names, pod.name)
+		}
+	}
+	return strings.Join(names, "\n"), nil
+}
+
+// cnpgPod is a CloudNativePG instance pod of the task-manager database, with
+// the labels the operator sets plus infrahub/service, which the Infrahub HA
+// deployment example adds through the Cluster's inheritedMetadata.
+func cnpgPod(name, role string) fakePod {
+	return fakePod{name: name, labels: map[string]string{
+		"app.kubernetes.io/component":  "database",
+		"app.kubernetes.io/managed-by": "cloudnative-pg",
+		"cnpg.io/cluster":              "taskmanagerdb",
+		"cnpg.io/instanceRole":         role,
+		"infrahub/service":             "task-manager-db",
+	}}
+}
+
+// neo4jPod is a Neo4j server pod deployed by the Neo4j Helm chart. extra adds
+// labels on top of the ones the chart always sets.
+func neo4jPod(name string, extra map[string]string) fakePod {
+	labels := map[string]string{
+		"app":                         "infrahub",
+		"helm.neo4j.com/pod_category": "neo4j-instance",
+	}
+	for key, value := range extra {
+		labels[key] = value
+	}
+	return fakePod{name: name, labels: labels}
+}
+
+// TestPodResolutionWithCloudNativePG resolves the Neo4j and task-manager
+// database pods in a namespace where the task-manager database runs on
+// CloudNativePG. CNPG labels its instance pods
+// app.kubernetes.io/component=database, the same value as the Neo4j service,
+// so a lookup that tried that label first sent the Neo4j edition query to the
+// Postgres primary.
+func TestPodResolutionWithCloudNativePG(t *testing.T) {
+	cnpg := []fakePod{
+		cnpgPod("taskmanagerdb-1", "replica"),
+		cnpgPod("taskmanagerdb-2", "primary"),
+		cnpgPod("taskmanagerdb-3", "replica"),
+	}
+
+	tests := []struct {
+		name          string
+		neo4j         []fakePod
+		cnpg          []fakePod
+		wantDatabase  []string
+		wantPrimaryDB string
+	}{
+		{
+			// The HA deployment example labels Neo4j infrahub/service=database.
+			name: "HA example with infrahub/service on Neo4j",
+			neo4j: []fakePod{
+				neo4jPod("database-0-0", map[string]string{"infrahub/service": "database"}),
+				neo4jPod("database-1-0", map[string]string{"infrahub/service": "database"}),
+				neo4jPod("database-2-0", map[string]string{"infrahub/service": "database"}),
+			},
+			cnpg:          cnpg,
+			wantDatabase:  []string{"database-0-0", "database-1-0", "database-2-0"},
+			wantPrimaryDB: "taskmanagerdb-2",
+		},
+		{
+			// Neo4j installed from its own chart without the infrahub/service
+			// label: found through the Neo4j chart's pod label.
+			name:          "Neo4j without infrahub/service",
+			neo4j:         []fakePod{neo4jPod("database-0", map[string]string{"helm.neo4j.com/instance": "database"})},
+			cnpg:          cnpg,
+			wantDatabase:  []string{"database-0"},
+			wantPrimaryDB: "taskmanagerdb-2",
+		},
+		{
+			// Neither label is set and the CNPG cluster name contains
+			// "database": the pod-name fallback must still skip CNPG pods.
+			name:  "Neo4j found by pod name only",
+			neo4j: []fakePod{{name: "database-0", labels: map[string]string{"app": "neo4j"}}},
+			cnpg: []fakePod{
+				cnpgPod("task-manager-database-1", "primary"),
+				cnpgPod("task-manager-database-2", "replica"),
+			},
+			wantDatabase:  []string{"database-0"},
+			wantPrimaryDB: "task-manager-database-1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// CNPG pods come first, as they would in a namespace listed by name.
+			ns := fakeNamespace(append(append([]fakePod{}, tt.cnpg...), tt.neo4j...))
+			k := NewKubernetesBackend(&Configuration{}, NewCommandExecutor())
+			k.namespace = "infrahub"
+
+			pod, err := k.getPodForServiceWith(ns.run, "database")
+			if err != nil {
+				t.Fatalf("getPodForServiceWith(database) failed: %v", err)
+			}
+			if pod != tt.wantDatabase[0] {
+				t.Errorf("database resolved to pod %q, want the Neo4j pod %q", pod, tt.wantDatabase[0])
+			}
+
+			pods, err := k.getAllPodsWith(ns.run, "database")
+			if err != nil {
+				t.Fatalf("getAllPodsWith(database) failed: %v", err)
+			}
+			if !slices.Equal(pods, tt.wantDatabase) {
+				t.Errorf("database pods = %v, want the Neo4j pods %v", pods, tt.wantDatabase)
+			}
+
+			pod, err = k.getPodForServiceWith(ns.run, "task-manager-db")
+			if err != nil {
+				t.Fatalf("getPodForServiceWith(task-manager-db) failed: %v", err)
+			}
+			if pod != tt.wantPrimaryDB {
+				t.Errorf("task-manager-db resolved to pod %q, want the CNPG primary %q", pod, tt.wantPrimaryDB)
+			}
+		})
+	}
 }
