@@ -83,7 +83,7 @@ A failed storage query, or a failed catalog query of the breakdown, writes its d
 
 1. `PREFECT_SERVER_DATABASE_CONNECTION_URL` or `PREFECT_API_DATABASE_CONNECTION_URL` in the operator's environment.
 2. The same variables in the `env` output of `task-manager`.
-3. `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_DB` or `POSTGRES_DATABASE` in the `env` output of `task-manager-db`, used only when the user and the password are both set. Without a database variable, the database is `prefect`. This step keeps the figures available when the Prefect server is down, which is common when the database has filled its disk.
+3. `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_DB` or `POSTGRES_DATABASE` in the `env` output of `task-manager-db`, used only when the user and the password are both set. Without a database variable, the database is the one named after `POSTGRES_USER`, as the official `postgres` image creates it. This step keeps the figures available when the Prefect server is down, which is common when the database has filled its disk.
 4. The defaults of the backup tool: user `postgres`, password `prefect`, database `prefect`.
 
 The `env` output of both containers holds secrets and is never written to the bundle or the log. Only the source of the credentials is logged, at debug level. A Prefect connection URL that does not parse is ignored with a warning that names only its variable and its source, because the URL holds the password and the pgx parse error can quote part of it.

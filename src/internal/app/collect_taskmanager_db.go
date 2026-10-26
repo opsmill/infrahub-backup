@@ -152,7 +152,8 @@ func credentialsFromPostgresEnv(envOutput string) (taskManagerDBCredentials, boo
 	return taskManagerDBCredentials{
 		user:     user,
 		password: password,
-		database: valueOrDefault(database, defaultPostgresDatabase),
+		// Without POSTGRES_DB, the official image names the database after POSTGRES_USER.
+		database: valueOrDefault(database, user),
 		source:   dbCredentialsFromDatabase,
 	}, true
 }

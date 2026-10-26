@@ -120,12 +120,12 @@ func TestResolveTaskManagerDBCredentials(t *testing.T) {
 			wantCalls: map[string]int{"task-manager": 1, taskManagerDBService: 1},
 		},
 		{
-			name: "task-manager-db without a database name takes the default database",
+			name: "task-manager-db without a database name takes the database named after the user",
 			env: map[string]envExecResponse{
 				"task-manager":       execFailed,
 				taskManagerDBService: {output: "POSTGRES_USER=db-owner\nPOSTGRES_PASSWORD=db-secret\n"},
 			},
-			want:      taskManagerDBCredentials{user: "db-owner", password: "db-secret", database: defaultPostgresDatabase, source: dbCredentialsFromDatabase},
+			want:      taskManagerDBCredentials{user: "db-owner", password: "db-secret", database: "db-owner", source: dbCredentialsFromDatabase},
 			wantCalls: map[string]int{"task-manager": 1, taskManagerDBService: 1},
 		},
 		{
