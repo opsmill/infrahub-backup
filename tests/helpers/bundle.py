@@ -389,15 +389,16 @@ def assert_storage_breakdown(doc: dict) -> None:
     specs/006-taskmgr-db-storage/contracts/storage-breakdown.schema.json.
 
     jsonschema is not a test dependency; the schema's constraints are asserted
-    manually, as validate_manifest_schema does for the manifest: required
-    fields and no others, the enums, the minimums, RFC 3339 or null
-    timestamps, and, for each table, rows and groups present only when the
-    table is collected and reason only when it is not. It also asserts what
-    the schema cannot express (data-model.md, research R7): the seven tables
-    in list order with their documented group keys and timestamp column, the
-    group keys equal to grouped_by, rows_without_start_time only for the run
-    tables, a table's rows equal to the sum of its groups' rows, and the
-    order of the groups.
+    manually, as validate_manifest_schema does for the manifest: the required
+    fields and no others at the top level, the required fields and no fields
+    other than the optional ones in each table and group, the enums, the
+    minimums, RFC 3339 or null timestamps, and, for each table, rows and
+    groups present only when the table is collected and reason only when it
+    is not. It also asserts what the schema cannot express (data-model.md,
+    research R7): the seven tables in list order with their documented group
+    keys and timestamp column, the group keys equal to grouped_by,
+    rows_without_start_time only for the run tables, a table's rows equal to
+    the sum of its groups' rows, and the order of the groups.
     """
     _assert_exact_fields(doc, BREAKDOWN_FIELDS, "storage-breakdown.json")
     _assert_timestamp(doc["collected_at"], "collected_at")

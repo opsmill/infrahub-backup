@@ -528,7 +528,10 @@ func TestTaskManagerDBStorageCollector_Failures(t *testing.T) {
 // TestTaskManagerDBStorageCollector_PasswordNeverStaged covers FR-017: when
 // kubectl or the container echoes `env PGPASSWORD=<password> psql ...` in its
 // error and output streams or in the exec error, no file of the bundle,
-// including the manifest, holds the password.
+// including the manifest, holds the password. It also covers a query that
+// succeeds with output that does not parse: the runner leaves a successful
+// query's stdout unmasked, so only the collector's mask keeps the password out
+// of storage.err.txt.
 func TestTaskManagerDBStorageCollector_PasswordNeverStaged(t *testing.T) {
 	echoed := "env PGAPPNAME=infrahub-collect PGPASSWORD=" + storageCollectorPassword + " psql -h localhost"
 	tests := []struct {
@@ -546,6 +549,10 @@ func TestTaskManagerDBStorageCollector_PasswordNeverStaged(t *testing.T) {
 		{
 			name: "echoed in the exec error only",
 			err:  fmt.Errorf("kubectl exec %s: %w", echoed, exitCodeError{code: 1}),
+		},
+		{
+			name:   "query succeeds with output that does not parse",
+			stdout: "Pager usage is off. " + storageCollectorPassword,
 		},
 	}
 
@@ -1517,7 +1524,10 @@ func TestTaskManagerDBStorageBreakdownCollector_StopsWhenInterrupted(t *testing.
 // TestTaskManagerDBStorageBreakdownCollector_PasswordNeverStaged covers
 // FR-017: when the container echoes `env PGPASSWORD=<password> psql ...` in
 // the output of a failed query, neither the bundle files, the manifest nor
-// the progress output hold the password.
+// the progress output hold the password. It also covers a catalog query that
+// succeeds with output that does not parse: the runner leaves a successful
+// query's stdout unmasked, so only the collector's mask keeps the password out
+// of storage-breakdown.err.txt.
 func TestTaskManagerDBStorageBreakdownCollector_PasswordNeverStaged(t *testing.T) {
 	echoed := "env PGAPPNAME=infrahub-collect PGPASSWORD=" + storageCollectorPassword + " psql -h localhost"
 	echoedFailure := breakdownAnswer{
@@ -1525,13 +1535,22 @@ func TestTaskManagerDBStorageBreakdownCollector_PasswordNeverStaged(t *testing.T
 		stderr: cnpgNotice + "\nOCI runtime exec failed: exec: \"" + echoed + "\": executable file not found in $PATH\ncommand terminated with exit code 127",
 		err:    exitCodeError{code: 127},
 	}
+	unreadableOutput := breakdownAnswer{stdout: "Pager usage is off. " + storageCollectorPassword}
 	tests := []struct {
 		name        string
 		failedQuery string
+		answer      breakdownAnswer
 		wantFiles   int
+		// wantReasonMasked is set when the failure's reason quotes the echoed
+		// command, so the reason must show the password masked.
+		wantReasonMasked bool
+		// wantErrFile is set when the failure writes storage-breakdown.err.txt,
+		// which must then hold the diagnostics with the password masked.
+		wantErrFile bool
 	}{
-		{name: "a table query fails", failedQuery: "log", wantFiles: 2},
-		{name: "the catalog query fails", failedQuery: breakdownCatalogName, wantFiles: 2},
+		{name: "a table query fails", failedQuery: "log", answer: echoedFailure, wantFiles: 2, wantReasonMasked: true},
+		{name: "the catalog query fails", failedQuery: breakdownCatalogName, answer: echoedFailure, wantFiles: 2, wantReasonMasked: true, wantErrFile: true},
+		{name: "the catalog query succeeds with output that does not parse", failedQuery: breakdownCatalogName, answer: unreadableOutput, wantFiles: 2, wantErrFile: true},
 	}
 
 	for _, tt := range tests {
@@ -1539,7 +1558,7 @@ func TestTaskManagerDBStorageBreakdownCollector_PasswordNeverStaged(t *testing.T
 			useOperatorDBConnection(t, storageCollectorPassword)
 			backend := newBreakdownQueryBackend(t, func(query string) breakdownAnswer {
 				if query == tt.failedQuery {
-					return echoedFailure
+					return tt.answer
 				}
 				return answerBreakdown(query)
 			})
@@ -1547,11 +1566,20 @@ func TestTaskManagerDBStorageBreakdownCollector_PasswordNeverStaged(t *testing.T
 
 			result, bundleDir := runBreakdownCollector(t, backend, true)
 
-			if result.Status != collectorStatusFailed || !strings.Contains(result.Reason, maskedValue) {
-				t.Errorf("manifest entry = %+v, want failed with the password masked", result)
+			if result.Status != collectorStatusFailed || strings.Contains(result.Reason, storageCollectorPassword) {
+				t.Errorf("manifest entry = %+v, want failed without the password", result)
+			}
+			if tt.wantReasonMasked && !strings.Contains(result.Reason, maskedValue) {
+				t.Errorf("manifest reason = %q, want the password masked", result.Reason)
 			}
 			if call := backend.calls[0]; call.opts == nil || call.opts.Env["PGPASSWORD"] != storageCollectorPassword {
 				t.Fatalf("the query did not receive the password, so the test checks nothing")
+			}
+			if tt.wantErrFile {
+				_, errPath := storageBreakdownBundlePaths(bundleDir)
+				if diagnostics, err := os.ReadFile(errPath); err != nil || !strings.Contains(string(diagnostics), maskedValue) {
+					t.Errorf("storage-breakdown.err.txt = %q (%v), want the diagnostics with the password masked", diagnostics, err)
+				}
 			}
 			for _, entry := range hook.AllEntries() {
 				if strings.Contains(entry.Message, storageCollectorPassword) {

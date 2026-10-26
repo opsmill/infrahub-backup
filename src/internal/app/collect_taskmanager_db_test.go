@@ -252,6 +252,75 @@ func TestResolveTaskManagerDBCredentials_LogsSourceOnly(t *testing.T) {
 	}
 }
 
+// TestResolveTaskManagerDBCredentials_WarnsOnUnparsableURL covers a Prefect
+// connection URL that does not parse because its password holds an unencoded
+// "#" or "/": the lookup warns, naming the variable and where it was found but
+// not the URL or the password, and moves on to the next source.
+func TestResolveTaskManagerDBCredentials_WarnsOnUnparsableURL(t *testing.T) {
+	taskManagerEnv := envExecResponse{output: "PREFECT_SERVER_DATABASE_CONNECTION_URL=postgres://tm-owner:tm-secret@task-manager-db:5432/tm-db\n"}
+	databaseEnv := envExecResponse{output: "POSTGRES_USER=db-owner\nPOSTGRES_PASSWORD=db-secret\nPOSTGRES_DB=db-name\n"}
+
+	tests := []struct {
+		name     string
+		variable string
+		password string
+		// source is where the URL that does not parse is set, and wantSource
+		// the next source, which then provides the credentials.
+		source     string
+		wantSource string
+	}{
+		{
+			name:       "operator environment, Prefect 3 variable",
+			variable:   "PREFECT_SERVER_DATABASE_CONNECTION_URL",
+			password:   unparsablePrefectPassword,
+			source:     dbCredentialsFromOperator,
+			wantSource: dbCredentialsFromTaskManager,
+		},
+		{
+			name:       "operator environment, Prefect 2 variable",
+			variable:   "PREFECT_API_DATABASE_CONNECTION_URL",
+			password:   "Kx9q/Wz3v",
+			source:     dbCredentialsFromOperator,
+			wantSource: dbCredentialsFromTaskManager,
+		},
+		{
+			name:       "task-manager environment, Prefect 3 variable",
+			variable:   "PREFECT_SERVER_DATABASE_CONNECTION_URL",
+			password:   "Kx9q/Wz3v",
+			source:     dbCredentialsFromTaskManager,
+			wantSource: dbCredentialsFromDatabase,
+		},
+		{
+			name:       "task-manager environment, Prefect 2 variable",
+			variable:   "PREFECT_API_DATABASE_CONNECTION_URL",
+			password:   unparsablePrefectPassword,
+			source:     dbCredentialsFromTaskManager,
+			wantSource: dbCredentialsFromDatabase,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			url := unparsablePrefectURL(tt.password)
+			clearOperatorPrefectEnv(t)
+			env := map[string]envExecResponse{"task-manager": taskManagerEnv, taskManagerDBService: databaseEnv}
+			if tt.source == dbCredentialsFromOperator {
+				t.Setenv(tt.variable, url)
+			} else {
+				env["task-manager"] = envExecResponse{output: "PATH=/usr/bin\n" + tt.variable + "=" + url + "\n"}
+			}
+			backend := newEnvExecBackend(env)
+			cc := &collectContext{ctx: context.Background(), backend: backend, bundleDir: t.TempDir()}
+			hook := captureLogs(t)
+
+			if got := resolveTaskManagerDBCredentials(cc); got.source != tt.wantSource {
+				t.Errorf("credentials from the %s, want the %s after the URL that does not parse", got.source, tt.wantSource)
+			}
+			assertUnparsableURLWarning(t, warningMessages(hook), tt.variable, tt.source, url, tt.password)
+		})
+	}
+}
+
 func TestBuildPsqlCommand(t *testing.T) {
 	creds := taskManagerDBCredentials{user: "tm-owner", password: "tm-secret", database: "tm-db", source: dbCredentialsFromTaskManager}
 	readOnlyOptions := "-c default_transaction_read_only=on -c statement_timeout=%d -c TimeZone=UTC"

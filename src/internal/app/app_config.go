@@ -81,7 +81,7 @@ func (iops *InfrahubOps) loadCredentialsFromEnvironment() {
 
 	for _, name := range prefectConnectionEnvVars {
 		if value := os.Getenv(name); value != "" {
-			iops.applyPrefectConnection(value)
+			iops.applyPrefectConnection(name, dbCredentialsFromOperator, value)
 			break
 		}
 	}
@@ -133,18 +133,19 @@ func (iops *InfrahubOps) fetchPostgresCredentials() error {
 		return err
 	}
 
-	if conn := prefectConnectionFromEnv(envOut); conn != "" {
-		iops.applyPrefectConnection(conn)
+	if name, conn := prefectConnectionFromEnv(envOut); conn != "" {
+		iops.applyPrefectConnection(name, dbCredentialsFromTaskManager, conn)
 	}
 
 	return nil
 }
 
 // prefectConnectionFromEnv returns the Prefect database connection string from
-// `env` output, or "" when none of prefectConnectionEnvVars is set. The first
-// match in preference order is returned so newer Prefect naming wins regardless
-// of the order the container reports its environment.
-func prefectConnectionFromEnv(envOutput string) string {
+// `env` output and the variable that holds it, or "" for both when none of
+// prefectConnectionEnvVars is set. The first match in preference order is
+// returned so newer Prefect naming wins regardless of the order the container
+// reports its environment.
+func prefectConnectionFromEnv(envOutput string) (name, conn string) {
 	connections := map[string]string{}
 	for _, line := range strings.Split(envOutput, "\n") {
 		for _, name := range prefectConnectionEnvVars {
@@ -156,10 +157,10 @@ func prefectConnectionFromEnv(envOutput string) string {
 
 	for _, name := range prefectConnectionEnvVars {
 		if conn := connections[name]; conn != "" {
-			return conn
+			return name, conn
 		}
 	}
-	return ""
+	return "", ""
 }
 
 // applyNeo4jDefaults applies default Neo4j credentials
@@ -188,15 +189,17 @@ func (iops *InfrahubOps) applyPostgresDefaults() {
 	}
 }
 
-// applyPrefectConnection parses and applies Prefect database connection string
-func (iops *InfrahubOps) applyPrefectConnection(connStr string) {
+// applyPrefectConnection parses and applies the Prefect database connection
+// string that the variable name holds in source, and warns when it does not
+// parse.
+func (iops *InfrahubOps) applyPrefectConnection(name, source, connStr string) {
 	if connStr == "" {
 		return
 	}
 
 	user, password, database, ok := parsePrefectConnection(connStr)
 	if !ok {
-		logrus.Warn("Could not parse PREFECT_API_DATABASE_CONNECTION_URL")
+		warnUnparsablePrefectConnection(name, source)
 		return
 	}
 
@@ -211,12 +214,24 @@ func (iops *InfrahubOps) applyPrefectConnection(connStr string) {
 	}
 }
 
+// warnUnparsablePrefectConnection reports that the Prefect connection URL in
+// the variable name, found in source, does not parse and is ignored. An
+// operator who sets the URL to fix a rejected login learns this only from the
+// warning, as no flag turns on debug logging. The warning names the variable
+// and the source only: the URL holds the password, and the parse error can
+// quote part of it.
+func warnUnparsablePrefectConnection(name, source string) {
+	logrus.Warnf("Ignoring %s from the %s: not a valid PostgreSQL URL; percent-encode special characters in the password", name, source)
+}
+
 // parsePrefectConnection extracts the user, password and database from a
 // Prefect database connection string. The SQLAlchemy driver suffix
 // (postgresql+asyncpg://) is normalized to postgres:// first so pgx accepts it.
 // ok is false for an empty or unparsable string. The parse error is not
-// returned: pgx redacts the password from its error text but keeps the user and
-// host, and the collect path logs no credential value.
+// returned: pgx redacts the password in the URL it quotes, but the cause it
+// adds can quote part of the password, for example `invalid port ":pa" after
+// host` for a password that starts with "pa" followed by an unencoded "#" or
+// "/".
 func parsePrefectConnection(connStr string) (user, password, database string, ok bool) {
 	if connStr == "" {
 		return "", "", "", false

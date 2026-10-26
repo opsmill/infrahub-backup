@@ -86,7 +86,7 @@ A failed storage query, or a failed catalog query of the breakdown, writes its d
 3. `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_DB` or `POSTGRES_DATABASE` in the `env` output of `task-manager-db`, used only when the user and the password are both set. Without a database variable, the database is `prefect`. This step keeps the figures available when the Prefect server is down, which is common when the database has filled its disk.
 4. The defaults of the backup tool: user `postgres`, password `prefect`, database `prefect`.
 
-The `env` output of both containers holds secrets and is never written to the bundle or the log. Only the source of the credentials is logged, at debug level.
+The `env` output of both containers holds secrets and is never written to the bundle or the log. Only the source of the credentials is logged, at debug level. A Prefect connection URL that does not parse is ignored with a warning that names only its variable and its source, because the URL holds the password and the pgx parse error can quote part of it.
 
 The size functions (`pg_total_relation_size`, `pg_table_size`, `pg_indexes_size`) wait behind an `ACCESS EXCLUSIVE` lock, for example during a task manager upgrade or migration, while `to_regclass` and `pg_stat_user_tables` do not. During such a lock, `task-manager-db-storage` therefore fails with `timed out after 60s`, the breakdown's catalog query still returns, and the locked table fails in the breakdown with `timed out after 300s`. The end-to-end test showed that a lock on `artifact` also makes `task-manager-state` (`prefect flow-run ls`) wait until its own 60-second limit.
 

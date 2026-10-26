@@ -34,8 +34,9 @@ const (
 	taskManagerDBNotDeployedReason = "service not deployed; the task manager may use an external PostgreSQL server"
 )
 
-// Where resolveTaskManagerDBCredentials found the credentials. Only the source
-// is ever logged, never a value.
+// Where resolveTaskManagerDBCredentials found the credentials, also named by
+// the warning about a connection URL that does not parse. Only the source is
+// ever logged, never a value.
 const (
 	dbCredentialsFromOperator    = "operator environment"
 	dbCredentialsFromTaskManager = "task-manager environment"
@@ -63,8 +64,9 @@ type taskManagerDBCredentials struct {
 //     Prefect server is down (critique X1);
 //  4. the defaults the backup tool uses.
 //
-// It reads but never changes iops.config. The `env` output of both containers
-// holds secrets: it is parsed here and never written to the bundle or the log.
+// It neither reads nor changes iops.config, so the backup tool's credentials
+// stay separate. The `env` output of both containers holds secrets: it is
+// parsed here and never written to the bundle or the log.
 func resolveTaskManagerDBCredentials(cc *collectContext) taskManagerDBCredentials {
 	if cc.dbCredentials != nil {
 		return *cc.dbCredentials
@@ -79,7 +81,7 @@ func resolveTaskManagerDBCredentials(cc *collectContext) taskManagerDBCredential
 func lookupTaskManagerDBCredentials(cc *collectContext) taskManagerDBCredentials {
 	for _, name := range prefectConnectionEnvVars {
 		if conn := os.Getenv(name); conn != "" {
-			if creds, ok := credentialsFromPrefectConnection(conn, dbCredentialsFromOperator); ok {
+			if creds, ok := credentialsFromPrefectConnection(name, conn, dbCredentialsFromOperator); ok {
 				return creds
 			}
 			break
@@ -88,8 +90,8 @@ func lookupTaskManagerDBCredentials(cc *collectContext) taskManagerDBCredentials
 
 	if envOut, err := cc.execDumpTimeout(collectExecTimeout, "task-manager", []string{"env"}); err != nil {
 		logrus.Debugf("Could not read the task-manager environment for database credentials: %v", err)
-	} else if conn := prefectConnectionFromEnv(envOut); conn != "" {
-		if creds, ok := credentialsFromPrefectConnection(conn, dbCredentialsFromTaskManager); ok {
+	} else if name, conn := prefectConnectionFromEnv(envOut); conn != "" {
+		if creds, ok := credentialsFromPrefectConnection(name, conn, dbCredentialsFromTaskManager); ok {
 			return creds
 		}
 	}
@@ -108,13 +110,19 @@ func lookupTaskManagerDBCredentials(cc *collectContext) taskManagerDBCredentials
 	}
 }
 
-// credentialsFromPrefectConnection parses a Prefect connection URL found in
-// source. A part the URL leaves out takes the default, as applyPostgresDefaults
-// does for the backup tool.
-func credentialsFromPrefectConnection(conn, source string) (taskManagerDBCredentials, bool) {
+// credentialsFromPrefectConnection parses the Prefect connection URL that the
+// variable name holds in source. A URL that does not parse is ignored with a
+// warning, and the lookup moves on to the next source. pgx fills a part the
+// URL leaves out from PGUSER, PGPASSWORD or PGDATABASE in the operator's
+// environment, then the user from the operating-system user that runs the
+// tool and the password from the password file (~/.pgpass or PGPASSFILE). A
+// password or database still empty after that takes the default, as
+// applyPostgresDefaults does for the backup tool; the user takes it only when
+// the operating-system user cannot be read.
+func credentialsFromPrefectConnection(name, conn, source string) (taskManagerDBCredentials, bool) {
 	user, password, database, ok := parsePrefectConnection(conn)
 	if !ok {
-		logrus.Debugf("Could not parse the Prefect database connection URL from the %s", source)
+		warnUnparsablePrefectConnection(name, source)
 		return taskManagerDBCredentials{}, false
 	}
 	return taskManagerDBCredentials{
@@ -196,7 +204,10 @@ var dbSessionParameterAllowlist = []string{
 // waiting for still stops on the server. Breakdown queries also turn off hash
 // joins, merge joins and parallel workers, so their joins use the primary-key
 // index and never write temporary files to a disk that may be nearly full.
-// The password travels in the environment only, never in the command.
+// The password goes in PGPASSWORD, never in the psql arguments. The exec still
+// carries it on the docker or kubectl command line, as
+// `-e PGPASSWORD=<password>` or `env PGPASSWORD=<password>` (ADR 0008), so
+// runTaskManagerDBQuery masks it.
 func buildPsqlCommand(creds taskManagerDBCredentials, q dbQuery) ([]string, map[string]string) {
 	command := []string{
 		"psql", "-h", "localhost", "-U", creds.user, "-d", creds.database,
@@ -246,7 +257,11 @@ func effectiveDBQueryLimit(base time.Duration, getenv func(string) string) time.
 }
 
 // dbQueryErrorKind names the cause of a failed task manager database query
-// (research R9). It starts every manifest reason except a timeout's.
+// (research R9). It starts the text of every *dbQueryError except a timeout's:
+// the manifest reason of a failed storage query or breakdown catalog query,
+// and the reason of a failed table in storage-breakdown.json. The breakdown
+// collector's manifest reason for failed tables starts with
+// "partial storage breakdown:" instead.
 type dbQueryErrorKind string
 
 const (

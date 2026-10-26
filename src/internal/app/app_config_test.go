@@ -1,6 +1,14 @@
 package app
 
-import "testing"
+import (
+	"errors"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/sirupsen/logrus"
+	logrustest "github.com/sirupsen/logrus/hooks/test"
+)
 
 func newTestOps() *InfrahubOps {
 	return &InfrahubOps{config: &Configuration{}}
@@ -37,7 +45,7 @@ func TestApplyPrefectConnection(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			iops := newTestOps()
-			iops.applyPrefectConnection(tt.connStr)
+			iops.applyPrefectConnection(prefectConnectionEnvVars[0], dbCredentialsFromOperator, tt.connStr)
 
 			if iops.config.PostgresDatabase != tt.database {
 				t.Errorf("database = %q, want %q", iops.config.PostgresDatabase, tt.database)
@@ -104,46 +112,158 @@ func TestPrefectConnectionFromEnv(t *testing.T) {
 	tests := []struct {
 		name      string
 		envOutput string
+		wantName  string
 		want      string
 	}{
 		{
 			name:      "Prefect 3 variable listed first wins",
 			envOutput: "PATH=/usr/bin\nPREFECT_SERVER_DATABASE_CONNECTION_URL=" + prefect3 + "\nPREFECT_API_DATABASE_CONNECTION_URL=" + prefect2 + "\n",
+			wantName:  "PREFECT_SERVER_DATABASE_CONNECTION_URL",
 			want:      prefect3,
 		},
 		{
 			name:      "Prefect 3 variable listed last wins",
 			envOutput: "PREFECT_API_DATABASE_CONNECTION_URL=" + prefect2 + "\nHOME=/root\nPREFECT_SERVER_DATABASE_CONNECTION_URL=" + prefect3,
+			wantName:  "PREFECT_SERVER_DATABASE_CONNECTION_URL",
 			want:      prefect3,
 		},
 		{
 			name:      "Prefect 2 variable alone",
 			envOutput: "HOME=/root\nPREFECT_API_DATABASE_CONNECTION_URL=" + prefect2 + "\n",
+			wantName:  "PREFECT_API_DATABASE_CONNECTION_URL",
 			want:      prefect2,
 		},
 		{
 			name:      "empty Prefect 3 variable falls back to Prefect 2",
 			envOutput: "PREFECT_SERVER_DATABASE_CONNECTION_URL=\nPREFECT_API_DATABASE_CONNECTION_URL=" + prefect2 + "\n",
+			wantName:  "PREFECT_API_DATABASE_CONNECTION_URL",
 			want:      prefect2,
 		},
 		{
 			name:      "no connection variable",
 			envOutput: "PATH=/usr/bin\nHOME=/root\n",
-			want:      "",
 		},
 		{
 			name:      "empty output",
 			envOutput: "",
-			want:      "",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := prefectConnectionFromEnv(tt.envOutput); got != tt.want {
-				t.Errorf("prefectConnectionFromEnv() = %q, want %q", got, tt.want)
+			if name, got := prefectConnectionFromEnv(tt.envOutput); name != tt.wantName || got != tt.want {
+				t.Errorf("prefectConnectionFromEnv() = %q, %q, want %q, %q", name, got, tt.wantName, tt.want)
 			}
 		})
+	}
+}
+
+// unparsablePrefectPassword holds an unencoded "#", so a connection URL with
+// it does not parse, and pgx's parse error quotes the part before the "#"
+// (`invalid port ":Kx9q" after host`). Both parts are words of no other text,
+// so finding either in a warning means the password leaked.
+const unparsablePrefectPassword = "Kx9q#Wz3v"
+
+// unparsablePrefectURL returns a Prefect connection URL that does not parse
+// because password is not percent-encoded.
+func unparsablePrefectURL(password string) string {
+	return "postgresql+asyncpg://owner:" + password + "@task-manager-db:5432/prefect"
+}
+
+// warningMessages returns the messages of the warnings that hook recorded.
+func warningMessages(hook *logrustest.Hook) []string {
+	messages := []string{}
+	for _, entry := range hook.AllEntries() {
+		if entry.Level == logrus.WarnLevel {
+			messages = append(messages, entry.Message)
+		}
+	}
+	return messages
+}
+
+// assertUnparsableURLWarning checks the warning about a Prefect connection URL
+// that does not parse: it names the variable and where it was found, gives the
+// hint, and holds neither the URL, the password nor any part of the password
+// around its special character (FR-017).
+func assertUnparsableURLWarning(t *testing.T, warnings []string, variable, source, url, password string) {
+	t.Helper()
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %q, want one about %s", warnings, variable)
+	}
+	message := warnings[0]
+	for _, want := range []string{variable, "from the " + source, "percent-encode special characters in the password"} {
+		if !strings.Contains(message, want) {
+			t.Errorf("warning %q does not hold %q", message, want)
+		}
+	}
+	for _, other := range prefectConnectionEnvVars {
+		if other != variable && strings.Contains(message, other) {
+			t.Errorf("warning %q names %s, want only %s", message, other, variable)
+		}
+	}
+	secrets := slices.Concat([]string{url, password}, strings.FieldsFunc(password, func(r rune) bool { return r == '#' || r == '/' }))
+	for _, secret := range secrets {
+		if strings.Contains(message, secret) {
+			t.Errorf("warning %q holds %q from the connection URL", message, secret)
+		}
+	}
+}
+
+// TestLoadCredentialsFromEnvironment_WarnsOnUnparsableURL covers the backup
+// tool's lookup in the operator's environment: a URL that does not parse
+// leaves the configuration unchanged, and the warning names the variable that
+// holds it, whichever of the two it is.
+func TestLoadCredentialsFromEnvironment_WarnsOnUnparsableURL(t *testing.T) {
+	url := unparsablePrefectURL(unparsablePrefectPassword)
+	for _, variable := range prefectConnectionEnvVars {
+		t.Run(variable, func(t *testing.T) {
+			clearOperatorPrefectEnv(t)
+			t.Setenv(variable, url)
+			hook := captureLogs(t)
+
+			iops := newTestOps()
+			iops.loadCredentialsFromEnvironment()
+
+			if iops.config.PostgresUsername != "" || iops.config.PostgresPassword != "" || iops.config.PostgresDatabase != "" {
+				t.Errorf("config = %+v, want the PostgreSQL credentials unchanged", iops.config)
+			}
+			assertUnparsableURLWarning(t, warningMessages(hook), variable, dbCredentialsFromOperator, url, unparsablePrefectPassword)
+		})
+	}
+}
+
+// TestFetchPostgresCredentials_WarnsOnUnparsableURL covers the backup tool's
+// lookup in the task-manager container: the warning names the variable that
+// holds the URL in that container and the task-manager environment.
+func TestFetchPostgresCredentials_WarnsOnUnparsableURL(t *testing.T) {
+	passwords := []struct{ name, password string }{
+		{name: "unencoded hash", password: unparsablePrefectPassword},
+		{name: "unencoded slash", password: "Kx9q/Wz3v"},
+	}
+	for _, tt := range passwords {
+		for _, variable := range prefectConnectionEnvVars {
+			t.Run(variable+" with an "+tt.name, func(t *testing.T) {
+				url := unparsablePrefectURL(tt.password)
+				backend := newFakeCollectBackend()
+				backend.execFn = func(service string, command []string, opts *ExecOptions) (string, error) {
+					if service != "task-manager" || strings.Join(command, " ") != "env" {
+						return "", errors.New("unexpected exec of " + strings.Join(command, " ") + " in " + service)
+					}
+					return "PATH=/usr/bin\n" + variable + "=" + url + "\n", nil
+				}
+				hook := captureLogs(t)
+
+				iops := &InfrahubOps{config: &Configuration{}, backend: backend}
+				if err := iops.fetchPostgresCredentials(); err != nil {
+					t.Fatalf("fetchPostgresCredentials() = %v, want nil", err)
+				}
+
+				if iops.config.PostgresUsername != "" || iops.config.PostgresPassword != "" || iops.config.PostgresDatabase != "" {
+					t.Errorf("config = %+v, want the PostgreSQL credentials unchanged", iops.config)
+				}
+				assertUnparsableURLWarning(t, warningMessages(hook), variable, dbCredentialsFromTaskManager, url, tt.password)
+			})
+		}
 	}
 }
 

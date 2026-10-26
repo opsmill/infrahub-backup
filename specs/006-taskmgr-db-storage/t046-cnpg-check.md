@@ -21,7 +21,7 @@ Manual check of [quickstart.md](quickstart.md) scenario 6 and [FR-014](spec.md):
 | c, 19:38:21 | `--include-task-manager-storage` | `taskmanagerdb-2` | `taskmanagerdb-2` (9 calls) | `success` | `success`, 7 of 7 tables `collected` |
 | d, 19:38:38, merged binary (see below) | `--include-task-manager-storage` | `taskmanagerdb-2` | `taskmanagerdb-2` (9 calls) | `success` | `success`, 7 of 7 tables `collected` |
 
-- Every run exited 0. The tool listed the pods labeled `infrahub/service=task-manager-db`, read the `cnpg.io/instanceRole` label of each pod in list order until one was `primary`, and ran `psql` in that pod. In run c, it read `taskmanagerdb-1` (`replica`), then `taskmanagerdb-2` (`primary`).
+- Every run exited 0. The tool listed the pods labeled `infrahub/service=task-manager-db` and read the labels of each pod in list order until one was `primary`: the `cnpg.io/instanceRole` label, then, for a pod where that label was not `primary`, the legacy `role` label. It ran `psql` in the primary pod. In run c, it read the labels of `taskmanagerdb-1` (`replica`), then `taskmanagerdb-2` (`primary`).
 - `storage.json` names the database `prefect`, the CloudNativePG database, and lists 36 tables. `storage-breakdown.json` has the time limit `300s` per table.
 - Credentials: the tool read them from `env` in the `task-manager` pod (`prefect-server-...`). It ran no `env` in a `task-manager-db` pod, and the queries logged in as `prefect`.
 - The database password, a random value chosen for this check, is in no bundle file and not in the progress output of any run.
