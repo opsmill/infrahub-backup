@@ -92,7 +92,7 @@ def collect_binary() -> str:
 def minio_docker(request: pytest.FixtureRequest) -> dict:
     """Start a MinIO container using testcontainers for S3 testing."""
     container = (
-        DockerContainer("minio/minio:RELEASE.2025-09-07T16-13-09Z")
+        DockerContainer("registry.opsmill.io/external/minio:RELEASE.2025-09-07T16-13-09Z")
         .with_exposed_ports(9000)
         .with_env("MINIO_ROOT_USER", "minioadmin")
         .with_env("MINIO_ROOT_PASSWORD", "minioadmin")
