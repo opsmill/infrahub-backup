@@ -777,8 +777,9 @@ func TestRunTaskManagerDBQuery_Timeouts(t *testing.T) {
 
 // TestRunTaskManagerDBQuery_MasksPassword covers FR-017: on Kubernetes the exec
 // runs `env PGPASSWORD=<password> psql ...`, and kubectl or the container can
-// echo it in the error and both streams. The password must reach none of the
-// strings the runner returns.
+// echo it in the error and both streams. When the query fails, the password
+// must reach none of the strings the runner returns, since they all go to the
+// failure diagnostics.
 func TestRunTaskManagerDBQuery_MasksPassword(t *testing.T) {
 	const password = "Sup3r-Secr3t!"
 	echoed := "env PGAPPNAME=infrahub-collect PGPASSWORD=" + password + " psql -h localhost"
@@ -851,6 +852,37 @@ func TestRunTaskManagerDBQuery_MasksPassword(t *testing.T) {
 				t.Errorf("the backend did not receive the unmasked password in PGPASSWORD")
 			}
 		})
+	}
+}
+
+// TestRunTaskManagerDBQuery_SuccessKeepsQueryResult covers the other half of
+// the masking contract: a successful query's stdout is the query result, which
+// never holds the command line, so it comes back unmasked. With the default
+// password "prefect", masking it would turn the database name and event names
+// into "********". The command and stderr stay masked.
+func TestRunTaskManagerDBQuery_SuccessKeepsQueryResult(t *testing.T) {
+	creds := taskManagerDBCredentials{user: "prefect", password: defaultPostgresPassword, database: "prefect"}
+	const stdout = `{"database" : "prefect", "events" : ["prefect.flow-run.Completed"]}`
+	backend := &dbQueryBackend{
+		fakeCollectBackend: *newFakeCollectBackend(),
+		respond: func(dbQueryCall) (string, string, error) {
+			return stdout, cnpgNotice + "\nenv PGPASSWORD=prefect psql", nil
+		},
+	}
+	cc := newDBQueryContext(t, backend, creds)
+
+	result, err := runTaskManagerDBQuery(cc, dbQuery{sql: "SELECT 1", limit: collectExecTimeout})
+	if err != nil {
+		t.Fatalf("runTaskManagerDBQuery failed: %v", err)
+	}
+	if result.stdout != stdout {
+		t.Errorf("stdout = %q, want the query result unchanged: %q", result.stdout, stdout)
+	}
+	if command := strings.Join(result.command, " "); strings.Contains(command, defaultPostgresPassword) {
+		t.Errorf("command holds the password: %q", command)
+	}
+	if strings.Contains(result.stderr, defaultPostgresPassword) || !strings.Contains(result.stderr, "PGPASSWORD="+maskedValue) {
+		t.Errorf("stderr = %q, want the password masked", result.stderr)
 	}
 }
 

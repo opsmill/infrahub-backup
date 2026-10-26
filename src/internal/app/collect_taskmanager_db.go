@@ -437,9 +437,9 @@ func maskSecretValue(secret string) func(string) string {
 	return func(s string) string { return strings.ReplaceAll(s, secret, maskedValue) }
 }
 
-// dbQueryResult is what one task manager database query returns, with the
-// password masked: the command, for the failure diagnostics, and both output
-// streams.
+// dbQueryResult is what one task manager database query returns: the command,
+// for the failure diagnostics, and both output streams. The password is masked
+// in the command and stderr, and in stdout when the query failed.
 type dbQueryResult struct {
 	command []string
 	stdout  string
@@ -451,7 +451,8 @@ type dbQueryResult struct {
 // limit plus collectDBQueryGrace, so PostgreSQL normally stops the query and
 // reports it first, and the bound still catches a hung docker or kubectl. A
 // failure is returned as a *dbQueryError. The password is masked in the
-// returned command, both streams and the error text (FR-017).
+// returned command, stderr and the error text, and in stdout when the query
+// failed (FR-017).
 func runTaskManagerDBQuery(cc *collectContext, q dbQuery) (dbQueryResult, error) {
 	creds := resolveTaskManagerDBCredentials(cc)
 	mask := maskSecretValue(creds.password)
@@ -474,14 +475,22 @@ func runTaskManagerDBQuery(cc *collectContext, q dbQuery) (dbQueryResult, error)
 	}
 
 	stdout, stderr, err := execer.ExecSeparateContext(cc.ctx, q.limit+collectDBQueryGrace, taskManagerDBService, command, &ExecOptions{Env: env})
-	result.stdout, result.stderr = mask(stdout), mask(stderr)
+	result.stderr = mask(stderr)
 	if err != nil {
+		// A failed query's stdout goes to <file>.err.txt as diagnostics, where
+		// it may echo the exec command line and with it the password.
+		result.stdout = mask(stdout)
 		// Classify the unmasked output, so a password that happens to be a word
 		// of the error message cannot hide the cause, then mask the detail.
 		queryErr := classifyDBQueryFailure(err, stdout, stderr, q.limit)
 		queryErr.detail = mask(queryErr.detail)
 		return result, queryErr
 	}
+	// A successful query's stdout is the query result the collectors parse, and
+	// the command line never reaches it. Masking it would corrupt the result
+	// when the password is a common word: with the default password "prefect",
+	// the database name and event names such as prefect.flow-run.Completed.
+	result.stdout = stdout
 	return result, nil
 }
 
