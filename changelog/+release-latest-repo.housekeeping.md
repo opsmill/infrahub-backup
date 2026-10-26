@@ -1,1 +1,0 @@
-The release workflow step that marks the highest stable release as Latest no longer fails. The step ran `gh release edit` in a job that does not check out the repository, so `gh` could not find which repository to edit, and the workflow run for v2.4.0 failed.
