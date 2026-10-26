@@ -134,7 +134,7 @@ Each requirement ends with how to test it.
 - **FR-013**: While the breakdown runs, the progress output MUST name each table as the tool starts on it.
   - Test: a unit test on the log output.
 - **FR-014**: On Kubernetes with a CloudNativePG cluster, the queries MUST run on the primary pod.
-  - Test: a unit test on pod selection. The existing primary-pod selection by the `cnpg.io/instanceRole` label already has tests.
+  - Test: a unit test on pod selection: with several `task-manager-db` pods, the query runs on the pod labeled `cnpg.io/instanceRole=primary`. The PRD states that the existing primary-pod selection already has tests; on `main` (commit `d4e4b34`) no test covers `findPrimaryPod`, so this change adds one.
 - **FR-015**: The documentation MUST describe the two new bundle files in the "What a bundle contains" section, and MUST describe the new flag and environment variable in the flag reference. The description of the flag MUST say not to use it while the task manager is being upgraded.
   - Test: the changed pages pass Vale and rumdl, and a reviewer checks the warning.
 - **FR-016**: The manifest MUST tell support why breakdown figures are missing: the breakdown collector's reason MUST name each table that failed and the cause, for example `log: timed out after 300s`. `storage-breakdown.json` MUST record, for each table on the breakdown list, whether it was collected, absent or failed, with the reason.

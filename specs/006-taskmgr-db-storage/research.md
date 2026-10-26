@@ -159,7 +159,7 @@ The decisions below were checked against the code on `main` (commit `d4e4b34`) a
   - the SQL built for each breakdown entry (FR-005 to FR-007)
   - collector outcomes for not requested, not deployed, absent tables, a timed-out table and a failed catalog query (FR-004, FR-010, FR-012, FR-016)
   - the plan order and the progress lines (FR-013)
-  - Kubernetes pod selection: the existing `findPrimaryPod` tests, plus a test that the storage query runs on the pod that `getPodForServiceContext` selects (FR-014)
+  - Kubernetes pod selection: `getPodForServiceWith` with a fake `podRunner` that returns several `task-manager-db` pods, one labeled `cnpg.io/instanceRole=primary`, selects that pod (FR-014). No test covers `findPrimaryPod` on `main` today, although the PRD says one exists.
 - End-to-end tests:
   - Docker: seed a flow, completed flow runs and one flow run cancelled before it starts, through the Prefect client in a `task-worker` container. Run `create --include-task-manager-storage`. Check both files against the seed, and assert the constraints of the JSON Schemas in `contracts/` by hand, as `tests/helpers/bundle.py` already does for the manifest, because `jsonschema` is not a test dependency.
   - Docker, time limit: hold `LOCK TABLE artifact IN ACCESS EXCLUSIVE MODE` in a separate session, run the breakdown with both limits lowered through the undocumented variable `INFRAHUB_TASK_MANAGER_DB_QUERY_TIMEOUT`, then check that:
