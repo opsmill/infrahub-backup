@@ -185,20 +185,49 @@ func (k *KubernetesBackend) Start(services ...string) error {
 	return nil
 }
 
+// Stop scales each service's workload to 0 replicas. It first records the
+// replica count of every workload that has none recorded, and returns an error
+// without scaling any of them when a count cannot be read, so that Start never
+// has to guess a count.
 func (k *KubernetesBackend) Stop(services ...string) error {
-	// Save current replica counts before stopping
+	if err := k.RecordReplicaCounts(services...); err != nil {
+		return err
+	}
+	return k.scaleServices(services, 0)
+}
+
+var _ replicaRecorder = (*KubernetesBackend)(nil)
+
+// RecordReplicaCounts reads and keeps the replica count of each service's
+// workload, so that Start brings the workload back with that count after Stop
+// scaled it to 0. A service with no workload is skipped; Stop reports it when
+// it tries to scale it. A count that cannot be read is an error.
+//
+// The first count kept for a workload is never replaced. Backup and restore
+// call this before they change anything in the deployment, so the counts kept
+// are the ones the workloads had before the tool started. A count of 0 is not
+// kept: Start brings such a workload up with 1 replica, as it did before.
+func (k *KubernetesBackend) RecordReplicaCounts(services ...string) error {
 	for _, service := range services {
 		kind, resource, err := k.findWorkloadResource(service)
 		if err != nil {
+			logrus.Debugf("No workload found for %s; not recording its replica count: %v", service, err)
 			continue
 		}
-		if count, err := k.getReplicaCount(kind, resource); err == nil && count > 0 {
-			cacheKey := fmt.Sprintf("%s/%s", kind, resource)
+		cacheKey := fmt.Sprintf("%s/%s", kind, resource)
+		if _, ok := k.replicaCache[cacheKey]; ok {
+			continue
+		}
+		count, err := k.getReplicaCount(kind, resource)
+		if err != nil {
+			return fmt.Errorf("failed to read the replica count of %s (%s): %w", service, cacheKey, err)
+		}
+		if count > 0 {
 			k.replicaCache[cacheKey] = count
 			logrus.Debugf("Saved replica count for %s: %d", cacheKey, count)
 		}
 	}
-	return k.scaleServices(services, 0)
+	return nil
 }
 
 func (k *KubernetesBackend) IsRunning(service string) (bool, error) {
@@ -214,15 +243,20 @@ func (k *KubernetesBackend) IsRunning(service string) (bool, error) {
 	return false, nil
 }
 
-// getReplicaCount returns the current replica count for a workload
+// getReplicaCount returns the current replica count for a workload. It parses
+// kubectl's stdout only, so a warning kubectl writes to stderr does not make a
+// successful read fail.
 func (k *KubernetesBackend) getReplicaCount(kind, resource string) (int, error) {
-	output, err := k.executor.runCommand("kubectl", "get", kind, resource, "-n", k.namespace, "-o", "jsonpath={.spec.replicas}")
+	output, errOutput, err := k.executor.runCommandSeparate("kubectl", "get", kind, resource, "-n", k.namespace, "-o", "jsonpath={.spec.replicas}")
 	if err != nil {
+		if line := commandErrorLine(errOutput); line != "" {
+			return 0, fmt.Errorf("%w: %s", err, line)
+		}
 		return 0, err
 	}
-	count, err := strconv.Atoi(strings.TrimSpace(output))
+	count, err := strconv.Atoi(output)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("unexpected replica count %q: %w", output, err)
 	}
 	return count, nil
 }

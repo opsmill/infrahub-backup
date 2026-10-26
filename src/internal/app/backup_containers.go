@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -173,17 +174,50 @@ func (iops *InfrahubOps) waitForRunningTasks() error {
 	}
 }
 
+// appServices are the application services that backup and restore stop, and
+// later start again, around their database steps.
+var appServices = []string{
+	"infrahub-server", "task-worker", "task-manager",
+	"task-manager-background-svc", "cache", "message-queue",
+}
+
+// restoreServices are the services a restore starts: the application services
+// and task-manager-db, which restorePostgreSQL starts before it loads the dump.
+var restoreServices = slices.Concat(appServices, []string{"task-manager-db"})
+
+// replicaRecorder is implemented by backends that stop a service by scaling
+// its workload to 0 replicas, and so must know the workload's replica count to
+// start it again.
+type replicaRecorder interface {
+	RecordReplicaCounts(services ...string) error
+}
+
+// recordReplicaCounts reads the replica count of each service's workload, so
+// that starting a service brings its workload back with that count. Backup and
+// restore call it before they change anything in the deployment, so that they
+// stop with an error, and leave the deployment as it was, when a count cannot
+// be read. Backends that stop containers directly have nothing to record.
+func (iops *InfrahubOps) recordReplicaCounts(services ...string) error {
+	backend, err := iops.ensureBackend()
+	if err != nil {
+		return err
+	}
+	recorder, ok := backend.(replicaRecorder)
+	if !ok {
+		return nil
+	}
+	if err := recorder.RecordReplicaCounts(services...); err != nil {
+		return fmt.Errorf("failed to read the workload replica counts; nothing in the deployment was changed: %w", err)
+	}
+	return nil
+}
+
 func (iops *InfrahubOps) stopAppContainers() ([]string, error) {
 	logrus.Info("Stopping Infrahub application services...")
 
-	services := []string{
-		"infrahub-server", "task-worker", "task-manager",
-		"task-manager-background-svc", "cache", "message-queue",
-	}
-
 	stopped := []string{}
 
-	for _, service := range services {
+	for _, service := range appServices {
 		running, err := iops.IsServiceRunning(service)
 		if err != nil {
 			logrus.Debugf("Could not determine status of %s: %v", service, err)

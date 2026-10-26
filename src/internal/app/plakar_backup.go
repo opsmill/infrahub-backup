@@ -35,6 +35,9 @@ func (iops *InfrahubOps) CreatePlakarBackup(force bool, neo4jMetadata string, ex
 	// Detect Neo4j edition
 	editionInfo := iops.detectNeo4jEditionInfo("backup")
 	if editionInfo.IsCommunity {
+		if err := iops.recordReplicaCounts(appServices...); err != nil {
+			return err
+		}
 		logrus.Warn("Neo4j Community Edition detected; Infrahub services will be stopped and restarted before the backup begins.")
 		logrus.Warn("Waiting 10 seconds to allow the user to abort... CTRL+C to cancel.")
 		time.Sleep(10 * time.Second)
