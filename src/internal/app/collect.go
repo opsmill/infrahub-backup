@@ -86,6 +86,9 @@ type collectContext struct {
 	// (e.g. the --include-backup archive path); the orchestrator moves it
 	// into that collector's manifest entry after a successful run.
 	artifact string
+	// dbCredentials caches the task manager database login, resolved on first
+	// use by resolveTaskManagerDBCredentials, so a run looks it up once.
+	dbCredentials *taskManagerDBCredentials
 }
 
 // setArtifact hands the orchestrator a filesystem artifact reference to
