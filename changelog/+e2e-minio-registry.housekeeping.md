@@ -1,0 +1,1 @@
+The end-to-end tests pull the MinIO image from `registry.opsmill.io/external/minio`, and the release workflow pulls the MinIO client image from `registry.opsmill.io/external/mc`, instead of Docker Hub.

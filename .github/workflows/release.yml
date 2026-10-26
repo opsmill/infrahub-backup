@@ -42,7 +42,7 @@ jobs:
         run: |
           docker run -v ./bin:/build \
             -e "MC_HOST_bucket=https://${S3_ACCESS_KEY}:${S3_SECRET_KEY}@${S3_ENDPOINT}" \
-            minio/mc cp -r /build/ bucket/${S3_BUCKET}/
+            registry.opsmill.io/external/mc:latest cp -r /build/ bucket/${S3_BUCKET}/
   docker:
     needs: publish
     name: Build and push Docker image
