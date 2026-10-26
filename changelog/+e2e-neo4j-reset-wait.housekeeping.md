@@ -1,0 +1,1 @@
+The Kubernetes end-to-end tests wait until Infrahub can query Neo4j before they create or check data, instead of only until Infrahub answers HTTP. A Community test that started right after the previous test restarted the Neo4j pod could fail with `503 Service Unavailable`.

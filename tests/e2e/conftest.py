@@ -208,12 +208,24 @@ async def portforward_infrahub(kubeconfig_path: str, namespace: str):
 
     Pods may be restarted by infrahub-backup during restore, which kills any
     long-lived port-forward.  Call this each time you need to talk to Infrahub.
+
+    Waits until Infrahub can query Neo4j, not only until it answers HTTP. The
+    reset_database_pod fixture replaces the Neo4j pod between tests, and
+    Infrahub answers 503 until it can reach the new pod, which can be later than
+    the pod reporting Ready. /api/config and anonymous requests answer without
+    Neo4j, but Infrahub looks an API key up in Neo4j, so the wait sends the
+    admin token.
     """
     kr8s_api = await kr8s.asyncio.api(kubeconfig=kubeconfig_path)
     service = await AsyncService.get("infrahub-infrahub-server", namespace=namespace, api=kr8s_api)
     async with service.portforward(remote_port=8000, local_port="auto") as local_port:
         url = f"http://localhost:{local_port}"
-        await wait_for_http(f"{url}/api/config", timeout=300.0, interval=5.0)
+        await wait_for_http(
+            f"{url}/api/schema?branch=main",
+            timeout=300.0,
+            interval=5.0,
+            headers={"X-INFRAHUB-KEY": INFRAHUB_ADMIN_TOKEN},
+        )
         yield url
 
 
