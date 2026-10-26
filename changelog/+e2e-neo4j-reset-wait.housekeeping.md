@@ -1,1 +1,0 @@
-The Kubernetes end-to-end tests deploy Infrahub with `INFRAHUB_DB_LIVENESS_CHECK_TIMEOUT=0`, so Infrahub replaces a closed Neo4j connection instead of answering `503 Service Unavailable`, and they wait until Infrahub can query Neo4j before they create or check data. A Community test that started right after the previous test replaced the Neo4j pod could fail with a 503.
