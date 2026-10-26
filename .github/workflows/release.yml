@@ -100,7 +100,7 @@ jobs:
     name: Bump Homebrew formula
     runs-on: ubuntu-24.04
     steps:
-      - uses: mislav/bump-homebrew-formula-action@ccf2332299a883f6af50a1d2d41e5df7904dd769
+      - uses: mislav/bump-homebrew-formula-action@f865c8b0dbebd6e263cc06782a0e974c61cf12d2
         with:
           formula-name: infrahub-backup
           homebrew-tap: opsmill/homebrew-tap
