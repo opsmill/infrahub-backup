@@ -1,0 +1,1 @@
+The release workflow step that updates the Homebrew formula no longer fails. GitHub now answers the request for a release's source archive with an HTTP 303 redirect, which the previous version of the Homebrew formula action rejected, so the step failed for every release from v2.0.0 to v2.3.0.
