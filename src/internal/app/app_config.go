@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"os"
 	"regexp"
 	"strings"
@@ -45,7 +46,12 @@ func (iops *InfrahubOps) fetchDatabaseCredentials() error {
 	// Fetch Neo4j credentials if not fully configured
 	if !iops.hasNeo4jCredentials() {
 		if err := iops.fetchNeo4jCredentials(); err != nil {
-			logrus.Warnf("Could not fetch Neo4j credentials from container: %v", err)
+			if iops.config.Neo4jUsername == "" || iops.config.Neo4jPassword == "" {
+				iops.neo4jCredentialLookupErr = err
+				logrus.Warnf("Using the default Neo4j credentials: %v", err)
+			} else {
+				logrus.Warnf("Using the default Neo4j database name: %v", err)
+			}
 		}
 		iops.applyNeo4jDefaults()
 	}
@@ -99,7 +105,10 @@ func (iops *InfrahubOps) hasPostgresCredentials() bool {
 func (iops *InfrahubOps) fetchNeo4jCredentials() error {
 	envOut, err := iops.Exec("infrahub-server", []string{"env"}, nil)
 	if err != nil {
-		return err
+		if line := commandErrorLine(envOut); line != "" {
+			err = fmt.Errorf("%w: %s", err, line)
+		}
+		return fmt.Errorf("could not read the Neo4j credentials from the infrahub-server container: %w", err)
 	}
 
 	for _, line := range strings.Split(envOut, "\n") {

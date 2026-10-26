@@ -34,16 +34,20 @@ type Neo4jEditionInfo struct {
 	Edition     string
 	IsCommunity bool
 	IsDetected  bool
+	// DetectionErr is why the edition could not be detected; nil when IsDetected.
+	DetectionErr error
 }
 
-// NewNeo4jEditionInfo creates a new Neo4jEditionInfo from an edition string
+// NewNeo4jEditionInfo creates a new Neo4jEditionInfo from an edition string. When detection
+// failed, Edition and IsCommunity fall back to Community, but IsDetected is false and
+// ResolveRestoreEdition treats the edition as unknown.
 func NewNeo4jEditionInfo(edition string, err error) *Neo4jEditionInfo {
 	if err != nil {
-		logrus.Infof("could not detect neo4j edition: %v", err)
 		return &Neo4jEditionInfo{
-			Edition:     neo4jEditionCommunity, // Default fallback
-			IsCommunity: true,
-			IsDetected:  false,
+			Edition:      neo4jEditionCommunity, // Default fallback
+			IsCommunity:  true,
+			IsDetected:   false,
+			DetectionErr: err,
 		}
 	}
 
@@ -58,7 +62,7 @@ func NewNeo4jEditionInfo(edition string, err error) *Neo4jEditionInfo {
 // LogDetection logs the detection result
 func (info *Neo4jEditionInfo) LogDetection(context string) {
 	if !info.IsDetected {
-		logrus.Warnf("Could not determine Neo4j edition during %s; defaulting to community workflow", context)
+		logrus.Warnf("Could not determine Neo4j edition during %s; defaulting to community workflow: %v", context, info.DetectionErr)
 	} else {
 		logrus.Infof("Detected Neo4j %s edition for %s", info.Edition, context)
 	}
@@ -67,6 +71,16 @@ func (info *Neo4jEditionInfo) LogDetection(context string) {
 // ResolveRestoreEdition determines the correct edition to use for restore
 func (info *Neo4jEditionInfo) ResolveRestoreEdition(backupEdition string) (string, error) {
 	backupNormalized := strings.ToLower(backupEdition)
+
+	// An edition the probe could not detect is unknown, not Community. A Community backup is
+	// restored with the community method on either edition, and that method does not log in
+	// to Neo4j, so it can still proceed. Any other backup needs the edition to choose a method.
+	if !info.IsDetected {
+		if backupNormalized == neo4jEditionCommunity {
+			return neo4jEditionCommunity, nil
+		}
+		return "", fmt.Errorf("could not detect the Neo4j edition of the target deployment, which the restore method for this backup depends on: %w", info.DetectionErr)
+	}
 
 	// If backup is community and detected is enterprise, always use community method
 	if backupNormalized == neo4jEditionCommunity && info.Edition == neo4jEditionEnterprise {
@@ -84,9 +98,9 @@ func (info *Neo4jEditionInfo) ResolveRestoreEdition(backupEdition string) (strin
 }
 
 // detectBackupNeo4jEdition detects the Neo4j edition a backup is taken with.
-// Unlike a restore, a backup never falls back to Community when detection
-// fails: the Community workflow stops the Infrahub services, so a failed query
-// (for example one sent to a pod that is not Neo4j) must not cause an outage.
+// A backup never falls back to Community when detection fails: the Community
+// workflow stops the Infrahub services, so a failed query (for example one sent
+// to a pod that is not Neo4j) must not cause an outage.
 func (iops *InfrahubOps) detectBackupNeo4jEdition() (*Neo4jEditionInfo, error) {
 	edition, err := iops.detectNeo4jEdition()
 	if err != nil {
@@ -108,9 +122,18 @@ func (iops *InfrahubOps) detectNeo4jEdition() (string, error) {
 	}, nil)
 	if err != nil {
 		if line := commandErrorLine(output); line != "" {
-			return "", fmt.Errorf("failed to query neo4j edition: %w: %s", err, line)
+			err = fmt.Errorf("failed to query neo4j edition: %w: %s", err, line)
+		} else {
+			err = fmt.Errorf("failed to query neo4j edition: %w", err)
 		}
-		return "", fmt.Errorf("failed to query neo4j edition: %w", err)
+		if iops.neo4jCredentialLookupErr != nil {
+			// The query logged in with a default username or password, which is the likely
+			// reason Neo4j refused it and the one the operator can act on.
+			err = fmt.Errorf("%w\nThe query used the default Neo4j credentials because the lookup failed: %v\n"+
+				"To use the deployment's credentials, start infrahub-server or set INFRAHUB_DB_USERNAME and INFRAHUB_DB_PASSWORD",
+				err, iops.neo4jCredentialLookupErr)
+		}
+		return "", err
 	}
 
 	edition := extractNeo4jEdition(output)
