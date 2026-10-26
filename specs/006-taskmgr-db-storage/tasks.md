@@ -35,7 +35,7 @@ Single project: Go code in `src/`, end-to-end tests in `tests/`, at the reposito
 
 **Purpose**: a green baseline before any change. The feature adds no dependency and no scaffolding.
 
-- [ ] T001 Record a green baseline: run `make build-watchdog` once (the unit tests of `src/internal/app` need its embedded binaries), then `make build`, `make test` and `make vet`, then lint with `PATH="$(go env GOPATH)/bin:$PATH" make lint`; if golangci-lint panics on the Go version, lint as CI does with `GOTOOLCHAIN=go1.25.0 go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.7.2 run`. All must pass before any feature change.
+- [X] T001 Record a green baseline: run `make build-watchdog` once (the unit tests of `src/internal/app` need its embedded binaries), then `make build`, `make test` and `make vet`, then lint with `PATH="$(go env GOPATH)/bin:$PATH" make lint`; if golangci-lint panics on the Go version, lint as CI does with `GOTOOLCHAIN=go1.25.0 go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.7.2 run`. All must pass before any feature change.
 
 ---
 
