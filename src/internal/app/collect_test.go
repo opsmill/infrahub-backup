@@ -392,6 +392,7 @@ func TestCollectBundle_RegisteredPlan(t *testing.T) {
 		{Name: "cache-status", Status: collectorStatusSkipped, Reason: notDeployed},
 		{Name: "task-worker-state", Status: collectorStatusSkipped, Reason: notDeployed},
 		{Name: "task-manager-state", Status: collectorStatusSkipped, Reason: notDeployed},
+		{Name: "task-manager-db-storage", Status: collectorStatusSkipped, Reason: taskManagerDBNotDeployedReason},
 		{Name: "server-info", Status: collectorStatusSuccess},
 		{Name: "telemetry", Status: collectorStatusSkipped, Reason: notDeployed},
 		{Name: "metrics", Status: collectorStatusSuccess},

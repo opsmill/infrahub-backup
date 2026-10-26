@@ -30,6 +30,7 @@ func TestCollectPlanOrdering(t *testing.T) {
 		"cache-status",
 		"task-worker-state",
 		"task-manager-state",
+		"task-manager-db-storage",
 		"server-info",
 		"telemetry",
 		"metrics",
