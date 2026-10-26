@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opsmill.io/schemas/infrahub-collect/task-manager-db/storage.json",
+  "title": "Storage of the task manager database (task-manager-db/storage.json)",
+  "type": "object",
+  "required": ["collected_at", "database", "database_size", "tables"],
+  "additionalProperties": false,
+  "properties": {
+    "collected_at": { "type": "string", "format": "date-time" },
+    "database": { "type": "string", "minLength": 1 },
+    "database_size": { "$ref": "#/$defs/size" },
+    "tables": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/table" }
+    }
+  },
+  "$defs": {
+    "size": {
+      "type": "object",
+      "required": ["bytes", "readable"],
+      "additionalProperties": false,
+      "properties": {
+        "bytes": { "type": "integer", "minimum": 0 },
+        "readable": { "type": "string", "pattern": "^[0-9]+(\\.[0-9])? (B|KB|MB|GB|TB|PB|EB)$" }
+      }
+    },
+    "timestamp_or_null": {
+      "oneOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }]
+    },
+    "table": {
+      "type": "object",
+      "required": [
+        "schema",
+        "name",
+        "total_size",
+        "data_size",
+        "index_size",
+        "toast_size",
+        "live_rows",
+        "dead_rows",
+        "last_vacuum",
+        "last_autovacuum"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "total_size": { "$ref": "#/$defs/size" },
+        "data_size": { "$ref": "#/$defs/size" },
+        "index_size": { "$ref": "#/$defs/size" },
+        "toast_size": { "$ref": "#/$defs/size" },
+        "live_rows": { "type": "integer", "minimum": 0 },
+        "dead_rows": { "type": "integer", "minimum": 0 },
+        "last_vacuum": { "$ref": "#/$defs/timestamp_or_null" },
+        "last_autovacuum": { "$ref": "#/$defs/timestamp_or_null" }
+      }
+    }
+  }
+}

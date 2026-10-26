@@ -306,8 +306,10 @@ The codebase uses explicit error wrapping with `fmt.Errorf` for context. All com
 - Plakar repository (local filesystem or S3 via integration backends) (002-plakar-integration)
 - Go 1.25.0 + cobra, viper, logrus; Docker/Kubernetes via `docker`/`kubectl` CLI shell-out through `CommandExecutor` — no client-go or Docker SDK (003-collect-tool)
 - Local filesystem bundle output under `--output-dir` (default `./infrahub_bundles`); no network egress beyond the target deployment (003-collect-tool)
+- Go 1.25.0, no new dependency; read-only `psql` queries inside `task-manager-db` through the existing bounded `docker`/`kubectl` exec, with PostgreSQL-enforced time limits (006-taskmgr-db-storage)
 
 ## Recent Changes
 
+- 006-taskmgr-db-storage: Planned task manager database storage figures in `infrahub-collect` bundles (always-on `storage.json`, opt-in `--include-task-manager-storage` breakdown)
 - 003-collect-tool: Added `infrahub-collect` troubleshooting-bundle binary (collector framework, log/metrics primitives on both backends, key-name secret masking, bundle manifest)
 - 002-plakar-integration: Added kloset (Plakar core library), integration-fs (filesystem storage/exporter), cobra, logrus
