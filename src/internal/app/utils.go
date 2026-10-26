@@ -28,6 +28,54 @@ func getEnvOrDefault(key, defaultValue string) string {
 	return defaultValue
 }
 
+// passphraseEnvVar is the environment variable that supplies the symmetric
+// passphrase for encrypted plakar repositories (create/backup/restore/list).
+const passphraseEnvVar = "INFRAHUB_BACKUP_PASSPHRASE"
+
+// minPassphraseLen is the minimum length enforced for a new encrypted repository.
+const minPassphraseLen = 12
+
+// resolvePassphrase resolves the encryption passphrase for unattended use.
+// Resolution order: --passphrase-file (first line) → INFRAHUB_BACKUP_PASSPHRASE.
+// Returns an empty string when neither is set. The value is never logged.
+//
+// Both sources are normalized with firstLine here, on the host, which is the
+// only place that normalizes: the resolved value is what gets sent to the
+// co-located runner (see runnerCredentials), so the key that stamps the repo
+// canary and the key the runner encrypts data with are the same string by
+// construction. Without the normalization, an env passphrase carrying a trailing
+// newline (e.g. from `export VAR=$(cat file)`) would differ from the same
+// passphrase given in a file, and a repository created from one could not be
+// opened with the other.
+func resolvePassphrase(passphraseFile string) (string, error) {
+	if passphraseFile != "" {
+		data, err := os.ReadFile(passphraseFile)
+		if err != nil {
+			return "", fmt.Errorf("reading passphrase file %q: %w", passphraseFile, err)
+		}
+		return firstLine(string(data)), nil
+	}
+	return firstLine(os.Getenv(passphraseEnvVar)), nil
+}
+
+// firstLine returns the first line of s with the trailing CR/LF stripped, but
+// preserving any leading/interior spaces (passphrases may contain spaces).
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	return strings.TrimRight(s, "\r")
+}
+
+// validatePassphrase enforces the minimum passphrase length for creating an
+// encrypted repository (FR-013). It is checked before any repository is created.
+func validatePassphrase(passphrase string) error {
+	if len(passphrase) < minPassphraseLen {
+		return fmt.Errorf("passphrase too short: encrypted backups require a passphrase of at least %d characters", minPassphraseLen)
+	}
+	return nil
+}
+
 func getCurrentDir() string {
 	dir, err := os.Getwd()
 	if err != nil {

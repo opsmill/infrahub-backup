@@ -2,82 +2,203 @@ package app
 
 import (
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"iter"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/PlakarKorp/kloset/connectors"
-	"github.com/PlakarKorp/kloset/connectors/exporter"
-	"github.com/PlakarKorp/kloset/kcontext"
 	"github.com/PlakarKorp/kloset/objects"
 	"github.com/PlakarKorp/kloset/repository"
 	"github.com/PlakarKorp/kloset/snapshot"
 	"github.com/sirupsen/logrus"
 )
 
-// RestorePlakarBackup restores an Infrahub deployment from Plakar snapshots.
-// Supports: backup-group restore (--backup-id), single snapshot (--snapshot),
-// or latest complete group (default).
+// RestorePlakarBackup restores an Infrahub deployment from Plakar snapshots by
+// driving the upstream connectors' exporters where each engine needs them —
+// Neo4j inside the database container or pod, the task manager in a runner on
+// Docker Compose and in this process over a port-forward on Kubernetes. See
+// CreatePlakarBackup for why the two components differ.
+//
+// Supports: single snapshot (--snapshot), a specific backup group (--backup-id),
+// or the latest complete group (default).
 func (iops *InfrahubOps) RestorePlakarBackup(excludeTaskManager bool, restoreMigrateFormat bool, sleepDuration time.Duration, force bool, resetDeploymentID bool) error {
-	// Sleep if requested (for K8s users to transfer backup file into pod)
 	if sleepDuration > 0 {
 		logrus.Infof("Sleeping for %v to allow backup file transfer...", sleepDuration)
 		time.Sleep(sleepDuration)
 	}
-
 	if err := iops.checkPrerequisites(); err != nil {
 		return err
 	}
-
 	if err := iops.DetectEnvironment(); err != nil {
 		return err
 	}
 
-	// Initialize Plakar context and repository
+	// Empty on Kubernetes; see CreatePlakarBackup for why that is no longer a
+	// refusal.
+	project := iops.composeProjectForRunner()
+
 	kctx, err := initPlakarContext(iops.config.Plakar)
 	if err != nil {
 		return fmt.Errorf("failed to initialize plakar context: %w", err)
 	}
 	defer closePlakarContext(kctx)
-
 	repo, err := openRepo(kctx, iops.config.Plakar)
 	if err != nil {
 		return err
 	}
 	defer closeRepo(repo)
 
+	if err := iops.fetchDatabaseCredentials(); err != nil {
+		return fmt.Errorf("failed to fetch database credentials: %w", err)
+	}
+	repoPath, err := iops.runnerRepoPath()
+	if err != nil {
+		return err
+	}
+
 	cfg := iops.config.Plakar
 
-	// Route based on restore mode
+	var plan restorePlan
 	if cfg.SnapshotID != "" {
-		// Single-component restore via --snapshot
-		return iops.restoreSingleSnapshot(kctx, repo, cfg.SnapshotID, excludeTaskManager, restoreMigrateFormat, resetDeploymentID)
+		plan, err = singleSnapshotPlan(repo, cfg.SnapshotID)
+	} else {
+		plan, err = backupGroupPlan(repo, cfg.BackupID, force)
+	}
+	if err != nil {
+		return err
+	}
+	if err := plan.validate(); err != nil {
+		return err
 	}
 
-	// Backup-group restore (--backup-id or latest complete)
-	var group *BackupGroupInfo
-	if cfg.BackupID != "" {
-		group, err = findBackupGroup(repo, cfg.BackupID)
-		if err != nil {
-			return err
+	// The edition the backup was taken with decides which Neo4j artifact shape and
+	// connector this restore has to use, so it is reconciled with the target rather
+	// than assumed from live detection alone.
+	community, err := iops.resolveRestoreCommunity(plan.backupEdition)
+	if err != nil {
+		return err
+	}
+
+	// A format migration has to run in the same offline window as the load, so it
+	// travels to the runner rather than being run from here. With no Neo4j component
+	// to migrate it is said to be ignored rather than quietly dropped.
+	var migrate Neo4jMigration
+	if restoreMigrateFormat {
+		if !plan.hasComponent(ComponentNeo4j) {
+			logrus.Warn("--migrate-format ignored: no Neo4j component in this restore")
+		} else {
+			migrate = Neo4jMigration{Format: neo4jBlockFormat, Database: iops.config.Neo4jDatabase}
 		}
+	}
+
+	restoreComponent := func(snapInfo SnapshotInfo) error {
+		return iops.restoreComponent(project, repoPath, snapInfo.Component,
+			fmt.Sprintf("%x", snapInfo.MAC[:]), community, excludeTaskManager, migrate)
+	}
+	if err := iops.restoreComponents(plan, restoreComponent, resetDeploymentID); err != nil {
+		return err
+	}
+
+	logrus.Infof("Restore from Plakar %s completed successfully", plan.describe())
+	logrus.Info("Infrahub should be available shortly")
+	return nil
+}
+
+// restorePlan is what one restore invocation resolved to: the component snapshots
+// to apply and the Neo4j edition recorded in the backup.
+type restorePlan struct {
+	// backupID is set for a group restore, snapshotID for a single-snapshot one.
+	backupID   string
+	snapshotID string
+	// backupEdition is the Neo4j edition tag recorded when the backup was taken.
+	// Empty when the snapshot predates the tag.
+	backupEdition string
+	snapshots     []SnapshotInfo
+}
+
+// neo4jBlockFormat is the store format --migrate-format migrates to, matching what
+// main passed to `neo4j-admin database migrate --to-format=`.
+const neo4jBlockFormat = "block"
+
+// hasComponent reports whether the plan includes a snapshot of the named component.
+func (p restorePlan) hasComponent(component string) bool {
+	for _, snapInfo := range p.snapshots {
+		if snapInfo.Component == component {
+			return true
+		}
+	}
+	return false
+}
+
+func (p restorePlan) describe() string {
+	if p.backupID != "" {
+		return "backup group " + p.backupID
+	}
+	return "snapshot " + p.snapshotID
+}
+
+// validate refuses a plan naming a component this tool cannot restore. It matters
+// because restoreComponents dispatches by component in a fixed order: an unknown
+// name would otherwise be silently skipped rather than reported.
+func (p restorePlan) validate() error {
+	for _, snapInfo := range p.snapshots {
+		switch snapInfo.Component {
+		case ComponentNeo4j, ComponentPostgres, ComponentMetadata:
+		default:
+			return fmt.Errorf("unknown component type in snapshot: %s", snapInfo.Component)
+		}
+	}
+	if len(p.snapshots) == 0 {
+		return fmt.Errorf("nothing to restore: %s contains no component snapshots", p.describe())
+	}
+	return nil
+}
+
+// singleSnapshotPlan resolves --snapshot to a one-component plan.
+func singleSnapshotPlan(repo *repository.Repository, snapshotID string) (restorePlan, error) {
+	mac, err := resolveSnapshotID(repo, snapshotID)
+	if err != nil {
+		return restorePlan{}, err
+	}
+	snap, err := snapshot.Load(repo, mac)
+	if err != nil {
+		return restorePlan{}, fmt.Errorf("failed to load snapshot: %w", err)
+	}
+	tags := parseSnapshotTags(snap.Header.Tags)
+	snap.Close()
+
+	shortID := fmt.Sprintf("%x", mac[:8])
+	plan := restorePlan{
+		snapshotID:    shortID,
+		backupEdition: tags[TagNeo4jEdition],
+		snapshots: []SnapshotInfo{{
+			SnapshotID: shortID,
+			Component:  tags[TagComponent],
+			MAC:        mac,
+		}},
+	}
+	logrus.Infof("Restoring single component: %s", plan.snapshots[0].Component)
+	return plan, nil
+}
+
+// backupGroupPlan resolves --backup-id (or the latest complete group) to a plan.
+func backupGroupPlan(repo *repository.Repository, backupID string, force bool) (restorePlan, error) {
+	var group *BackupGroupInfo
+	var err error
+	if backupID != "" {
+		group, err = findBackupGroup(repo, backupID)
 	} else {
 		group, err = findLatestCompleteGroup(repo)
-		if err != nil {
-			return err
-		}
+	}
+	if err != nil {
+		return restorePlan{}, err
 	}
 
-	// Check incomplete status
 	if group.Status == StatusIncomplete {
 		missing := missingComponents(group)
 		logrus.Warnf("Backup group %s is incomplete (missing: %s)", group.BackupID, strings.Join(missing, ", "))
 		if !force {
-			return fmt.Errorf("backup group %s is incomplete (missing: %s); use --force to restore available components",
+			return restorePlan{}, fmt.Errorf("backup group %s is incomplete (missing: %s); use --force to restore available components",
 				group.BackupID, strings.Join(missing, ", "))
 		}
 	}
@@ -88,399 +209,209 @@ func (iops *InfrahubOps) RestorePlakarBackup(excludeTaskManager bool, restoreMig
 		"components": len(group.Snapshots),
 	}).Info("Restoring from backup group")
 
-	return iops.restoreBackupGroup(kctx, repo, group, excludeTaskManager, restoreMigrateFormat, resetDeploymentID)
+	return restorePlan{
+		backupID:      group.BackupID,
+		backupEdition: group.Neo4jEdition,
+		snapshots:     group.Snapshots,
+	}, nil
 }
 
-// restoreBackupGroup exports each component snapshot to a temp directory and restores.
-// Neo4j community dumps are streamed directly from Plakar into the container.
-func (iops *InfrahubOps) restoreBackupGroup(kctx *kcontext.KContext, repo *repository.Repository, group *BackupGroupInfo, excludeTaskManager bool, restoreMigrateFormat bool, resetDeploymentID bool) error {
-	// Create temp directory for extraction
-	workDir, err := os.MkdirTemp("", "infrahub_plakar_restore_*")
+// resolveRestoreCommunity decides which Neo4j restore path to take, by reconciling
+// the edition recorded in the backup with the edition detected on the target.
+//
+// Live detection alone is not safe to route on: when detectNeo4jEdition fails for
+// any reason — cypher-shell missing, an auth hiccup, the database mid-restart —
+// NewNeo4jEditionInfo defaults to Community after only an Infof. An Enterprise
+// restore would then drive neo4j+offline:///data against an Enterprise `.backup`
+// artifact: wrong connector, wrong artifact shape. ResolveRestoreEdition (which
+// main used here) instead turns that combination into a refusal, and keeps the one
+// cross-edition restore that does work — a Community backup onto Enterprise.
+func (iops *InfrahubOps) resolveRestoreCommunity(backupEdition string) (bool, error) {
+	info := iops.detectNeo4jEditionInfo("restore")
+	if backupEdition == "" {
+		// Snapshots predating the edition tag carry nothing to reconcile against;
+		// detection is all there is.
+		logrus.Warn("Backup records no Neo4j edition; using the detected edition")
+		return info.IsCommunity, nil
+	}
+	edition, err := info.ResolveRestoreEdition(backupEdition)
 	if err != nil {
-		return fmt.Errorf("failed to create temp directory: %w", err)
+		return false, err
 	}
-	defer os.RemoveAll(workDir)
+	return strings.EqualFold(edition, neo4jEditionCommunity), nil
+}
 
-	backupDir := filepath.Join(workDir, "backup")
-	if err := os.MkdirAll(backupDir, 0755); err != nil {
-		return fmt.Errorf("failed to create backup directory: %w", err)
-	}
+// appServices are the Infrahub services stopped for the duration of a restore, in
+// the wording stopAppContainers uses.
+var appServices = []string{
+	"infrahub-server", "task-worker", "task-manager",
+	"task-manager-background-svc", "cache", "message-queue",
+}
 
-	// Export each component snapshot, deferring neo4j for potential streaming
-	var neo4jSnapInfo *SnapshotInfo
-	for _, snapInfo := range group.Snapshots {
-		if snapInfo.Component == ComponentNeo4j {
-			si := snapInfo
-			neo4jSnapInfo = &si
-			continue
-		}
-		if excludeTaskManager && snapInfo.Component == ComponentPostgres {
-			logrus.Info("Skipping postgres component restore as requested")
-			continue
-		}
-
-		if err := iops.exportSnapshotToDir(kctx, repo, snapInfo, backupDir); err != nil {
-			return err
-		}
-	}
-
-	// Read metadata from the metadata component
-	var metadata BackupMetadata
-	metadataPath := filepath.Join(backupDir, "metadata", "backup_information.json")
-	metadataBytes, err := os.ReadFile(metadataPath)
-	if err != nil {
-		// Try to construct minimal metadata from tags
-		logrus.Warnf("Could not read backup metadata: %v; proceeding with group tags", err)
-		metadata = BackupMetadata{
-			InfrahubVersion: group.InfrahubVersion,
-			Neo4jEdition:    group.Neo4jEdition,
-			Components:      group.Components,
-		}
-	} else {
-		if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
-			return fmt.Errorf("failed to parse backup metadata: %w", err)
-		}
-	}
-
-	logrus.WithFields(logrus.Fields{
-		"backup_id":        group.BackupID,
-		"infrahub_version": metadata.InfrahubVersion,
-		"neo4j_edition":    metadata.Neo4jEdition,
-		"components":       metadata.Components,
-	}).Info("Backup metadata loaded")
-
-	// Detect Neo4j edition for restore
-	detectedEdition, detectionErr := iops.detectNeo4jEdition()
-	editionInfo := NewNeo4jEditionInfo(detectedEdition, detectionErr)
-
-	neo4jEdition, err := editionInfo.ResolveRestoreEdition(metadata.Neo4jEdition)
-	if err != nil {
+// restoreComponents applies a plan with the deployment lifecycle a restore needs:
+// quiesce the application tier, replace the databases, then bring it back.
+//
+// Without this the plakar restore replaced the databases underneath a running
+// deployment: pg_restore's DROPs contended with the task manager's open sessions
+// on `prefect`, Redis and RabbitMQ kept state describing the database that had
+// just been replaced, and infrahub-server / task-worker spent the restore talking
+// to a stopped Neo4j and were never restarted. main did all four steps; only
+// StopServices("database") survived the move to the runner.
+//
+// The order is main's: transient state is wiped through the containers that hold
+// it (so before they are stopped), the task-manager database is restored while
+// nothing is connected to it, its dependencies come back, and Neo4j is replaced
+// last. restoreComponent applies one component snapshot; it is a parameter so the
+// lifecycle can be exercised without launching runners.
+func (iops *InfrahubOps) restoreComponents(plan restorePlan, restoreComponent func(SnapshotInfo) error, resetDeploymentID bool) error {
+	if err := iops.wipeTransientData(); err != nil {
 		return err
 	}
-	editionInfo.LogDetection("restore")
-
-	// For enterprise, export neo4j snapshot and extract the tar archive for file-based restore
-	isCommunity := strings.EqualFold(neo4jEdition, neo4jEditionCommunity)
-	if neo4jSnapInfo != nil && !isCommunity {
-		if err := iops.exportSnapshotToDir(kctx, repo, *neo4jSnapInfo, backupDir); err != nil {
-			return err
+	// stopAppContainers stops six services in a loop and returns early on the first
+	// failure, reporting what it did stop alongside the error. Discarding that list left
+	// a partial stop — say the fourth of six — with those services down, no restart, and
+	// no warning, because the defer below is not registered yet. Put back what was
+	// stopped, exactly as withDeploymentQuiesced does on the backup side.
+	stopped, err := iops.stopAppContainers()
+	if err != nil {
+		if len(stopped) > 0 {
+			if startErr := iops.startAppContainers(stopped); startErr != nil {
+				logrus.Warnf("Failed to restart %s after a partial stop: %v; "+
+					"start them once the state of the deployment is understood",
+					strings.Join(stopped, ", "), startErr)
+			}
 		}
-		// The exported snapshot contains neo4j-backup.tar; extract it
-		// into backupDir/database/ with the infrahubops/ prefix stripped.
-		tarPath := filepath.Join(backupDir, "neo4j", "neo4j-backup.tar")
-		databaseDir := filepath.Join(backupDir, "database")
-		if err := extractNeo4jEnterpriseTar(tarPath, databaseDir); err != nil {
-			return fmt.Errorf("failed to extract neo4j enterprise backup: %w", err)
-		}
-		os.RemoveAll(filepath.Join(backupDir, "neo4j"))
+		return fmt.Errorf("failed to stop application services before the restore: %w", err)
 	}
 
-	// PostgreSQL expects workDir/backup/prefect.dump — move from postgres component
-	srcDump := filepath.Join(backupDir, "postgres", "prefect.dump")
-	dstDump := filepath.Join(backupDir, "prefect.dump")
-	if err := os.Rename(srcDump, dstDump); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to restructure postgres export: %w", err)
-	}
-
-	// Determine task manager availability
-	taskManagerIncluded := false
-	for _, snap := range group.Snapshots {
-		if snap.Component == ComponentPostgres {
-			taskManagerIncluded = true
-			break
+	appsRestarted := false
+	defer func() {
+		if !appsRestarted {
+			logrus.Warnf("Infrahub application services were left stopped by the failed restore (%s); "+
+				"start them once the state of the deployment is understood", strings.Join(appServices, ", "))
 		}
-	}
+	}()
 
-	shouldRestoreTaskManager := taskManagerIncluded && !excludeTaskManager
-	prefectPath := filepath.Join(backupDir, "prefect.dump")
-	prefectExists := fileExists(prefectPath)
-
-	if taskManagerIncluded && excludeTaskManager {
-		logrus.Info("Skipping task manager database restore as requested")
-	} else if !taskManagerIncluded {
-		logrus.Info("Backup does not include task manager database; skipping restore")
-	} else if prefectExists {
-		logrus.Info("Task manager database dump detected; will restore")
-	}
-
-	// Wipe transient data
-	iops.wipeTransientData()
-
-	// Stop application containers
-	if _, err := iops.stopAppContainers(); err != nil {
-		return err
-	}
-
-	// Restore PostgreSQL when available
-	if shouldRestoreTaskManager && prefectExists {
-		if err := iops.restorePostgreSQL(workDir); err != nil {
-			return err
+	// ComponentMetadata restores nothing to the containers, but it is dispatched
+	// like the others so an unexpected component cannot be silently skipped.
+	restoredNeo4j := false
+	for _, phase := range []string{ComponentPostgres, ComponentNeo4j, ComponentMetadata} {
+		for _, snapInfo := range plan.snapshots {
+			if snapInfo.Component != phase {
+				continue
+			}
+			if err := restoreComponent(snapInfo); err != nil {
+				return err
+			}
+			if phase == ComponentNeo4j {
+				restoredNeo4j = true
+			}
 		}
-	} else {
-		logrus.Info("Skipping task manager database restore step")
-	}
-
-	// Restart dependencies
-	if err := iops.restartDependencies(); err != nil {
-		return err
-	}
-
-	// Restore Neo4j
-	if neo4jSnapInfo != nil && isCommunity {
-		// Stream community dump directly from Plakar into the container
-		snap, err := snapshot.Load(repo, neo4jSnapInfo.MAC)
-		if err != nil {
-			return fmt.Errorf("failed to load neo4j snapshot for streaming: %w", err)
-		}
-		reader, err := snap.NewReader("/neo4j.dump")
-		if err != nil {
-			snap.Close()
-			return fmt.Errorf("failed to open neo4j dump stream from snapshot: %w", err)
-		}
-		err = iops.restoreNeo4jCommunityStream(reader, restoreMigrateFormat)
-		reader.Close()
-		snap.Close()
-		if err != nil {
-			return err
-		}
-	} else if neo4jSnapInfo != nil {
-		if err := iops.restoreNeo4j(workDir, neo4jEdition, restoreMigrateFormat); err != nil {
-			return err
-		}
-	}
-
-	// Reset deployment ID before app containers restart so they never observe
-	// the source deployment's UUID. Skip when no neo4j component was restored.
-	if resetDeploymentID {
-		if neo4jSnapInfo == nil {
-			logrus.Warn("--reset-deployment-id ignored: no Neo4j component in this backup group")
-		} else {
-			if err := iops.resetDeploymentID(); err != nil {
+		if phase == ComponentPostgres {
+			// cache, message-queue and the task manager come back on the wiped state
+			// before Neo4j is replaced, as they did on main.
+			if err := iops.restartDependencies(); err != nil {
 				return err
 			}
 		}
 	}
 
-	// Restart all services
+	// The new Root UUID is written before the application containers restart,
+	// because they read and cache the old one on startup. The Neo4j restore has
+	// already restarted the database and waited for Bolt by this point, which is
+	// what resetDeploymentID needs.
+	if resetDeploymentID {
+		if !restoredNeo4j {
+			logrus.Warn("--reset-deployment-id ignored: no Neo4j component was restored")
+		} else if err := iops.resetDeploymentID(); err != nil {
+			return err
+		}
+	}
+
 	logrus.Info("Restarting Infrahub services...")
 	if err := iops.StartServices("infrahub-server", "task-worker"); err != nil {
 		return fmt.Errorf("failed to restart infrahub services: %w", err)
 	}
-
-	logrus.Info("Restore from Plakar backup group completed successfully")
-	logrus.Info("Infrahub should be available shortly")
-
+	appsRestarted = true
 	return nil
 }
 
-// extractNeo4jEnterpriseTar extracts the neo4j enterprise backup tar archive
-// (created by backupNeo4jEnterpriseStream) into databaseDir.
-// The tar contains files under an "infrahubops/" prefix which is stripped.
-func extractNeo4jEnterpriseTar(tarPath, databaseDir string) error {
-	if err := os.MkdirAll(databaseDir, 0755); err != nil {
-		return fmt.Errorf("failed to create database directory: %w", err)
-	}
-	return extractUncompressedTar(tarPath, databaseDir, 1)
-}
-
-// exportSnapshotToDir extracts a single component snapshot to a subdirectory of backupDir.
-func (iops *InfrahubOps) exportSnapshotToDir(kctx *kcontext.KContext, repo *repository.Repository, snapInfo SnapshotInfo, backupDir string) error {
-	snap, err := snapshot.Load(repo, snapInfo.MAC)
-	if err != nil {
-		return fmt.Errorf("failed to load %s snapshot: %w", snapInfo.Component, err)
-	}
-	defer snap.Close()
-
-	componentDir := filepath.Join(backupDir, snapInfo.Component)
-	if err := os.MkdirAll(componentDir, 0755); err != nil {
-		return fmt.Errorf("failed to create directory for %s: %w", snapInfo.Component, err)
-	}
-
-	exp, err := exporter.NewExporter(kctx, &connectors.Options{MaxConcurrency: kctx.MaxConcurrency}, map[string]string{
-		"location": "fs://" + componentDir,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create exporter for %s: %w", snapInfo.Component, err)
-	}
-
-	logrus.Infof("Extracting %s snapshot...", snapInfo.Component)
-	exportOpts := &snapshot.ExportOptions{
-		SkipPermissions: true,
-	}
-	if err := snap.Export(exp, "/", exportOpts); err != nil {
-		exp.Close(kctx.Context)
-		return fmt.Errorf("failed to extract %s snapshot: %w", snapInfo.Component, err)
-	}
-
-	exp.Close(kctx.Context)
-	return nil
-}
-
-// restoreSingleSnapshot restores from a single snapshot (--snapshot flag).
-func (iops *InfrahubOps) restoreSingleSnapshot(kctx *kcontext.KContext, repo *repository.Repository, snapshotID string, excludeTaskManager bool, restoreMigrateFormat bool, resetDeploymentID bool) error {
-	snapshotMAC, err := resolveSnapshotID(repo, snapshotID)
-	if err != nil {
-		return err
-	}
-
-	snap, err := snapshot.Load(repo, snapshotMAC)
-	if err != nil {
-		return fmt.Errorf("failed to load plakar snapshot: %w", err)
-	}
-	defer snap.Close()
-
-	logrus.WithFields(logrus.Fields{
-		"snapshot_id": fmt.Sprintf("%x", snap.Header.Identifier[:8]),
-		"date":        snap.Header.Timestamp.Format(time.RFC3339),
-		"name":        snap.Header.Name,
-	}).Info("Restoring from single Plakar snapshot")
-
-	// Determine component type and edition from tags before deciding export strategy
-	tags := parseSnapshotTags(snap.Header.Tags)
-	component := tags[TagComponent]
-	neo4jEdition := tags[TagNeo4jEdition]
-
-	logrus.Infof("Restoring single component: %s", component)
-
-	// Detect Neo4j edition for restore
-	detectedEdition, detectionErr := iops.detectNeo4jEdition()
-	editionInfo := NewNeo4jEditionInfo(detectedEdition, detectionErr)
-	if neo4jEdition != "" {
-		resolvedEdition, err := editionInfo.ResolveRestoreEdition(neo4jEdition)
-		if err != nil {
-			return err
-		}
-		neo4jEdition = resolvedEdition
-	}
-
-	// Neo4j community: stream directly from snapshot without exporting to disk
-	if component == ComponentNeo4j && strings.EqualFold(neo4jEdition, neo4jEditionCommunity) {
-		reader, err := snap.NewReader("/neo4j.dump")
-		if err != nil {
-			return fmt.Errorf("failed to open neo4j dump stream from snapshot: %w", err)
-		}
-		defer reader.Close()
-
-		if _, err := iops.stopAppContainers(); err != nil {
-			return err
-		}
-		if err := iops.restartDependencies(); err != nil {
-			return err
-		}
-		if err := iops.restoreNeo4jCommunityStream(reader, restoreMigrateFormat); err != nil {
-			return err
-		}
-
-		if resetDeploymentID {
-			if err := iops.resetDeploymentID(); err != nil {
-				return err
-			}
-		}
-
-		logrus.Info("Restarting Infrahub services...")
-		if err := iops.StartServices("infrahub-server", "task-worker"); err != nil {
-			return fmt.Errorf("failed to restart infrahub services: %w", err)
-		}
-
-		logrus.Info("Restore from Plakar snapshot completed successfully")
-		return nil
-	}
-
-	// All other components: export to temp directory first
-	workDir, err := os.MkdirTemp("", "infrahub_plakar_restore_*")
-	if err != nil {
-		return fmt.Errorf("failed to create temp directory: %w", err)
-	}
-	defer os.RemoveAll(workDir)
-
-	exportDir := filepath.Join(workDir, "backup")
-	if err := os.MkdirAll(exportDir, 0755); err != nil {
-		return fmt.Errorf("failed to create export directory: %w", err)
-	}
-
-	exp, err := exporter.NewExporter(kctx, &connectors.Options{MaxConcurrency: kctx.MaxConcurrency}, map[string]string{
-		"location": "fs://" + exportDir,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create plakar exporter: %w", err)
-	}
-	defer exp.Close(kctx.Context)
-
-	logrus.Info("Extracting Plakar snapshot...")
-	exportOpts := &snapshot.ExportOptions{
-		SkipPermissions: true,
-	}
-	if err := snap.Export(exp, "/", exportOpts); err != nil {
-		return fmt.Errorf("failed to extract plakar snapshot: %w", err)
-	}
-
+// restoreComponent restores one component with the lifecycle its engine needs:
+// Neo4j in place inside the database container or pod, the task manager through
+// a runner on Docker Compose and a port-forward on Kubernetes.
+func (iops *InfrahubOps) restoreComponent(project, repoPath, component, snapHex string, community, excludeTaskManager bool, migrate Neo4jMigration) error {
 	switch component {
 	case ComponentNeo4j:
-		// Enterprise: the exported snapshot contains neo4j-backup.tar;
-		// extract it into exportDir/database/ with infrahubops/ prefix stripped.
-		tarPath := filepath.Join(exportDir, "neo4j-backup.tar")
-		databaseDir := filepath.Join(exportDir, "database")
-		if err := extractNeo4jEnterpriseTar(tarPath, databaseDir); err != nil {
-			return fmt.Errorf("failed to extract neo4j enterprise backup: %w", err)
-		}
-		os.Remove(tarPath)
-
-		// Stop services and restore
-		if _, err := iops.stopAppContainers(); err != nil {
-			return err
-		}
-		if err := iops.restartDependencies(); err != nil {
-			return err
-		}
-		if err := iops.restoreNeo4j(workDir, neo4jEdition, restoreMigrateFormat); err != nil {
-			return err
-		}
-
-		if resetDeploymentID {
-			if err := iops.resetDeploymentID(); err != nil {
-				return err
-			}
-		}
+		return iops.restoreNeo4jComponent(snapHex, community, migrate)
 
 	case ComponentPostgres:
-		if resetDeploymentID {
-			logrus.Warn("--reset-deployment-id ignored: this snapshot is Postgres-only (no Neo4j)")
-		}
 		if excludeTaskManager {
 			logrus.Info("Skipping postgres restore as requested")
 			return nil
 		}
-		// Move prefect.dump to expected location
-		srcDump := filepath.Join(exportDir, "prefect.dump")
-		if _, err := os.Stat(srcDump); os.IsNotExist(err) {
-			return fmt.Errorf("postgres snapshot does not contain prefect.dump")
+		if project == "" {
+			return iops.restoreTaskManagerForwarded(snapHex, postgresRestoreOpts())
 		}
-		if _, err := iops.stopAppContainers(); err != nil {
-			return err
+		uri := dbURI("postgres", iops.config.PostgresUsername, "task-manager-db", "5432", iops.config.PostgresDatabase)
+		creds := iops.runnerCredentials(iops.config.PostgresPassword)
+		if err := LaunchComposeRestore(project, "task-manager-db", repoPath, uri, snapHex, creds, postgresRestoreOpts(), false, Neo4jMigration{}); err != nil {
+			return fmt.Errorf("postgres restore failed: %w", err)
 		}
-		if err := iops.restorePostgreSQL(workDir); err != nil {
-			return err
-		}
+		logrus.Info("Postgres restore completed")
+		return nil
 
 	case ComponentMetadata:
-		if resetDeploymentID {
-			logrus.Warn("--reset-deployment-id ignored: this snapshot is metadata-only (no Neo4j)")
-		}
-		logrus.Info("Metadata-only snapshot — nothing to restore to containers")
+		logrus.Info("Metadata component — nothing to restore to containers")
 		return nil
 
 	default:
 		return fmt.Errorf("unknown component type in snapshot: %s", component)
 	}
+}
 
-	// Restart services
-	logrus.Info("Restarting Infrahub services...")
-	if err := iops.StartServices("infrahub-server", "task-worker"); err != nil {
-		return fmt.Errorf("failed to restart infrahub services: %w", err)
-	}
+// restoreNeo4jComponent replaces the Neo4j store from a snapshot: suspend the
+// server so neo4j-admin can replace the store, run it inside the database
+// container or pod, then resume.
+//
+// The default database already exists in the catalog, so --overwrite-destination
+// replaces its store; no CREATE DATABASE. Enterprise restores from the backup
+// artifact (neo4j://); Community loads the offline dump (neo4j+offline://).
+//
+// Both editions take the whole server offline, as this path always has. It is
+// heavier than Enterprise strictly needs — a STOP DATABASE would do — but it is
+// the one lifecycle that works without Bolt credentials and, more to the point,
+// the one that leaves the container running so neo4j-admin can be exec'd into it
+// on Kubernetes as much as on Docker Compose.
+func (iops *InfrahubOps) restoreNeo4jComponent(snapHex string, community bool, migrate Neo4jMigration) error {
+	_, err := withNeo4jSuspended(iops, "restore", func() (struct{}, error) {
+		if err := iops.restoreNeo4jInPlace(snapHex, community, migrate); err != nil {
+			return struct{}{}, fmt.Errorf("neo4j restore failed: %w", err)
+		}
+		logrus.Info("Neo4j restore completed")
+		return struct{}{}, nil
+	})
+	return err
+}
 
-	logrus.Info("Restore from Plakar snapshot completed successfully")
-	return nil
+// postgresRestoreOpts are the connector options for restoring the task-manager
+// database, chosen to reproduce what main ran: `pg_restore --clean --create`.
+//
+//   - recreate maps to `-C --clean --if-exists`, i.e. drop and recreate the
+//     database from the archive's own metadata. The weaker `clean` (which is only
+//     `--clean --if-exists`) drops just the objects the dump contains, so rolling
+//     back to an older Prefect schema left every table, column and enum value
+//     added since the backup in place — nothing in the dump names them — and
+//     Prefect then ran against a hybrid schema. It also never reapplied the
+//     database-level properties (owner, encoding, collation, per-database SET
+//     options) that `--create` carries.
+//   - no_globals skips feeding the archive's 00000-globals.sql to psql. Replaying
+//     it would run CREATE/ALTER ROLE against the whole cluster — a side effect
+//     main never had, and one that reaches beyond the database being restored.
+//
+// clean and recreate are mutually exclusive in the connector, so only recreate is
+// set.
+func postgresRestoreOpts() map[string]string {
+	return map[string]string{"recreate": "true", "no_globals": "true"}
 }
 
 // snapshotLister is an interface for listing snapshots in a repository.
@@ -491,7 +422,6 @@ type snapshotLister interface {
 // resolveSnapshotID resolves a snapshot identifier (partial hex or empty for latest).
 func resolveSnapshotID(repo snapshotLister, snapshotID string) (objects.MAC, error) {
 	if snapshotID == "" {
-		// Find the latest snapshot
 		var latest objects.MAC
 		found := false
 		for mac, err := range repo.ListSnapshots() {
@@ -507,7 +437,6 @@ func resolveSnapshotID(repo snapshotLister, snapshotID string) (objects.MAC, err
 		return latest, nil
 	}
 
-	// Validate hex format
 	if _, err := hex.DecodeString(snapshotID); err != nil {
 		return objects.MAC{}, fmt.Errorf("invalid snapshot ID %q: not valid hex", snapshotID)
 	}
@@ -535,10 +464,8 @@ func resolveSnapshotID(repo snapshotLister, snapshotID string) (objects.MAC, err
 		}
 		return objects.MAC{}, fmt.Errorf("snapshot not found: %s (repository contains no snapshots)", snapshotID)
 	}
-
 	if matchCount > 1 {
 		return objects.MAC{}, fmt.Errorf("ambiguous snapshot ID %q: matches %d snapshots; provide a longer prefix", snapshotID, matchCount)
 	}
-
 	return matched, nil
 }
