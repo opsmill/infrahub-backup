@@ -1,1 +1,1 @@
-The end-to-end tests pull the MinIO image from `registry.opsmill.io/external/minio`, and the release workflow pulls the MinIO client image from `registry.opsmill.io/external/mc`, instead of Docker Hub.
+The end-to-end tests serve their S3 bucket from a single-node Garage container (`dxflrs/garage`) instead of MinIO, and the release workflow pulls the MinIO client image from `registry.opsmill.io/external/mc` instead of Docker Hub. The MinIO server image the tests used is no longer available from Docker Hub.
