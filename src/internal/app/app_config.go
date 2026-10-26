@@ -133,8 +133,20 @@ func (iops *InfrahubOps) fetchPostgresCredentials() error {
 		return err
 	}
 
+	if conn := prefectConnectionFromEnv(envOut); conn != "" {
+		iops.applyPrefectConnection(conn)
+	}
+
+	return nil
+}
+
+// prefectConnectionFromEnv returns the Prefect database connection string from
+// `env` output, or "" when none of prefectConnectionEnvVars is set. The first
+// match in preference order is returned so newer Prefect naming wins regardless
+// of the order the container reports its environment.
+func prefectConnectionFromEnv(envOutput string) string {
 	connections := map[string]string{}
-	for _, line := range strings.Split(envOut, "\n") {
+	for _, line := range strings.Split(envOutput, "\n") {
 		for _, name := range prefectConnectionEnvVars {
 			if after, ok := strings.CutPrefix(line, name+"="); ok {
 				connections[name] = after
@@ -142,16 +154,12 @@ func (iops *InfrahubOps) fetchPostgresCredentials() error {
 		}
 	}
 
-	// Apply the first match in preference order so newer Prefect naming wins
-	// regardless of the order the container reports its environment.
 	for _, name := range prefectConnectionEnvVars {
 		if conn := connections[name]; conn != "" {
-			iops.applyPrefectConnection(conn)
-			break
+			return conn
 		}
 	}
-
-	return nil
+	return ""
 }
 
 // applyNeo4jDefaults applies default Neo4j credentials
@@ -186,23 +194,40 @@ func (iops *InfrahubOps) applyPrefectConnection(connStr string) {
 		return
 	}
 
-	// Normalize connection string
+	user, password, database, ok := parsePrefectConnection(connStr)
+	if !ok {
+		logrus.Warn("Could not parse PREFECT_API_DATABASE_CONNECTION_URL")
+		return
+	}
+
+	if database != "" {
+		iops.config.PostgresDatabase = database
+	}
+	if user != "" {
+		iops.config.PostgresUsername = user
+	}
+	if password != "" {
+		iops.config.PostgresPassword = password
+	}
+}
+
+// parsePrefectConnection extracts the user, password and database from a
+// Prefect database connection string. The SQLAlchemy driver suffix
+// (postgresql+asyncpg://) is normalized to postgres:// first so pgx accepts it.
+// ok is false for an empty or unparsable string. The parse error is not
+// returned: pgx redacts the password from its error text but keeps the user and
+// host, and the collect path logs no credential value.
+func parsePrefectConnection(connStr string) (user, password, database string, ok bool) {
+	if connStr == "" {
+		return "", "", "", false
+	}
+
 	re := regexp.MustCompile("postgres(.*)://(.*)")
 	normalized := re.ReplaceAllString(connStr, "postgres://$2")
 
 	connConfig, err := pgx.ParseConfig(normalized)
 	if err != nil {
-		logrus.Warnf("Could not parse PREFECT_API_DATABASE_CONNECTION_URL: %v", err)
-		return
+		return "", "", "", false
 	}
-
-	if connConfig.Database != "" {
-		iops.config.PostgresDatabase = connConfig.Database
-	}
-	if connConfig.User != "" {
-		iops.config.PostgresUsername = connConfig.User
-	}
-	if connConfig.Password != "" {
-		iops.config.PostgresPassword = connConfig.Password
-	}
+	return connConfig.User, connConfig.Password, connConfig.Database, true
 }
