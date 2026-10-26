@@ -36,7 +36,7 @@ spec:
       infrahub/service: task-manager-db
 ```
 
-CloudNativePG also labels every instance pod `app.kubernetes.io/component: database`. The tool never uses a CloudNativePG pod for the Neo4j `database` service, so this label does not need to be changed. See [Kubernetes pod detection](../reference/configuration.mdx#kubernetes-pod-detection) for the full lookup order.
+CloudNativePG also labels every instance pod `app.kubernetes.io/component: database`, the same value as the Neo4j service name. The tool checks `infrahub/service` before that label, so label the Neo4j pods `infrahub/service: database`, as the high availability example does. A Neo4j installed from the Neo4j Helm chart is also found by that chart's own pod label. See [Kubernetes pod detection](../reference/configuration.mdx#kubernetes-pod-detection) for the full lookup order.
 
 :::info
 If you are using a different PostgreSQL HA operator, you must ensure a single `task-manager-db` pod is available during backup and restore operations.
