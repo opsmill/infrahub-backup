@@ -1,7 +1,9 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"slices"
@@ -288,7 +290,7 @@ func (iops *InfrahubOps) startAppContainers(services []string) error {
 func (iops *InfrahubOps) wipeTransientData() error {
 	logrus.Info("Wiping cache and message queue data...")
 
-	if _, err := iops.Exec("message-queue", []string{"find", "/var/lib/rabbitmq", "-mindepth", "1", "-delete"}, nil); err != nil {
+	if err := iops.deleteMessageQueues(); err != nil {
 		logrus.Warnf("Failed to wipe message queue data: %v", err)
 	}
 	if _, err := iops.Exec("cache", []string{"find", "/data", "-mindepth", "1", "-delete"}, nil); err != nil {
@@ -296,4 +298,104 @@ func (iops *InfrahubOps) wipeTransientData() error {
 	}
 	logrus.Info("Transient data wiped")
 	return nil
+}
+
+// transientDataExecTimeout bounds each command that wipeTransientData runs in
+// a service. Each returns in under a second on a running service.
+const transientDataExecTimeout = 60 * time.Second
+
+// rabbitmqVhost is one entry of `rabbitmqctl list_vhosts --formatter json name`.
+type rabbitmqVhost struct {
+	Name string `json:"name"`
+}
+
+// rabbitmqQueue is one entry of
+// `rabbitmqctl list_queues --formatter json name exclusive`.
+type rabbitmqQueue struct {
+	Name      string `json:"name"`
+	Exclusive bool   `json:"exclusive"`
+}
+
+// deleteMessageQueues deletes the queues of every virtual host on the message
+// queue, and with them the messages queued before the restore. Infrahub
+// declares its queues again when it starts. Exclusive queues are skipped: each
+// belongs to a connected client, and RabbitMQ deletes it when that client
+// stops.
+//
+// The queues are deleted through rabbitmqctl while the broker runs. Deleting
+// the broker's data directory under it could leave RabbitMQ, once restarted,
+// with a durable queue it cannot start ("home node ... is down or
+// inaccessible"), which stops Infrahub from starting. Resetting the node
+// instead would remove it from a RabbitMQ cluster. Users, permissions and
+// policies are kept.
+func (iops *InfrahubOps) deleteMessageQueues() error {
+	output, err := iops.rabbitmqctl("list_vhosts", "--quiet", "--formatter", "json", "name")
+	if err != nil {
+		return fmt.Errorf("failed to list the virtual hosts: %w", err)
+	}
+	var vhosts []rabbitmqVhost
+	if err := json.Unmarshal([]byte(output), &vhosts); err != nil {
+		return fmt.Errorf("failed to parse the virtual host list %q: %w", output, err)
+	}
+
+	var errs []error
+	deleted := 0
+	for _, vhost := range vhosts {
+		output, err := iops.rabbitmqctl("list_queues", "--quiet", "--formatter", "json", "-p", vhost.Name, "name", "exclusive")
+		if err != nil {
+			errs = append(errs, fmt.Errorf("failed to list the queues of virtual host %q: %w", vhost.Name, err))
+			continue
+		}
+		var queues []rabbitmqQueue
+		if err := json.Unmarshal([]byte(output), &queues); err != nil {
+			errs = append(errs, fmt.Errorf("failed to parse the queue list of virtual host %q: %w", vhost.Name, err))
+			continue
+		}
+
+		for _, queue := range queues {
+			if queue.Exclusive {
+				continue
+			}
+			if _, err := iops.rabbitmqctl("delete_queue", "--quiet", "-p", vhost.Name, "--", queue.Name); err != nil {
+				errs = append(errs, fmt.Errorf("failed to delete queue %q of virtual host %q: %w", queue.Name, vhost.Name, err))
+				continue
+			}
+			logrus.Debugf("Deleted queue %s of virtual host %s", queue.Name, vhost.Name)
+			deleted++
+		}
+	}
+
+	logrus.Infof("Deleted message queues: %d", deleted)
+	return errors.Join(errs...)
+}
+
+// rabbitmqctl runs rabbitmqctl in the message-queue service and returns its
+// stdout.
+func (iops *InfrahubOps) rabbitmqctl(args ...string) (string, error) {
+	return iops.execOutput("message-queue", append([]string{"rabbitmqctl"}, args...))
+}
+
+// execOutput runs command in service and returns its stdout. Stdout and stderr
+// are kept apart, so that a notice written to stderr, such as a docker compose
+// warning about an unset variable or kubectl's "Defaulted container" notice,
+// does not end up in the output the caller parses. When the command fails, the
+// error carries its stderr on one line.
+func (iops *InfrahubOps) execOutput(service string, command []string) (string, error) {
+	backend, err := iops.ensureBackend()
+	if err != nil {
+		return "", err
+	}
+	execer, ok := backend.(separateExecer)
+	if !ok {
+		return "", fmt.Errorf("the %s backend cannot run %s in %s", backend.Name(), command[0], service)
+	}
+
+	stdout, stderr, err := execer.ExecSeparateContext(context.Background(), transientDataExecTimeout, service, command, nil)
+	if err != nil {
+		if stderr != "" {
+			return "", fmt.Errorf("%w: %s", err, strings.Join(strings.Fields(stderr), " "))
+		}
+		return "", err
+	}
+	return stdout, nil
 }
