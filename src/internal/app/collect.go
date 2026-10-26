@@ -34,8 +34,8 @@ type CollectOptions struct {
 	IncludeQueries bool
 	Benchmark      bool
 	// TelemetryDays is the look-back window (in days) for the Infrahub
-	// product-telemetry export; a non-positive value falls back to
-	// defaultTelemetryDays (30).
+	// product-telemetry export. The CLI rejects values below 1; a caller that
+	// leaves it unset gets defaultTelemetryDays (30).
 	TelemetryDays int
 }
 
