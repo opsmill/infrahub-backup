@@ -125,6 +125,20 @@ func (ce *CommandExecutor) runCommandSeparateContext(ctx context.Context, timeou
 	return out, errOut, err
 }
 
+// runCommandSeparate is the unbounded variant of runCommandSeparateContext:
+// stdout is returned first, stderr second. Callers that parse a command's
+// stdout need it, because a warning the command writes to stderr would
+// otherwise land in the value they parse.
+func (ce *CommandExecutor) runCommandSeparate(name string, args ...string) (string, string, error) {
+	var stdout, stderr bytes.Buffer
+	cmd := exec.Command(name, args...)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	return strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String()), err
+}
+
 // runCommandPipeContext is the timeout-bounded variant of runCommandPipe. The
 // caller must read from stdout and then call wait() to get the exit status;
 // wait() returns a *timeoutError when the timeout expired before the command

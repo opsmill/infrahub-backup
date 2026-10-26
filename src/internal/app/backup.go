@@ -106,6 +106,9 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 		return err
 	}
 	if editionInfo.IsCommunity {
+		if err := iops.recordReplicaCounts(appServices...); err != nil {
+			return err
+		}
 		logrus.Warn("Neo4j Community Edition detected; Infrahub services will be stopped and restarted before the backup begins.")
 		logrus.Warn("Waiting 10 seconds to allow the user to abort... CTRL+C to cancel.")
 		time.Sleep(10 * time.Second)
@@ -383,6 +386,10 @@ func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager boo
 	}
 
 	if err := iops.DetectEnvironment(); err != nil {
+		return err
+	}
+
+	if err := iops.recordReplicaCounts(restoreServices...); err != nil {
 		return err
 	}
 

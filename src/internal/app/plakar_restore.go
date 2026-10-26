@@ -37,6 +37,10 @@ func (iops *InfrahubOps) RestorePlakarBackup(excludeTaskManager bool, restoreMig
 		return err
 	}
 
+	if err := iops.recordReplicaCounts(restoreServices...); err != nil {
+		return err
+	}
+
 	// Initialize Plakar context and repository
 	kctx, err := initPlakarContext(iops.config.Plakar)
 	if err != nil {
