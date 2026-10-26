@@ -110,17 +110,18 @@ AGENTS.md                                   # collect file list
 
 ### Query runner (`collect_taskmanager_db.go`)
 
-1. `resolveTaskManagerDBCredentials(cc)` runs once per run and caches the result on the collect context: operator environment, then a bounded `env` exec in `task-manager`, then defaults (research R8).
+1. `resolveTaskManagerDBCredentials(cc)` runs once per run and caches the result on the collect context: operator environment, then a bounded `env` exec in `task-manager`, then a bounded `env` exec in `task-manager-db` itself, then defaults (research R8). The third step keeps the figures available when the Prefect server is down.
 2. `runTaskManagerDBQuery(cc, query dbQuery) (string, error)` builds:
    - the command `psql -h localhost -U <owner> -d <database> -X -q -A -t -v ON_ERROR_STOP=1 -c <sql>`
    - the environment `PGPASSWORD`, `PGAPPNAME=infrahub-collect`, `PGCONNECT_TIMEOUT=10`, and `PGOPTIONS` with `default_transaction_read_only=on`, `statement_timeout`, `TimeZone=UTC`, and, for the breakdown, `enable_hashjoin=off`, `enable_mergejoin=off` and `max_parallel_workers_per_gather=0`
    - It runs the command with `ExecSeparateContext` on `task-manager-db`, bounded at the PostgreSQL limit plus 15 seconds, and returns stdout or a `*dbQueryError` (research R3, R9).
+   - The undocumented variable `INFRAHUB_TASK_MANAGER_DB_QUERY_TIMEOUT` can lower both limits for the end-to-end test, never raise them ([contracts/cli.md](contracts/cli.md)).
 3. `maskSecret(password)` returns the mask that the runner applies to every string it returns and that the collectors pass to `writeDumpFailure` (research R10).
 
 ### Storage collector (`collect_storage.go`)
 
 - Skip when `task-manager-db` has no replica, with the external-PostgreSQL reason.
-- Run the storage query (60-second limit), parse the JSON, add readable sizes, sort, and write `storage.json`. On failure, write `storage.err.txt` and return the classified error.
+- Run the storage query (60-second limit), parse the JSON, add readable sizes and the statistics reset time, sort, and write `storage.json`. On failure, write `storage.err.txt` and return the classified error.
 
 ### Breakdown collector (`collect_storage.go`)
 
@@ -141,7 +142,9 @@ AGENTS.md                                   # collect file list
 | The breakdown fills a nearly full disk with temporary files | Hash and merge joins off, so joins use the primary-key index; aggregates have few groups (research R4). |
 | A schema change during an upgrade waits behind a breakdown query | Limited to 5 minutes by PostgreSQL; documentation says not to use the flag during an upgrade. |
 | The password leaks into `.err.txt` through the `env PGPASSWORD=...` prefix on Kubernetes | Value-based masking of every string the runner returns and writes; unit test (FR-017). |
-| Credentials resolve to the wrong role when `task-manager` is not deployed | The collectors fail with `login rejected: ...`, which names the role; the bundle is still produced. |
+| Credentials cannot be read when the Prefect server is down, which is common when the database has filled its disk | Fall back to the `task-manager-db` container's environment before the defaults (critique X1). If the login still fails, the reason `login rejected: ...` names the role, and the bundle is still produced. |
+| A schema change holds a table lock when the storage query runs | The size functions wait for the lock; PostgreSQL stops the query at 60 seconds, and the collector records `timed out after 60s`. The documentation mentions it (critique P4). |
+| The password is an argument of the `docker exec` or `kubectl exec` process, as for `pg_dump` in backup | Known limitation shared with backup, recorded in research R10; a follow-up for both tools can pass it on standard input. |
 | A future Prefect version renames a table or column | A missing table is `absent`; a missing column fails that table only, with the PostgreSQL message as the reason. |
 
 ## Complexity Tracking

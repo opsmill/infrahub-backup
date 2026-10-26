@@ -64,8 +64,10 @@ The decisions below were checked against the code on `main` (commit `d4e4b34`) a
   - live and dead rows: `n_live_tup` and `n_dead_tup`
   - `last_vacuum` and `last_autovacuum`
   - database total: `pg_database_size(current_database())`
+  - statistics reset time: `stats_reset` from `pg_stat_database` for the current database. It is null when the statistics were never reset. Support needs it to know the period that the row counts and vacuum times cover, because PostgreSQL resets them after a crash or on request (critique P2).
 - Observed: the query returns in 50 ms on a 1.7 GB database. TOAST held 1.24 GB of the 1.29 GB of `flow_run`, because flow run parameters are large values, which shows why the split matters to support.
 - Rationale: catalog functions read file sizes and statistics, not rows, so the run time does not depend on the size of the database (SC-002). The row counts are estimates kept by PostgreSQL, which the spec's Assumptions state.
+- Lock behavior: `pg_total_relation_size`, `pg_table_size` and `pg_indexes_size` take an `ACCESS SHARE` lock on each table. Verified on PostgreSQL 18: while another session holds `ACCESS EXCLUSIVE` on a table, `pg_total_relation_size` on it waits until `statement_timeout` (`canceling statement due to statement timeout`), while `to_regclass` and a plain read of `pg_stat_user_tables` return at once. During a schema change, for example an upgrade migration, the storage query therefore fails with `timed out after 60s`. The spec lists this edge case. Measuring each table in its own query would keep the other tables' figures, but would take one `psql` call for each of the forty-odd Prefect tables and break SC-002.
 
 ## R6. Absent tables are found before the breakdown starts
 
@@ -94,9 +96,12 @@ The decisions below were checked against the code on `main` (commit `d4e4b34`) a
 - Decision: resolve the owner, password and database once per run, before the first query, in this order:
   1. `PREFECT_SERVER_DATABASE_CONNECTION_URL` or `PREFECT_API_DATABASE_CONNECTION_URL` in the operator's environment (`loadCredentialsFromEnvironment`)
   2. the same variables in the `task-manager` container, read with a bounded exec of `env`
-  3. the defaults `postgres`, `prefect` and database `prefect` (`applyPostgresDefaults`)
+  3. the `task-manager-db` container's own environment, read with a bounded exec of `env`: `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_DB` (official image) or `POSTGRES_DATABASE` (bitnami image, used by the Helm chart's PostgreSQL). This step runs only when steps 1 and 2 found no connection URL, and uses a value only when both the user and the password are present. The variable names of the bitnami image must be checked on the end-to-end kind cluster during implementation.
+  4. the defaults `postgres`, `prefect` and database `prefect` (`applyPostgresDefaults`)
 - The parsing of the `env` output moves out of `fetchPostgresCredentials` into a pure function that both paths call. The shared, unbounded `fetchPostgresCredentials` keeps its behavior, as [`collectors.md`](../../dev/guidelines/collectors.md) requires for shared helpers.
-- The `env` output of `task-manager` holds secrets. It is never written to the bundle.
+- The `env` output of `task-manager` and `task-manager-db` holds secrets. It is never written to the bundle.
+- Why step 3 (critique X1): when the database fills its disk, the Prefect server is often down or restarting. On Kubernetes, step 2 then fails, and the defaults are rejected by the Helm chart's PostgreSQL, so support would get no figures in the case they matter most. The database container itself is still running and carries its owner in its environment.
+- The resolved credentials are cached on the collect context, so both collectors share one lookup.
 - Rationale: `infrahub-collect create` does not resolve PostgreSQL credentials today; only `DetectEnvironment` and the backup path call `fetchDatabaseCredentials`, through an unbounded exec. The PRD asks to reuse the backup tool's owner lookup.
 - Observed: the official PostgreSQL image trusts TCP connections from `127.0.0.1` and `::1` (`pg_hba.conf`), so on Docker Compose a wrong password still logs in. A wrong role name fails with `FATAL:  role "nobody" does not exist`. On the Helm chart's PostgreSQL and on CloudNativePG, `localhost` connections need the password.
 
@@ -119,6 +124,7 @@ The decisions below were checked against the code on `main` (commit `d4e4b34`) a
 - Finding: on Kubernetes, `prepareCommand` prefixes the command with `env PGPASSWORD=<password>`, and the failure diagnostics that collectors write to `<file>.err.txt` (`writeDumpFailure`) include the command. A failed storage query would therefore write the password into the bundle.
 - Decision: the runner masks the resolved password in every string it returns or writes: the recorded command, both output streams and the error message. It passes a value-based mask to `writeDumpFailure` (`strings.ReplaceAll(s, password, "********")` when the password is not empty), on top of the key-name masking of ADR 0004. A unit test fails a query on a fake backend and checks every staged file and the manifest for the password (FR-017).
 - The debug lines in `command_executor.go` also print the full command, but `infrahub-collect` has no flag that turns on debug logging, so they never reach the operator.
+- Known limitation, shared with `infrahub-backup create` (critique E3): the password is an argument of the `docker exec` or `kubectl exec` process (`-e PGPASSWORD=...`, or `env PGPASSWORD=...` on Kubernetes). Other users of the operator's host can view it in the process list, and a Kubernetes API server that logs exec request URIs records it in its audit log. The PRD asks for the same approach as `pg_dump`, so the feature keeps it. A follow-up for both tools could pass the password on standard input instead, for example `sh -c 'PGPASSWORD="$(cat)" exec psql ...'`, which needs a bounded exec with standard input in the collect backends.
 
 ## R11. Outcomes in the manifest and in the breakdown file
 
@@ -146,7 +152,8 @@ The decisions below were checked against the code on `main` (commit `d4e4b34`) a
 
 - Unit tests, with the fake backends already used in `collect_diagnostics_test.go`:
   - the command and environment the runner builds, including `PGOPTIONS` and the time limits (FR-008, FR-009)
-  - each error kind, from recorded error outputs (FR-011)
+  - each error kind, from recorded error outputs (FR-011), including outputs that start with the `Defaulted container "postgres" out of: ...` line that `kubectl exec` writes for multi-container pods such as CloudNativePG pods, which the classifier must not pick as the cause (critique E5)
+  - the credential lookup order, including the `task-manager-db` environment step, and that one run performs the lookup once for both collectors (critique E1, X1)
   - password masking in staged diagnostics (FR-017)
   - parsing of fixed query results into `storage.json` and `storage-breakdown.json`, size formatting, and the size invariant (FR-002, FR-003)
   - the SQL built for each breakdown entry (FR-005 to FR-007)
@@ -155,9 +162,13 @@ The decisions below were checked against the code on `main` (commit `d4e4b34`) a
   - Kubernetes pod selection: the existing `findPrimaryPod` tests, plus a test that the storage query runs on the pod that `getPodForServiceContext` selects (FR-014)
 - End-to-end tests:
   - Docker: seed a flow, completed flow runs and one flow run cancelled before it starts, through the Prefect client in a `task-worker` container. Run `create --include-task-manager-storage`. Check both files against the seed, and assert the constraints of the JSON Schemas in `contracts/` by hand, as `tests/helpers/bundle.py` already does for the manifest, because `jsonschema` is not a test dependency.
-  - Docker, time limit: hold `LOCK TABLE artifact IN ACCESS EXCLUSIVE MODE` in a separate session, run the breakdown with the limit lowered through the undocumented variable `INFRAHUB_TASK_MANAGER_STORAGE_TABLE_TIMEOUT`, then check that `artifact` failed with `timed out after <limit>`, that the other tables were collected, and that `pg_stat_activity` shows no `infrahub-collect` session.
+  - Docker, time limit: hold `LOCK TABLE artifact IN ACCESS EXCLUSIVE MODE` in a separate session, run the breakdown with both limits lowered through the undocumented variable `INFRAHUB_TASK_MANAGER_DB_QUERY_TIMEOUT`, then check that:
+    - `task-manager-db-storage` failed with `timed out after <limit>`, because measuring the size of `artifact` waits for the same lock (R5). This covers the storage limit of FR-009 from start to end (critique E2).
+    - `artifact` failed in the breakdown with `timed out after <limit>`, and the other six tables were collected.
+    - `pg_stat_activity` shows no `infrahub-collect` session after the run.
+  - Docker, default run: the end-to-end test asserts that the `task-manager-db-storage` step took less than 10 seconds, from the timestamps of its progress line and the next collector's line (SC-002, critique P5).
   - Kubernetes: run `create` and check `storage.json`. The CI cluster has no CloudNativePG, so the primary-pod selection is covered by unit tests and checked manually with the kind and CloudNativePG procedure in [quickstart.md](quickstart.md).
-- The test variable accepts only values lower than the 5-minute limit. A larger value is ignored with a warning, so it cannot weaken the guarantee in FR-009.
+- The test variable lowers both limits: the storage query's limit becomes the smaller of 60 seconds and the variable, and each breakdown table's limit becomes the smaller of 5 minutes and the variable. A value that does not parse or is not positive is ignored with a warning. The variable can never raise a limit, so it cannot weaken FR-009.
 
 ## R15. Architecture decision record
 

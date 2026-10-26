@@ -78,17 +78,18 @@ docker compose -p <project> exec task-manager-db psql -U <owner> -d <database> \
 In a second terminal:
 
 ```bash
-INFRAHUB_TASK_MANAGER_STORAGE_TABLE_TIMEOUT=5s bin/infrahub-collect --project <project> --output-dir ./bundles create --include-task-manager-storage
+INFRAHUB_TASK_MANAGER_DB_QUERY_TIMEOUT=5s bin/infrahub-collect --project <project> --output-dir ./bundles create --include-task-manager-storage
 docker compose -p <project> exec task-manager-db psql -U <owner> -d <database> \
   -Atc "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'infrahub-collect'"
 ```
 
 Expected:
 
+- `task-manager-db-storage` is `failed` with the reason `timed out after 5s`, because measuring the size of `artifact` waits for the same lock ([research.md](research.md), R5).
 - `artifact` is `failed` with the reason `timed out after 5s`; the other six tables are `collected`.
 - The manifest records `task-manager-db-storage-breakdown` as `failed` with the reason `partial storage breakdown: artifact: timed out after 5s`.
 - The `pg_stat_activity` query prints `0`: PostgreSQL stopped the query.
-- Setting the variable to `10m` prints a warning and keeps the 5-minute limit.
+- Setting the variable to `10m` keeps the 60-second and 5-minute limits: the variable can only lower them.
 
 ## 5. Failures leave a usable bundle (FR-010, FR-011, FR-017, SC-004)
 
@@ -96,6 +97,7 @@ Expected:
 |---|---|
 | `docker compose -p <project> stop task-manager-db` | `failed`, `not reachable: ...` |
 | `PREFECT_API_DATABASE_CONNECTION_URL=postgresql+asyncpg://nobody:x@task-manager-db:5432/prefect` in the operator's environment | `failed`, `login rejected: ... role "nobody" does not exist` |
+| `docker compose -p <project> stop task-manager task-manager-background-svc` (the database keeps running) | `success`: the owner is read from the `task-manager-db` environment |
 | A deployment without a `task-manager-db` service | `skipped`, the reason names an external PostgreSQL server |
 
 In each case, the command exits 0, the archive exists, and `grep -r <password> out/bundle` finds nothing. Start `task-manager-db` again after the first case.

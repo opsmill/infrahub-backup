@@ -84,6 +84,7 @@ When the size figures show that a few tables use most of the space, support asks
 - A task run or log record has no parent flow run: it is counted in a group with no flow name, so the groups of a table add up to the table's row count.
 - The operator interrupts the run during a breakdown query: the tool removes its staging directory as it does today. Killing the `docker exec` or `kubectl exec` process is not enough to stop the query. By default, PostgreSQL notices a lost client only the next time it reads from or writes to the connection ([`client_connection_check_interval`](https://www.postgresql.org/docs/current/runtime-config-connection.html)). The 5-minute limit that PostgreSQL enforces ([`statement_timeout`](https://www.postgresql.org/docs/current/runtime-config-client.html)) is what stops the query.
 - The task manager's database schema changes while a breakdown query runs, for example during an upgrade: a read-only query holds an `ACCESS SHARE` lock, and many forms of `ALTER TABLE` need an `ACCESS EXCLUSIVE` lock, which conflicts with it ([PostgreSQL explicit locking](https://www.postgresql.org/docs/current/explicit-locking.html)). The schema change waits for up to 5 minutes. The documentation for the flag says not to use it while the task manager is being upgraded (FR-015).
+- A schema change holds an `ACCESS EXCLUSIVE` lock on a table when the always-collected storage query runs: measuring a table's size needs an `ACCESS SHARE` lock on it, so the query waits for the lock and stops at its 60-second limit. The storage collector is recorded as failed with the reason `timed out after 60s`, and the bundle is still produced. This was checked on PostgreSQL 18.
 - The Kubernetes deployment runs CloudNativePG replicas: a standby does not run VACUUM or autovacuum ([PostgreSQL hot standby](https://www.postgresql.org/docs/current/hot-standby.html)), so the queries run on the primary pod (FR-014).
 
 ## Requirements *(mandatory)*
@@ -98,6 +99,7 @@ Each requirement ends with how to test it.
   - the total, data, index and TOAST sizes
   - the live and dead row counts
   - the last vacuum and autovacuum times
+  - Once for the database, the system MUST also record when PostgreSQL last reset these statistics, so support knows the period that the row counts and vacuum times cover.
   - Test: a unit test parses a fixed query result into the expected file.
 - **FR-003**: The system MUST give each size both as a number of bytes and as readable text, for example `12 GB`.
   - Test: a unit test.
@@ -163,7 +165,7 @@ SC-002 and SC-004 can be tested on every change. SC-001 and SC-005 can only be c
 ## Assumptions
 
 - The table and column names are those of Prefect 3, as listed in [Prefect's ORM models](https://github.com/PrefectHQ/prefect/blob/main/src/prefect/server/database/orm_models.py). They were checked against Prefect 3.8.6.
-- The database owner can read the statistics views and every Prefect table, because it owns them. The tool logs in as the database owner that the backup tool already uses, taken from `PREFECT_SERVER_DATABASE_CONNECTION_URL` or `PREFECT_API_DATABASE_CONNECTION_URL` ([`app_config.go`](../../src/internal/app/app_config.go)).
+- The database owner can read the statistics views and every Prefect table, because it owns them. The tool logs in as the database owner that the backup tool already uses, taken from `PREFECT_SERVER_DATABASE_CONNECTION_URL` or `PREFECT_API_DATABASE_CONNECTION_URL` ([`app_config.go`](../../src/internal/app/app_config.go)). When the `task-manager` container cannot be reached, which is common when the database has filled its disk, the tool reads the owner from the `task-manager-db` container's own environment before it falls back to the defaults.
 - The `task-manager-db` images used with Infrahub ship `psql`. FR-011 covers the case where one does not.
 - The live and dead row counts in `storage.json` come from the statistics that PostgreSQL keeps for each table, so they are estimates. Counting every row would break SC-002 on a large database. The row counts in `storage-breakdown.json` are exact.
 - The always-collected queries keep the existing 60-second limit for diagnostic commands ([ADR 0002](../../dev/adr/0002-non-fatal-timeout-bounded-collectors.md)), and PostgreSQL enforces it as well (FR-009).

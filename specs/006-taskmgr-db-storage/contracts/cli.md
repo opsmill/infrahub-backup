@@ -24,15 +24,15 @@ Unchanged. `create` exits 0 whenever the archive is produced, including when eit
 
 | Variable | Read by | Effect |
 |---|---|---|
-| `INFRAHUB_TASK_MANAGER_STORAGE_TABLE_TIMEOUT` | the breakdown collector, with `os.Getenv` | A Go duration, for example `5s`, that lowers the limit for each table. Values that do not parse, are not positive, or are not lower than 5 minutes are ignored with a warning, and the 5-minute limit applies. |
+| `INFRAHUB_TASK_MANAGER_DB_QUERY_TIMEOUT` | the query runner shared by both collectors, with `os.Getenv` | A Go duration, for example `5s`. The storage query's limit becomes the smaller of 60 seconds and this value, and each breakdown table's limit becomes the smaller of 5 minutes and this value. A value that does not parse or is not positive is ignored with a warning. |
 
-This variable exists so the end-to-end test can reach the limit in seconds (FR-009). It is not documented for users and cannot raise the limit.
+This variable exists so the end-to-end test can reach both limits in seconds (FR-009). It is not documented for users and can never raise a limit.
 
 ## Documentation to change (FR-015)
 
 | Page | Change |
 |---|---|
 | [`docs/docs/collect/index.mdx`](../../../docs/docs/collect/index.mdx), "What a bundle contains" | Add the `task-manager-db/` directory and both files. |
-| [`docs/docs/collect/create.mdx`](../../../docs/docs/collect/create.mdx) | Add a section on collecting the storage breakdown when support asks for it, with the time it can take and the warning not to use it while the task manager is being upgraded. |
+| [`docs/docs/collect/create.mdx`](../../../docs/docs/collect/create.mdx) | Add a section on collecting the storage breakdown when support asks for it. It says: the breakdown can take up to 5 minutes for each of the seven tables; a table that reaches the limit is recorded as failed and the other tables are still collected; do not use the flag while the task manager is being upgraded; and to stop the tool's query at once, run `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = 'infrahub-collect'` in the database. It also says that during an upgrade the always-collected storage figures can be missing, with the reason `timed out after 60s`. |
 | [`docs/docs/reference/commands.mdx`](../../../docs/docs/reference/commands.mdx) | Add the flag to the `create` flag table and the bundle contents table. |
 | [`docs/docs/reference/configuration.mdx`](../../../docs/docs/reference/configuration.mdx) | Add the flag and its environment variable. |

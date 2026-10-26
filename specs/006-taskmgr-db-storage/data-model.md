@@ -24,6 +24,7 @@ Every size in both files has this shape (FR-003):
 | `collected_at` | string, RFC 3339 UTC | When the query ran. |
 | `database` | string | The name of the Prefect database. |
 | `database_size` | Size | `pg_database_size` of that database. |
+| `statistics_reset_at` | string, RFC 3339 UTC, or null | When PostgreSQL last reset the database's statistics (`pg_stat_database.stats_reset`). The row counts and vacuum times cover the period since then. Null when they were never reset. |
 | `tables` | array of table entries | Every table in `pg_stat_user_tables`, largest total size first. |
 
 Table entry:
@@ -100,7 +101,7 @@ Status transitions for one table, in the order the collector decides them:
 Names are indicative; they follow the existing `collect*.go` naming.
 
 - `breakdownTableSpec`: one entry of the breakdown list (research R7). Fields: table name, group key names with the SQL expression and joins for each, the timestamp column, and whether to count rows without `start_time`. The list is a package-level slice; `breakdownQuery(spec)` builds its SQL.
-- `taskManagerDBCredentials`: owner, password and database, resolved once per run (research R8).
+- `taskManagerDBCredentials`: owner, password and database, resolved once per run and cached on the collect context (research R8).
 - `dbQuery`: the SQL, the time limit PostgreSQL enforces, and whether the breakdown planner settings apply (research R4).
 - `dbQueryError`: a failed query, with a `kind` (`timed out`, `psql missing`, `login rejected`, `not reachable`, `query failed`) and the line of the error output that names the cause. For the `timed out` kind it unwraps to `*timeoutError`, so code that checks for timeouts keeps working.
 - `storageReport` and `storageBreakdown`: the Go types of the two files, marshalled with `json.MarshalIndent` like the other bundle documents.
