@@ -10,7 +10,7 @@ Collection is strictly read-only. Unlike `infrahub-backup create`, the collect c
 
 The binary is self-contained. By default, collection works offline: it uses your existing Docker or kubectl access and performs no network access beyond the deployment itself. The one exception is the opt-in `--benchmark`, which downloads a benchmark image.
 
-The opt-in storage breakdown of the task manager database (`--include-task-manager-storage`) only reads data as well, but do not request it while the task manager is being upgraded. Each breakdown query holds a lock on the table it reads, so a change to that table's schema during the upgrade can wait for up to 5 minutes. See [Include the storage breakdown of the task manager database](./create.mdx#include-the-storage-breakdown-of-the-task-manager-database).
+The opt-in storage breakdown of the task manager database (`--include-task-manager-storage`) only reads data as well, but do not request it while the task manager is being upgraded. Each breakdown query locks the table it reads and the tables it joins until the query ends, so a schema change on one of these tables can wait for up to 5 minutes. While the schema change waits, the queries of the task manager on that table wait behind it. See [Include the storage breakdown of the task manager database](./create.mdx#include-the-storage-breakdown-of-the-task-manager-database).
 
 ## Collect or back up?
 
