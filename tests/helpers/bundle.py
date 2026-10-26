@@ -34,13 +34,14 @@ EXPECTED_COLLECTORS = {f"logs/{service}" for service in LOG_SERVICES} | {
     "server-info",
     "telemetry",
     "metrics",
+    "task-manager-db-storage-breakdown",
     "benchmark",
     "backup",
 }
 
 # Opt-in extras: always present in the manifest, skipped ("not requested")
 # unless their flag is set.
-OPT_IN_COLLECTORS = {"backup", "benchmark"}
+OPT_IN_COLLECTORS = {"task-manager-db-storage-breakdown", "backup", "benchmark"}
 
 # Bundle directory owned by each non-log collector (contracts/bundle-layout.md;
 # task-manager-db/ is specs/006-taskmgr-db-storage/contracts/manifest-outcomes.md).
@@ -64,6 +65,8 @@ COLLECT_ID_RE = re.compile(r"^[0-9]{8}_[0-9]{6}$")
 # Storage figures of the task manager database (spec 006-taskmgr-db-storage).
 STORAGE_REPORT_MEMBER = "bundle/task-manager-db/storage.json"
 STORAGE_ERROR_MEMBER = "bundle/task-manager-db/storage.err.txt"
+STORAGE_BREAKDOWN_MEMBER = "bundle/task-manager-db/storage-breakdown.json"
+STORAGE_BREAKDOWN_ERROR_MEMBER = "bundle/task-manager-db/storage-breakdown.err.txt"
 
 # Field sets and patterns of specs/006-taskmgr-db-storage/contracts/storage.schema.json.
 STORAGE_REPORT_FIELDS = {"collected_at", "database", "database_size", "statistics_reset_at", "tables"}
@@ -85,6 +88,32 @@ STORAGE_READABLE_RE = re.compile(r"^[0-9]+(\.[0-9])? (B|KB|MB|GB|TB|PB|EB)$")
 RFC3339_RE = re.compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?([Zz]|[+-][0-9]{2}:[0-9]{2})$"
 )
+
+# Field sets, enums and patterns of
+# specs/006-taskmgr-db-storage/contracts/storage-breakdown.schema.json.
+BREAKDOWN_FIELDS = {"collected_at", "database", "time_limit_per_table", "tables"}
+BREAKDOWN_TABLE_REQUIRED_FIELDS = {"name", "status", "grouped_by", "timestamp_column"}
+BREAKDOWN_TABLE_OPTIONAL_FIELDS = {"reason", "rows", "groups"}
+BREAKDOWN_GROUP_REQUIRED_FIELDS = {"group", "rows", "oldest", "newest"}
+BREAKDOWN_GROUP_OPTIONAL_FIELDS = {"rows_without_start_time"}
+BREAKDOWN_TABLE_STATUSES = {"collected", "absent", "failed"}
+BREAKDOWN_KEY_NAMES = {"event_name", "flow_name", "state_type", "log_level", "artifact_type"}
+BREAKDOWN_TIMESTAMP_COLUMNS = {"occurred", "start_time", "timestamp", "created"}
+BREAKDOWN_TIME_LIMIT_RE = re.compile(r"^[0-9].*s$")
+# The breakdown list in collection order, with the group keys and timestamp
+# column of each table (data-model.md, research R7). The schema's name enum
+# holds the same seven tables.
+BREAKDOWN_TABLES = {
+    "events": (["event_name"], "occurred"),
+    "flow_run": (["flow_name", "state_type"], "start_time"),
+    "task_run": (["flow_name", "state_type"], "start_time"),
+    "flow_run_state": (["state_type"], "timestamp"),
+    "task_run_state": (["state_type"], "timestamp"),
+    "log": (["flow_name", "log_level"], "timestamp"),
+    "artifact": (["artifact_type"], "created"),
+}
+# Only the run tables count the rows without start_time (FR-007).
+BREAKDOWN_RUN_TABLES = {"flow_run", "task_run"}
 
 
 def find_bundle(output_dir: Path) -> Path:
@@ -310,3 +339,120 @@ def assert_storage_collected(bundle_path: Path, file_names: set[str], manifest: 
     doc = json.loads(read_bundle_member(bundle_path, STORAGE_REPORT_MEMBER))
     assert_storage_report(doc)
     return doc
+
+
+def _assert_fields(obj: object, required: set[str], optional: set[str], where: str) -> None:
+    """Assert an object has every required field and nothing outside required and optional fields."""
+    assert isinstance(obj, dict), f"{where} must be an object, got {type(obj).__name__}"
+    missing = required - obj.keys()
+    unexpected = obj.keys() - required - optional
+    assert not missing, f"{where} is missing required fields {sorted(missing)}"
+    assert not unexpected, f"{where} has fields the schema does not allow: {sorted(unexpected)}"
+
+
+def _assert_breakdown_group(group: object, grouped_by: list[str], run_table: bool, where: str) -> int:
+    """Assert one group of a collected breakdown table and return its rows."""
+    _assert_fields(group, BREAKDOWN_GROUP_REQUIRED_FIELDS, BREAKDOWN_GROUP_OPTIONAL_FIELDS, where)
+    assert isinstance(group, dict)  # narrowed for type checkers; asserted above
+    keys = group["group"]
+    assert isinstance(keys, dict), f"{where}.group must be an object, got {type(keys).__name__}"
+    for name, value in keys.items():
+        assert value is None or isinstance(value, str), f"{where}.group.{name} must be a string or null: {value!r}"
+    # data-model.md: one field per name in grouped_by.
+    assert sorted(keys) == sorted(grouped_by), f"{where}.group has keys {sorted(keys)}, grouped_by is {grouped_by}"
+
+    rows = group["rows"]
+    _assert_non_negative_int(rows, f"{where}.rows")
+    assert rows >= 1, f"{where}.rows must be >= 1, got {rows}"
+    # data-model.md: rows_without_start_time is only for flow_run and task_run.
+    if run_table:
+        assert "rows_without_start_time" in group, f"{where} of a run table has no rows_without_start_time"
+        without_start = group["rows_without_start_time"]
+        _assert_non_negative_int(without_start, f"{where}.rows_without_start_time")
+        assert without_start <= rows, f"{where}: {without_start} rows without start_time, more than its {rows} rows"
+    else:
+        assert "rows_without_start_time" not in group, f"{where} has rows_without_start_time outside a run table"
+    _assert_timestamp(group["oldest"], f"{where}.oldest", nullable=True)
+    _assert_timestamp(group["newest"], f"{where}.newest", nullable=True)
+    return rows
+
+
+def _breakdown_group_order_key(group: dict) -> tuple:
+    """Order of the groups in a table (data-model.md): rows, largest first, then
+    the key values in key-name order with null after every string."""
+    values = tuple((group["group"][name] is None, group["group"][name] or "") for name in sorted(group["group"]))
+    return (-group["rows"], values)
+
+
+def assert_storage_breakdown(doc: dict) -> None:
+    """Assert storage-breakdown.json conformance with
+    specs/006-taskmgr-db-storage/contracts/storage-breakdown.schema.json.
+
+    jsonschema is not a test dependency; the schema's constraints are asserted
+    manually, as validate_manifest_schema does for the manifest: required
+    fields and no others, the enums, the minimums, RFC 3339 or null
+    timestamps, and, for each table, rows and groups present only when the
+    table is collected and reason only when it is not. It also asserts what
+    the schema cannot express (data-model.md, research R7): the seven tables
+    in list order with their documented group keys and timestamp column, the
+    group keys equal to grouped_by, rows_without_start_time only for the run
+    tables, a table's rows equal to the sum of its groups' rows, and the
+    order of the groups.
+    """
+    _assert_exact_fields(doc, BREAKDOWN_FIELDS, "storage-breakdown.json")
+    _assert_timestamp(doc["collected_at"], "collected_at")
+    _assert_non_empty_str(doc["database"], "database")
+    time_limit = doc["time_limit_per_table"]
+    assert isinstance(time_limit, str) and BREAKDOWN_TIME_LIMIT_RE.match(time_limit), (
+        f"time_limit_per_table {time_limit!r} does not match {BREAKDOWN_TIME_LIMIT_RE.pattern}"
+    )
+
+    tables = doc["tables"]
+    assert isinstance(tables, list), f"tables must be an array, got {type(tables).__name__}"
+    for index, table in enumerate(tables):
+        where = f"tables[{index}]"
+        _assert_fields(table, BREAKDOWN_TABLE_REQUIRED_FIELDS, BREAKDOWN_TABLE_OPTIONAL_FIELDS, where)
+        name = table["name"]
+        assert name in BREAKDOWN_TABLES, f"{where}.name {name!r} is not one of {sorted(BREAKDOWN_TABLES)}"
+        where = f"table {name}"
+        status = table["status"]
+        assert status in BREAKDOWN_TABLE_STATUSES, f"{where} has invalid status {status!r}"
+
+        grouped_by = table["grouped_by"]
+        assert isinstance(grouped_by, list) and grouped_by, f"{where}.grouped_by must be a non-empty array"
+        for key in grouped_by:
+            assert key in BREAKDOWN_KEY_NAMES, (
+                f"{where}.grouped_by has {key!r}, not one of {sorted(BREAKDOWN_KEY_NAMES)}"
+            )
+        column = table["timestamp_column"]
+        assert column in BREAKDOWN_TIMESTAMP_COLUMNS, (
+            f"{where}.timestamp_column {column!r} is not one of {sorted(BREAKDOWN_TIMESTAMP_COLUMNS)}"
+        )
+        expected_keys, expected_column = BREAKDOWN_TABLES[name]
+        assert grouped_by == expected_keys, f"{where} is grouped by {grouped_by}, want {expected_keys}"
+        assert column == expected_column, f"{where} takes its times from {column!r}, want {expected_column!r}"
+
+        if status != "collected":
+            assert "rows" not in table and "groups" not in table, f"{where} is {status} but has rows or groups"
+            _assert_non_empty_str(table.get("reason"), f"{where}.reason")
+            continue
+        assert "reason" not in table, f"{where} is collected but has a reason: {table['reason']!r}"
+        assert "rows" in table and "groups" in table, f"{where} is collected but has no rows or no groups"
+        _assert_non_negative_int(table["rows"], f"{where}.rows")
+        groups = table["groups"]
+        assert isinstance(groups, list), f"{where}.groups must be an array, got {type(groups).__name__}"
+        group_rows = [
+            _assert_breakdown_group(group, grouped_by, name in BREAKDOWN_RUN_TABLES, f"{where} groups[{i}]")
+            for i, group in enumerate(groups)
+        ]
+        assert sum(group_rows) == table["rows"], (
+            f"{where}: groups add up to {sum(group_rows)} rows, rows is {table['rows']}"
+        )
+        order_keys = [_breakdown_group_order_key(group) for group in groups]
+        assert order_keys == sorted(order_keys), (
+            f"{where}: groups are not ordered by rows (largest first), then key values: "
+            f"{[(group['rows'], group['group']) for group in groups]}"
+        )
+
+    names = [table["name"] for table in tables]
+    assert names == list(BREAKDOWN_TABLES), f"tables are {names}, want the breakdown list {list(BREAKDOWN_TABLES)}"
