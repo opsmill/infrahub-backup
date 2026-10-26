@@ -293,11 +293,117 @@ func (iops *InfrahubOps) wipeTransientData() error {
 	if err := iops.deleteMessageQueues(); err != nil {
 		logrus.Warnf("Failed to wipe message queue data: %v", err)
 	}
-	if _, err := iops.Exec("cache", []string{"find", "/data", "-mindepth", "1", "-delete"}, nil); err != nil {
+	if err := iops.deleteCacheKeys(); err != nil {
 		logrus.Warnf("Failed to wipe cache data: %v", err)
 	}
 	logrus.Info("Transient data wiped")
 	return nil
+}
+
+// redisCLIScript runs redis-cli with the arguments that follow it. When the
+// container sets REDIS_PASSWORD_FILE or REDIS_PASSWORD, as the Bitnami Redis
+// image does when authentication is enabled, redis-cli reads that password
+// from REDISCLI_AUTH. The arguments reach redis-cli as positional parameters,
+// never as part of the script.
+const redisCLIScript = `if [ -n "${REDIS_PASSWORD_FILE:-}" ]; then REDISCLI_AUTH=$(cat "$REDIS_PASSWORD_FILE") && export REDISCLI_AUTH; elif [ -n "${REDIS_PASSWORD:-}" ]; then REDISCLI_AUTH=$REDIS_PASSWORD && export REDISCLI_AUTH; fi; exec redis-cli "$@"`
+
+// redisDeleteKeysScript deletes every key of the selected Redis database, one
+// SCAN page at a time, and returns how many keys it deleted.
+const redisDeleteKeysScript = `local cursor = "0"
+local deleted = 0
+repeat
+  local reply = redis.call("SCAN", cursor, "COUNT", 1000)
+  cursor = reply[1]
+  for _, key in ipairs(reply[2]) do
+    redis.call("UNLINK", key)
+    deleted = deleted + 1
+  end
+until cursor == "0"
+return deleted`
+
+// redisKeyspaceDBRe matches a database line of `INFO keyspace`, such as
+// "db0:keys=12,expires=0,avg_ttl=0".
+var redisKeyspaceDBRe = regexp.MustCompile(`^db(\d+):keys=`)
+
+// deleteCacheKeys deletes every key in every database of the cache. Infrahub
+// uses database 0 by default, and a task manager configured with Redis
+// messaging can use another one. Redis keeps its data in memory and writes it to disk when it
+// stops, so deleting the files under /data while Redis runs left the data in
+// place.
+//
+// The keys are deleted by redisDeleteKeysScript rather than FLUSHALL, because
+// the Bitnami Redis chart that the Infrahub Helm chart uses disables FLUSHALL
+// and FLUSHDB by default. redis-cli exits with 0 when Redis answers with an
+// error, such as NOAUTH, so every reply is checked.
+func (iops *InfrahubOps) deleteCacheKeys() error {
+	master, err := iops.redisMasterArgs()
+	if err != nil {
+		return err
+	}
+
+	keyspace, err := iops.redisCLI(slices.Concat(master, []string{"INFO", "keyspace"})...)
+	if err != nil {
+		return fmt.Errorf("failed to list the Redis databases: %w", err)
+	}
+	if !strings.HasPrefix(keyspace, "# Keyspace") {
+		return fmt.Errorf("the cache answered INFO keyspace with %q", keyspace)
+	}
+
+	var errs []error
+	deleted := 0
+	for _, line := range strings.Split(keyspace, "\n") {
+		match := redisKeyspaceDBRe.FindStringSubmatch(strings.TrimSpace(line))
+		if match == nil {
+			continue
+		}
+		db := match[1]
+		reply, err := iops.redisCLI(slices.Concat(master, []string{"-n", db, "EVAL", redisDeleteKeysScript, "0"})...)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("failed to delete the keys of database %s: %w", db, err))
+			continue
+		}
+		count, err := strconv.Atoi(reply)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("the cache answered the key deletion in database %s with %q", db, reply))
+			continue
+		}
+		logrus.Debugf("Deleted %d keys of cache database %s", count, db)
+		deleted += count
+	}
+
+	logrus.Infof("Deleted cache keys: %d", deleted)
+	return errors.Join(errs...)
+}
+
+// redisMasterArgs returns the redis-cli arguments that address the Redis
+// master from the cache service. The commands run in one pod or container of
+// the service. When ROLE reports a read-only replica, as with Bitnami Redis
+// and Sentinel, the arguments name the master that ROLE reports, and the
+// replicas apply the master's changes from there.
+func (iops *InfrahubOps) redisMasterArgs() ([]string, error) {
+	role, err := iops.redisCLI("ROLE")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read the Redis role: %w", err)
+	}
+
+	lines := strings.Split(role, "\n")
+	switch strings.TrimSpace(lines[0]) {
+	case "master":
+		return nil, nil
+	case "slave", "replica":
+		if len(lines) < 3 {
+			return nil, fmt.Errorf("unexpected ROLE reply from a Redis replica: %q", role)
+		}
+		host, port := strings.TrimSpace(lines[1]), strings.TrimSpace(lines[2])
+		logrus.Debugf("The cache is a Redis replica; sending the commands to its master %s:%s", host, port)
+		return []string{"-h", host, "-p", port}, nil
+	}
+	return nil, fmt.Errorf("the cache answered ROLE with %q", role)
+}
+
+// redisCLI runs redis-cli in the cache service and returns its stdout.
+func (iops *InfrahubOps) redisCLI(args ...string) (string, error) {
+	return iops.execOutput("cache", append([]string{"sh", "-c", redisCLIScript, "redis-cli"}, args...))
 }
 
 // transientDataExecTimeout bounds each command that wipeTransientData runs in
