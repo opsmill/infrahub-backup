@@ -6,7 +6,9 @@ with and without --project, the degraded case (stopped cache container →
 exit 0 + failed manifest entry, FR-009/SC-005), masked env output (FR-008),
 --log-lines / INFRAHUB_LOG_LINES precedence (FR-011), and US3
 (--include-backup: standard backup next to the bundle, referenced in the
-manifest, FR-014).
+manifest, FR-014). Also covers spec 006-taskmgr-db-storage User Story 1
+(quickstart scenario 2): the storage figures of the task manager database in
+every default bundle.
 
 The tests share one class-scoped compose stack; the disruptive scenarios run
 last so the stack stays healthy for the earlier ones: the degraded-cache test
@@ -20,6 +22,7 @@ import os
 import re
 import subprocess
 import tarfile
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -27,9 +30,11 @@ from infrahub_sdk.testing.docker import TestInfrahubDockerClient
 from infrahub_testcontainers.container import InfrahubDockerCompose
 
 from tests.helpers.bundle import (
+    EXPECTED_COLLECTORS,
     OPT_IN_COLLECTORS,
     assert_bundle_layout,
     assert_collector_outcomes,
+    assert_storage_collected,
     find_bundle,
     read_bundle_archive,
     read_bundle_member,
@@ -46,6 +51,12 @@ TASK_WORKER_COUNT = 2
 SENSITIVE_KEY_RE = re.compile(r"pass|secret|token|key", re.IGNORECASE)
 ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 MASKED_VALUE = "********"
+
+# FR-001 (spec 006-taskmgr-db-storage): the bundle's database size may differ
+# from a later pg_database_size by what the task manager writes in between.
+STORAGE_SIZE_TOLERANCE_BYTES = 1024 * 1024
+# SC-002: the storage figures add no more than 10 seconds to a run.
+STORAGE_COLLECTION_BUDGET = timedelta(seconds=10)
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +100,55 @@ def _list_infrahub_compose_projects() -> list[str]:
         if ps.returncode == 0 and "infrahub" in ps.stdout.lower():
             projects.append(name)
     return sorted(projects)
+
+
+def _container_env(project: str, service: str, name: str) -> str | None:
+    """Value of one environment variable in a running service container, or None when unset."""
+    result = _compose(project, "exec", "-T", service, "printenv", name, check=False)
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def _task_manager_db_owner_and_database(project: str) -> tuple[str, str]:
+    """Owner and database of task-manager-db, read from its container's environment.
+
+    Uses the official PostgreSQL image's defaults when a variable is unset: the
+    owner is postgres, and the database is named after the owner.
+    """
+    owner = _container_env(project, "task-manager-db", "POSTGRES_USER") or "postgres"
+    database = _container_env(project, "task-manager-db", "POSTGRES_DB") or owner
+    return owner, database
+
+
+def _task_manager_db_query(project: str, owner: str, database: str, sql: str) -> str:
+    """Run one SQL statement in task-manager-db with psql and return its unaligned output."""
+    return _compose(project, "exec", "-T", "task-manager-db", "psql", "-U", owner, "-d", database, "-Atc", sql).stdout
+
+
+def _collector_duration(json_log: str, collector: str) -> timedelta:
+    """Time from a collector's `Collecting <name>` line to the next collector's line.
+
+    Reads the output of `--log-format json`. The next collector's line is the
+    run loop's `Collecting <name>` or `Skipping <name>: <reason>` for another
+    planned collector. logrus writes the time with one-second precision.
+    """
+    records = []
+    for line in json_log.splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict) and "msg" in record and "time" in record:
+            records.append(record)
+
+    def starts_collector(message: str, names: set[str]) -> bool:
+        return any(message == f"Collecting {name}" or message.startswith(f"Skipping {name}: ") for name in names)
+
+    start = next((i for i, r in enumerate(records) if r["msg"] == f"Collecting {collector}"), None)
+    assert start is not None, f"No 'Collecting {collector}' line in the JSON log:\n{json_log}"
+    others = EXPECTED_COLLECTORS - {collector}
+    end = next((r for r in records[start + 1 :] if starts_collector(r["msg"], others)), None)
+    assert end is not None, f"No collector line after 'Collecting {collector}' in the JSON log:\n{json_log}"
+    return datetime.fromisoformat(end["time"]) - datetime.fromisoformat(records[start]["time"])
 
 
 def _assert_env_dump_masked(env_text: str, plaintext_secrets: list[str]) -> None:
@@ -149,13 +209,18 @@ class TestDockerCollect(TestInfrahubDockerClient):
         )
 
     async def test_collect_full_bundle(self, infrahub_compose, infrahub_port, collect_binary, tmp_path):
-        """US2 scenario 1: parity bundle with schema-validated manifest (FR-006/FR-008)."""
+        """US2 scenario 1: parity bundle with schema-validated manifest (FR-006/FR-008).
+
+        Also spec 006-taskmgr-db-storage User Story 1 (quickstart scenario 2):
+        every default bundle holds the storage figures of the task manager
+        database (FR-001 to FR-003), collected in under 10 seconds (SC-002).
+        """
         project = infrahub_compose.project_name
         output_dir = tmp_path / "bundles"
 
-        run_collect(
+        result = run_collect(
             collect_binary,
-            ["--project", project, "--output-dir", str(output_dir), "create"],
+            ["--project", project, "--output-dir", str(output_dir), "--log-format", "json", "create"],
         )
 
         # Archive integrity: valid tar.gz, everything under bundle/
@@ -170,6 +235,12 @@ class TestDockerCollect(TestInfrahubDockerClient):
 
         # SC-005: one manifest entry per planned collector, no duplicates
         statuses = assert_collector_outcomes(manifest)
+
+        # Spec 006 FR-001 to FR-003: storage.json is collected and matches
+        # contracts/storage.schema.json. Checked before the parity check
+        # below, so a failure reports its reason and storage.err.txt.
+        storage = assert_storage_collected(bundle_path, file_names, manifest)
+        # task-manager-db-storage-breakdown: asserted once the collector exists (T031/T033)
 
         # Parity content (US2 scenario 1): every collector succeeds on a
         # healthy stack except the optional service that is scaled to zero
@@ -235,6 +306,26 @@ class TestDockerCollect(TestInfrahubDockerClient):
         assert "errors" not in status_doc, f"InfrahubStatus query returned errors: {status_doc.get('errors')}"
         assert "schema_hash_synced" in status_doc["data"]["InfrahubStatus"]["summary"], (
             f"InfrahubStatus result missing summary.schema_hash_synced: {status_doc}"
+        )
+
+        # Spec 006 FR-001: the database total is the size PostgreSQL reports, give or
+        # take what the task manager wrote since the collection.
+        owner, database = _task_manager_db_owner_and_database(project)
+        assert storage["database"] == database, f"storage.json names {storage['database']!r}, want {database!r}"
+        live_bytes = int(
+            _task_manager_db_query(project, owner, database, "SELECT pg_database_size(current_database())").strip()
+        )
+        reported_bytes = storage["database_size"]["bytes"]
+        assert abs(reported_bytes - live_bytes) <= STORAGE_SIZE_TOLERANCE_BYTES, (
+            f"storage.json database size {reported_bytes} differs from pg_database_size {live_bytes} "
+            f"by more than {STORAGE_SIZE_TOLERANCE_BYTES} bytes"
+        )
+
+        # SC-002: the storage collector adds under 10 seconds to the run.
+        storage_duration = _collector_duration(result.stderr, "task-manager-db-storage")
+        print(f"task-manager-db-storage collection time: {storage_duration}")
+        assert storage_duration < STORAGE_COLLECTION_BUDGET, (
+            f"task-manager-db-storage took {storage_duration}, want under {STORAGE_COLLECTION_BUDGET}"
         )
 
     async def test_collect_project_selection_without_flag(
