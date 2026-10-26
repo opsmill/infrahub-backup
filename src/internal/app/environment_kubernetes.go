@@ -240,7 +240,7 @@ func (k *KubernetesBackend) getPodStatuses(service string) ([]string, error) {
 		}
 	}
 	// Fallback to all pods search
-	output, err := k.executor.runCommand("kubectl", "get", "pods", "-n", k.namespace, "-o", "jsonpath={range .items[*]}{.metadata.name}{\";\"}{.status.phase}{\"\\n\"}{end}")
+	output, err := k.executor.runCommand("kubectl", k.podNameFallbackArgs(service, "jsonpath={range .items[*]}{.metadata.name}{\";\"}{.status.phase}{\"\\n\"}{end}")...)
 	if err != nil {
 		return nil, err
 	}
@@ -302,7 +302,7 @@ func (k *KubernetesBackend) getPodForServiceWith(run podRunner, service string) 
 		}
 	}
 
-	output, err := run("kubectl", "get", "pods", "-n", k.namespace, "-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}")
+	output, err := run("kubectl", k.podNameFallbackArgs(service, "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}")...)
 	if err != nil {
 		return "", err
 	}
@@ -352,7 +352,7 @@ func (k *KubernetesBackend) getAllPodsWith(run podRunner, service string) ([]str
 	// canonical name (e.g. infrahub-server pods carry infrahub/service=server),
 	// so label selectors alone would miss them. A failure here means the
 	// cluster/API is unreachable, not that the service is absent.
-	output, err := run("kubectl", "get", "pods", "-n", k.namespace, "-o", "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}")
+	output, err := run("kubectl", k.podNameFallbackArgs(service, "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}")...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list pods in namespace %s: %w", k.namespace, err)
 	}
