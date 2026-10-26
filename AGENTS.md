@@ -39,7 +39,10 @@ All three tools share common internal application logic but expose different com
 
 The changelog is assembled by [towncrier](https://towncrier.readthedocs.io/) from news fragments in
 `changelog/`, so changes included in release notes carry their own entries instead of editing
-`CHANGELOG.md`. Internal and tooling work included in release notes goes under `housekeeping`.
+`CHANGELOG.md`. The changelog covers only the product itself: the three binaries and the
+container image. Never add a fragment for a change that does not affect the product, such as a CI
+or release workflow, tests, linters, or other repository tooling; label those PRs
+`ci/skip-changelog` instead. Internal work that changes the product goes under `housekeeping`.
 The pull-request fragment check is currently muted, in line with the other ecosystem repositories.
 Add a fragment in the same PR as the change when it belongs in the release notes:
 
