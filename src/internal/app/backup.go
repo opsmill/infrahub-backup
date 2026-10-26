@@ -101,7 +101,10 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 	}
 
 	// Detect Neo4j edition
-	editionInfo := iops.detectNeo4jEditionInfo("backup")
+	editionInfo, err := iops.detectBackupNeo4jEdition()
+	if err != nil {
+		return err
+	}
 	if editionInfo.IsCommunity {
 		logrus.Warn("Neo4j Community Edition detected; Infrahub services will be stopped and restarted before the backup begins.")
 		logrus.Warn("Waiting 10 seconds to allow the user to abort... CTRL+C to cancel.")
