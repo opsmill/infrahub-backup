@@ -34,9 +34,12 @@ func TestCollectPlanOrdering(t *testing.T) {
 		"server-info",
 		"telemetry",
 		"metrics",
-		// Opt-in extras stay last: the benchmark generates load, and the
-		// include-backup collector may stop/restart application containers
-		// (inherited backup behavior), so backup stays last of all.
+		// Opt-in extras stay last: the storage breakdown reads the task
+		// manager database before anything loads or stops it, the benchmark
+		// generates load, and the include-backup collector may stop/restart
+		// application containers (inherited backup behavior), so backup stays
+		// last of all.
+		"task-manager-db-storage-breakdown",
 		"benchmark",
 		"backup",
 	}

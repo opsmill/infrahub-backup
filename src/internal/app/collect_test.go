@@ -396,6 +396,7 @@ func TestCollectBundle_RegisteredPlan(t *testing.T) {
 		{Name: "server-info", Status: collectorStatusSuccess},
 		{Name: "telemetry", Status: collectorStatusSkipped, Reason: notDeployed},
 		{Name: "metrics", Status: collectorStatusSuccess},
+		{Name: "task-manager-db-storage-breakdown", Status: collectorStatusSkipped, Reason: "not requested"},
 		{Name: "benchmark", Status: collectorStatusSkipped, Reason: "not requested"},
 		{Name: "backup", Status: collectorStatusSkipped, Reason: "not requested"},
 	}

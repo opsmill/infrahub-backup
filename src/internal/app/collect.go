@@ -172,11 +172,15 @@ func (iops *InfrahubOps) collectPlan(opts CollectOptions) []collector {
 	)
 
 	// Opt-in extras run last so the always-on diagnostics are already staged
-	// when they start. The benchmark generates load, so it runs only after
-	// every read-only collector has captured the undisturbed state; the
-	// include-backup collector inherits the standard backup behavior — it may
-	// stop/restart application containers — so it must stay last of all.
+	// when they start. The storage breakdown of the task manager database
+	// comes first among them, so it reads the database before anything else
+	// in the run loads or stops it (research R12). The benchmark generates
+	// load, so it runs only after every read-only collector has captured the
+	// undisturbed state; the include-backup collector inherits the standard
+	// backup behavior — it may stop/restart application containers — so it
+	// must stay last of all.
 	plan = append(plan,
+		taskManagerDBStorageBreakdownCollector(),
 		benchmarkCollector(runEnvironmentBenchmark),
 		includeBackupCollector(runStandardBackup),
 	)
