@@ -96,11 +96,13 @@ Expected:
 | Setup | Expected outcome for both collectors |
 |---|---|
 | `docker compose -p <project> stop task-manager-db` | `failed`, `not reachable: ...` |
-| `PREFECT_API_DATABASE_CONNECTION_URL=postgresql+asyncpg://nobody:x@task-manager-db:5432/prefect` in the operator's environment | `failed`, `login rejected: ... role "nobody" does not exist` |
+| `PREFECT_API_DATABASE_CONNECTION_URL=postgresql+asyncpg://nobody:wrong-secret@task-manager-db:5432/prefect` in the operator's environment | `failed`, `login rejected: ... role "nobody" does not exist` |
 | `docker compose -p <project> stop task-manager task-manager-background-svc` (the database keeps running) | `success`: the owner is read from the `task-manager-db` environment |
 | A deployment without a `task-manager-db` service | `skipped`, the reason names an external PostgreSQL server |
 
 In each case, the command exits 0, the archive exists, and `grep -r <password> out/bundle` finds nothing. Start `task-manager-db` again after the first case.
+
+The tool replaces every occurrence of the password with `********` (FR-017, [research.md](research.md) R10), so a password that also occurs in other text masks that text too. With the password `x`, the reason reads `role "nobody" does not e********ist`. When the password equals the user or database name, the masked diagnostics hide that name and `grep` finds the name in the logs. This happens on the end-to-end Compose deployment, where the user and the password are both `postgres`, and with the tool's default credentials, where the database and the password are both `prefect`. Use a password that differs from the user name, the database name and any word of the expected output.
 
 ## 6. Kubernetes, including CloudNativePG (FR-014)
 
