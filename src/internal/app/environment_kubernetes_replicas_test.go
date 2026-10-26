@@ -215,3 +215,26 @@ func TestRecordReplicaCounts_RestoreKeepsTaskManagerDBCount(t *testing.T) {
 	}
 	assertScaleCalls(t, kubectl.scaleCalls(), "--replicas=2")
 }
+
+// TestRecordReplicaCounts_RestoreSkipsExternalTaskManagerDB covers a task
+// manager database that runs outside the cluster, or on CloudNativePG, which
+// creates its pods without a Deployment or StatefulSet. No workload matches
+// task-manager-db, so the restore records the other counts without an error.
+// Starting task-manager-db then fails, which restorePostgreSQL reports on
+// Kubernetes as a database that may be externally managed, and continues.
+func TestRecordReplicaCounts_RestoreSkipsExternalTaskManagerDB(t *testing.T) {
+	kubectl := newFakeKubectl(t, "infrahub-server", "3")
+	k := newTestKubernetesBackend()
+	iops := &InfrahubOps{config: &Configuration{}, backend: k, executor: k.executor}
+
+	if err := iops.recordReplicaCounts(restoreServices...); err != nil {
+		t.Fatalf("recordReplicaCounts failed for a task-manager-db with no workload: %v", err)
+	}
+	if got := k.replicaCache["deployment/infrahub-server"]; got != 3 {
+		t.Errorf("recorded count for deployment/infrahub-server = %d, want 3", got)
+	}
+	if err := iops.StartServices("task-manager-db"); err == nil {
+		t.Error("StartServices(task-manager-db) succeeded, want the workload lookup error that restorePostgreSQL treats as an externally managed database")
+	}
+	assertScaleCalls(t, kubectl.scaleCalls())
+}
