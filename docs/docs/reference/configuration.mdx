@@ -113,7 +113,7 @@ For each service, the tool tries these label selectors in order and uses the fir
 
 If no selector returns pods, the tool uses the pods whose name contains the service name.
 
-CloudNativePG instance pods are only used for the `task-manager-db` service. CloudNativePG labels them `app.kubernetes.io/component=database`, the same value as the Neo4j service name, so the tool leaves them out of the lookup for every other service.
+Other software in the namespace can set the labels in step 3 to the same values. For example, CloudNativePG labels its PostgreSQL pods `app.kubernetes.io/component=database`, the same value as the Neo4j service name. Set `infrahub/service` on the pods of every Infrahub service, so the tool finds them in step 1.
 
 When several pods match and the tool needs one, it uses the pod labelled `cnpg.io/instanceRole=primary` or `role=primary`, and otherwise the first pod.
 

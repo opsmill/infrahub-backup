@@ -8,53 +8,26 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// cnpgInstanceExclusion is the label requirement that rules out CloudNativePG
-// instance pods, which all carry the cnpg.io/cluster label.
-const cnpgInstanceExclusion = "!cnpg.io/cluster"
-
 // neo4jInstanceSelector matches the server pods the Neo4j Helm chart deploys.
 const neo4jInstanceSelector = "helm.neo4j.com/pod_category=neo4j-instance"
 
-// excludesCNPGInstances reports whether a CloudNativePG instance pod must be
-// kept out of the pods resolved for a service. Only task-manager-db runs on
-// PostgreSQL, so any other service that resolves to a CNPG pod has matched the
-// wrong workload: CNPG labels every instance pod
-// app.kubernetes.io/component=database, the same value as the Neo4j service.
-func excludesCNPGInstances(service string) bool {
-	return service != "task-manager-db"
-}
-
 // podSelectors returns the label selectors tried, in order, to find a
 // service's pods. infrahub/service comes first because the Infrahub Helm chart
-// and the HA deployment examples set it on every component; the generic labels
-// after it are also set by other software in the same namespace.
+// and the HA deployment examples set it on every component. The generic labels
+// come last because other software in the namespace sets them too: a
+// PostgreSQL operator such as CloudNativePG labels its pods
+// app.kubernetes.io/component=database, the same value as the Neo4j service.
 func (k *KubernetesBackend) podSelectors(service string) []string {
 	selectors := []string{fmt.Sprintf("infrahub/service=%s", service)}
 	if service == "database" {
 		// A Neo4j installed from its own chart without the infrahub/service label.
 		selectors = append(selectors, neo4jInstanceSelector)
 	}
-
-	exclusion := ""
-	if excludesCNPGInstances(service) {
-		exclusion = "," + cnpgInstanceExclusion
-	}
-	for _, key := range []string{"app.kubernetes.io/component", "app", "component"} {
-		selectors = append(selectors, fmt.Sprintf("%s=%s%s", key, service, exclusion))
-	}
-	return selectors
-}
-
-// podNameFallbackArgs returns the kubectl arguments that list the pod names a
-// service falls back to matching by substring when no label selector matched.
-// CloudNativePG instance pods are left out for the same reason as in
-// podSelectors.
-func (k *KubernetesBackend) podNameFallbackArgs(service, jsonpath string) []string {
-	args := []string{"get", "pods", "-n", k.namespace}
-	if excludesCNPGInstances(service) {
-		args = append(args, "-l", cnpgInstanceExclusion)
-	}
-	return append(args, "-o", jsonpath)
+	return append(selectors,
+		fmt.Sprintf("app.kubernetes.io/component=%s", service),
+		fmt.Sprintf("app=%s", service),
+		fmt.Sprintf("component=%s", service),
+	)
 }
 
 // findPrimaryPod searches for a pod with primary role label (for HA PostgreSQL
@@ -122,9 +95,10 @@ func (k *KubernetesBackend) prepareCommand(command []string, opts *ExecOptions) 
 	return result
 }
 
-// selectorMatchesLabels evaluates a kubectl label selector against a label set.
-// It supports key=value, key (the label is set) and !key (the label is not set).
 func selectorMatchesLabels(selector string, labels map[string]string) bool {
+	if len(labels) == 0 {
+		return false
+	}
 	selector = strings.TrimSpace(selector)
 	if selector == "" {
 		return false
@@ -134,12 +108,6 @@ func selectorMatchesLabels(selector string, labels map[string]string) bool {
 	for _, condition := range conditions {
 		condition = strings.TrimSpace(condition)
 		if condition == "" {
-			continue
-		}
-		if key, ok := strings.CutPrefix(condition, "!"); ok {
-			if _, present := labels[key]; present {
-				return false
-			}
 			continue
 		}
 		kv := strings.SplitN(condition, "=", 2)
