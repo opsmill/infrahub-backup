@@ -33,6 +33,9 @@ type CollectOptions struct {
 	IncludeBackup  bool
 	IncludeQueries bool
 	Benchmark      bool
+	// IncludeTaskManagerStorage turns on the storage breakdown of the task
+	// manager database (--include-task-manager-storage).
+	IncludeTaskManagerStorage bool
 	// TelemetryDays is the look-back window (in days) for the Infrahub
 	// product-telemetry export; a non-positive value falls back to
 	// defaultTelemetryDays (30).
