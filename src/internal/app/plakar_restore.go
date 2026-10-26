@@ -153,15 +153,19 @@ func (iops *InfrahubOps) restoreBackupGroup(kctx *kcontext.KContext, repo *repos
 		"components":       metadata.Components,
 	}).Info("Backup metadata loaded")
 
-	// Detect Neo4j edition for restore
-	detectedEdition, detectionErr := iops.detectNeo4jEdition()
-	editionInfo := NewNeo4jEditionInfo(detectedEdition, detectionErr)
+	// Detect Neo4j edition for restore. A group without a Neo4j snapshot restores no Neo4j
+	// data, so a failed probe must not stop it.
+	neo4jEdition := metadata.Neo4jEdition
+	if neo4jSnapInfo != nil {
+		detectedEdition, detectionErr := iops.detectNeo4jEdition()
+		editionInfo := NewNeo4jEditionInfo(detectedEdition, detectionErr)
 
-	neo4jEdition, err := editionInfo.ResolveRestoreEdition(metadata.Neo4jEdition)
-	if err != nil {
-		return err
+		neo4jEdition, err = editionInfo.ResolveRestoreEdition(metadata.Neo4jEdition)
+		if err != nil {
+			return err
+		}
+		editionInfo.LogDetection("restore")
 	}
-	editionInfo.LogDetection("restore")
 
 	// For enterprise, export neo4j snapshot and extract the tar archive for file-based restore
 	isCommunity := strings.EqualFold(neo4jEdition, neo4jEditionCommunity)
@@ -346,14 +350,17 @@ func (iops *InfrahubOps) restoreSingleSnapshot(kctx *kcontext.KContext, repo *re
 
 	logrus.Infof("Restoring single component: %s", component)
 
-	// Detect Neo4j edition for restore
-	detectedEdition, detectionErr := iops.detectNeo4jEdition()
-	editionInfo := NewNeo4jEditionInfo(detectedEdition, detectionErr)
-	if neo4jEdition != "" {
+	// Detect Neo4j edition for restore. Every snapshot of a backup carries the edition tag,
+	// but only a Neo4j snapshot depends on it, so a failed probe must not stop the restore of
+	// a snapshot that holds no Neo4j data.
+	if component == ComponentNeo4j && neo4jEdition != "" {
+		detectedEdition, detectionErr := iops.detectNeo4jEdition()
+		editionInfo := NewNeo4jEditionInfo(detectedEdition, detectionErr)
 		resolvedEdition, err := editionInfo.ResolveRestoreEdition(neo4jEdition)
 		if err != nil {
 			return err
 		}
+		editionInfo.LogDetection("restore")
 		neo4jEdition = resolvedEdition
 	}
 

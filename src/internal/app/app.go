@@ -70,6 +70,10 @@ type InfrahubOps struct {
 	dockerBackend           *DockerBackend
 	kubernetesBackend       *KubernetesBackend
 	infrahubInternalAddress string // cached INFRAHUB_INTERNAL_ADDRESS from task-worker
+	// neo4jCredentialLookupErr is why the Neo4j credentials could not be read from the
+	// deployment when the default username or password was used in their place, so a
+	// rejected Neo4j login can be reported against the lookup that caused it.
+	neo4jCredentialLookupErr error
 }
 
 // NewInfrahubOps creates a new InfrahubOps instance
