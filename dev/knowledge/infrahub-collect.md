@@ -1,4 +1,4 @@
-<!-- Extracted from specs/003-collect-tool on 2026-07-09 -->
+<!-- Extracted from specs/003-collect-tool on 2026-07-09; updated from specs/006-taskmgr-db-storage on 2026-10-26 -->
 
 # Infrahub Collect
 
@@ -30,6 +30,7 @@ Flags and their `INFRAHUB_*` environment equivalents:
 | `--include-backup` | `false` | `INFRAHUB_INCLUDE_BACKUP` | `create` |
 | `--include-queries` | `false` | `INFRAHUB_INCLUDE_QUERIES` | `create` |
 | `--benchmark` | `false` | `INFRAHUB_BENCHMARK` | `create` |
+| `--include-task-manager-storage` | `false` | `INFRAHUB_INCLUDE_TASK_MANAGER_STORAGE` | `create` |
 | `--telemetry-days` | `30` | `INFRAHUB_TELEMETRY_DAYS` | `create` |
 
 `create` exits 0 whenever the archive is produced — including a partial bundle with failed collectors. It exits 1 only for no usable environment, an unwritable output directory, or an archiving failure.
@@ -47,6 +48,7 @@ bundle/
 ├── cache/                    # Redis info/clients/config(masked)/slowlog/dbsize
 ├── task-worker/<replica>/    # Prefect worker state per replica
 ├── task-manager/             # work pools, queues, flow runs (+ pending/running flow & task runs), events, automations
+├── task-manager-db/          # storage.json (every run); storage-breakdown.json (with --include-task-manager-storage)
 ├── server/                   # version, pip list, API info/config/schema, env (masked)
 ├── telemetry/                # infrahubctl telemetry export (last --telemetry-days, default 30)
 ├── metrics/                  # docker stats / kubectl top
@@ -67,6 +69,28 @@ Two rules keep a dump file trustworthy, both learned from a field bundle whose `
 The telemetry collector runs `infrahubctl telemetry export --start-date <now-N days>` inside `task-worker` (the container whose infrahubctl already targets the API, per `infrahub-backup`'s `infrahubctl task list`), then copies the JSON out to `telemetry/telemetry-export.json`. It is read-only — the export pulls stored snapshots through the API — and always-on; a non-positive `--telemetry-days` falls back to 30. Telemetry is anonymous product-usage data (no PII/secrets), so the export is staged unmasked. Outcomes: `task-worker` not deployed → `skipped`; a failing export (no snapshots in the window, an Infrahub version without the telemetry API, a timeout) degrades to `skipped` — like `--benchmark` — with the CLI output preserved in `telemetry/telemetry-export.err.txt`; only a local staging error (creating the directory, copying the file out) is `failed`. `infrahubctl telemetry export` exits non-zero and writes no file when there are no snapshots, which is why a missing export is treated as skipped rather than failed.
 
 The export, the copy-out and the `rm -f` cleanup all run in one `task-worker` replica, picked from `ServiceReplicas` by `pickTelemetryReplica` (a running container first, then a container named after the service, so a sidecar in a Kubernetes pod is passed over). Service-level exec and copy are not enough on a scaled Docker Compose service: `docker compose exec` runs in the lowest-numbered running container, while `docker compose cp` without `--index` reads from the first container the daemon lists, which after a scale-up is the newest one. The export would then be written in one container and looked for in another. Failing to enumerate the replicas also marks the collector `failed`.
+
+## Task manager database storage
+
+Two collectors report the storage use of the task manager database. Both run `psql` inside `task-manager-db` through `runTaskManagerDBQuery` (`collect_taskmanager_db.go`), in read-only sessions with time limits that PostgreSQL enforces ([ADR 0008](../adr/0008-database-enforced-query-limits.md)). Both are `skipped` with the reason `service not deployed; the task manager may use an external PostgreSQL server` when `task-manager-db` has no replica.
+
+- `task-manager-db-storage` runs on every `create`, right after `task-manager-state`. One catalog query (`storageQuery`, 60-second limit) writes `task-manager-db/storage.json`: the database size, when PostgreSQL last reset its statistics, and for every table in `pg_stat_user_tables` the data, index and TOAST sizes, the live and dead row estimates and the last vacuum times. Each table's total is the sum of the data, index and TOAST sizes from one set of size calls (`pg_table_size`, `pg_indexes_size`, and `pg_total_relation_size` of the TOAST table), so the parts always add up. The data size has a floor of 0, in case the TOAST table grows between two calls.
+- `task-manager-db-storage-breakdown` runs only with `--include-task-manager-storage`, first among the opt-in collectors, so before `benchmark` and `backup`; without the flag it is `skipped` with the reason `not requested`. A catalog query (`to_regclass`) finds which of the seven tables of `breakdownTables` exist, and a table that does not is recorded as `absent`. Then one query per table, `SELECT COALESCE(json_agg(b.g), '[]'::json) FROM (… GROUP BY …) b`, returns the row count and the oldest and newest timestamps of each group, with a 5-minute limit and with hash joins, merge joins and parallel workers turned off. `storage-breakdown.json` records each table's status. When a table fails, the collector returns `partial storage breakdown: <table>: <reason>; …` as a plain error that does not wrap the table's timeout, so the manifest keeps the table names ([collectors.md](../guidelines/collectors.md)).
+
+A failed storage query, or a failed catalog query of the breakdown, writes its diagnostics with the password masked to `storage.err.txt` or `storage-breakdown.err.txt`.
+
+`resolveTaskManagerDBCredentials` resolves the login once per run and caches it on the collect context for both collectors, in this order:
+
+1. `PREFECT_SERVER_DATABASE_CONNECTION_URL` or `PREFECT_API_DATABASE_CONNECTION_URL` in the operator's environment.
+2. The same variables in the `env` output of `task-manager`.
+3. `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_DB` or `POSTGRES_DATABASE` in the `env` output of `task-manager-db`, used only when the user and the password are both set. Without a database variable, the database is `prefect`. This step keeps the figures available when the Prefect server is down, which is common when the database has filled its disk.
+4. The defaults of the backup tool: user `postgres`, password `prefect`, database `prefect`.
+
+The `env` output of both containers holds secrets and is never written to the bundle or the log. Only the source of the credentials is logged, at debug level.
+
+The size functions (`pg_total_relation_size`, `pg_table_size`, `pg_indexes_size`) wait behind an `ACCESS EXCLUSIVE` lock, for example during a task manager upgrade or migration, while `to_regclass` and `pg_stat_user_tables` do not. During such a lock, `task-manager-db-storage` therefore fails with `timed out after 60s`, the breakdown's catalog query still returns, and the locked table fails in the breakdown with `timed out after 300s`. The end-to-end test showed that a lock on `artifact` also makes `task-manager-state` (`prefect flow-run ls`) wait until its own 60-second limit.
+
+`INFRAHUB_TASK_MANAGER_DB_QUERY_TIMEOUT` is for tests only and is not in the user documentation. It takes a Go duration, for example `5s`, and can only lower the two limits, so the end-to-end test reaches them in seconds. A value that does not parse or is not positive is ignored with a warning.
 
 ## Manifest (`bundle_information.json`)
 

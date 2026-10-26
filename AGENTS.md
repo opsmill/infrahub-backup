@@ -109,6 +109,8 @@ The codebase follows a command-pattern architecture using Cobra for CLI structur
    - `collect_diagnostics.go` - Database, message-queue, cache, task-worker, task-manager, and server collectors
    - `collect_metrics.go` - Container resource metrics collector
    - `collect_extras.go` - Opt-in `--include-backup` and `--benchmark` collectors
+   - `collect_taskmanager_db.go` - Query runner for the task manager database: credential lookup, read-only `psql` sessions in `task-manager-db` with time limits that PostgreSQL enforces, error kinds, password masking
+   - `collect_storage.go` - Task manager database storage collectors: `task-manager-db/storage.json` in every bundle, and the per-table breakdown with `--include-task-manager-storage`
    - `masking.go` - Key-name secret masking for env and config dumps
 
 8. **src/internal/app/utils.go** - Utility functions
@@ -310,6 +312,6 @@ The codebase uses explicit error wrapping with `fmt.Errorf` for context. All com
 
 ## Recent Changes
 
-- 006-taskmgr-db-storage: Planned task manager database storage figures in `infrahub-collect` bundles (always-on `storage.json`, opt-in `--include-task-manager-storage` breakdown)
+- 006-taskmgr-db-storage: Added task manager database storage figures in `infrahub-collect` bundles (always-on `storage.json`, opt-in `--include-task-manager-storage` breakdown)
 - 003-collect-tool: Added `infrahub-collect` troubleshooting-bundle binary (collector framework, log/metrics primitives on both backends, key-name secret masking, bundle manifest)
 - 002-plakar-integration: Added kloset (Plakar core library), integration-fs (filesystem storage/exporter), cobra, logrus
