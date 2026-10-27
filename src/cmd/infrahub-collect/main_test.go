@@ -86,7 +86,7 @@ func TestAddCreateFlags_IncludeTaskManagerStorageHelp(t *testing.T) {
 	if flag.DefValue != "false" {
 		t.Errorf("default = %q, want false", flag.DefValue)
 	}
-	want := "Also collect the storage breakdown of the task manager database (reads every row of its largest tables; up to 5 minutes per table)"
+	want := "Also collect the storage breakdown of the task manager database (reads every row of its run, state, log, event and artifact tables; up to 5 minutes per table)"
 	if flag.Usage != want {
 		t.Errorf("help text = %q, want %q", flag.Usage, want)
 	}

@@ -196,10 +196,10 @@ func collectTaskManagerDBStorage(cc *collectContext) error {
 		return fmt.Errorf("failed to create %s directory: %w", taskManagerDBBundleDir, err)
 	}
 	path := filepath.Join(dir, storageFilename)
-	mask := maskSecretValue(resolveTaskManagerDBCredentials(cc).password)
+	mask := resolveTaskManagerDBCredentials(cc).passwordMask()
 
 	collectedAt := time.Now()
-	result, err := runTaskManagerDBQuery(cc, dbQuery{sql: storageQuery, limit: effectiveDBQueryLimit(collectExecTimeout, os.Getenv)})
+	result, err := runTaskManagerDBQuery(cc, dbQuery{sql: storageQuery, limit: cc.dbQueryLimit(collectExecTimeout)})
 	if err != nil {
 		if writeErr := writeDumpFailure(path, result.command, err, result.stdout, result.stderr, mask); writeErr != nil {
 			logrus.Warnf("Could not record the failed storage query: %v", writeErr)
@@ -360,22 +360,19 @@ func breakdownQuery(spec breakdownTableSpec) string {
 		") b"
 }
 
-// breakdownCatalogQuery reports, for each table of breakdownTables, whether it
-// exists in the task manager database (research R6), so a table that a
-// Prefect version does not have is recorded as absent instead of failing
-// (FR-012). to_regclass reads the catalog only and does not wait for a lock
-// on the table. The query also checks that the database can be reached
-// before the breakdown starts. A unit test keeps the names in step with
-// breakdownTables.
-const breakdownCatalogQuery = `SELECT json_build_object(
-    'events', to_regclass('events') IS NOT NULL,
-    'flow_run', to_regclass('flow_run') IS NOT NULL,
-    'task_run', to_regclass('task_run') IS NOT NULL,
-    'flow_run_state', to_regclass('flow_run_state') IS NOT NULL,
-    'task_run_state', to_regclass('task_run_state') IS NOT NULL,
-    'log', to_regclass('log') IS NOT NULL,
-    'artifact', to_regclass('artifact') IS NOT NULL
-)`
+// breakdownCatalogQuery builds the SQL that reports, for each table of
+// breakdownTables, whether it exists in the task manager database (research
+// R6), so a table that a Prefect version does not have is recorded as absent
+// instead of failing (FR-012). to_regclass reads the catalog only and does not
+// wait for a lock on the table. The query also checks that the database can be
+// reached before the breakdown starts.
+func breakdownCatalogQuery() string {
+	fields := make([]string, len(breakdownTables))
+	for i, spec := range breakdownTables {
+		fields[i] = fmt.Sprintf("'%s', to_regclass('%s') IS NOT NULL", spec.table, spec.table)
+	}
+	return "SELECT json_build_object(" + strings.Join(fields, ", ") + ")"
+}
 
 // parseBreakdownCatalog turns the output of breakdownCatalogQuery into the set
 // of breakdown tables that exist. An output that does not name every table on
@@ -540,10 +537,10 @@ func collectTaskManagerDBStorageBreakdown(cc *collectContext) error {
 	}
 	path := filepath.Join(dir, storageBreakdownFilename)
 	creds := resolveTaskManagerDBCredentials(cc)
-	mask := maskSecretValue(creds.password)
+	mask := creds.passwordMask()
 
 	collectedAt := time.Now()
-	result, err := runTaskManagerDBQuery(cc, dbQuery{sql: breakdownCatalogQuery, limit: effectiveDBQueryLimit(collectExecTimeout, os.Getenv)})
+	result, err := runTaskManagerDBQuery(cc, dbQuery{sql: breakdownCatalogQuery(), limit: cc.dbQueryLimit(collectExecTimeout)})
 	if err != nil {
 		if writeErr := writeDumpFailure(path, result.command, err, result.stdout, result.stderr, mask); writeErr != nil {
 			logrus.Warnf("Could not record the failed storage breakdown catalog query: %v", writeErr)
@@ -559,7 +556,7 @@ func collectTaskManagerDBStorageBreakdown(cc *collectContext) error {
 		return queryErr
 	}
 
-	limit := effectiveDBQueryLimit(collectDBQueryTimeout, os.Getenv)
+	limit := cc.dbQueryLimit(collectDBQueryTimeout)
 	breakdown := storageBreakdown{
 		CollectedAt:       formatStorageTime(collectedAt),
 		Database:          creds.database,

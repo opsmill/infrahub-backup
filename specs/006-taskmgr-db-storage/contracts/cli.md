@@ -9,7 +9,7 @@
 | `--include-task-manager-storage` | `false` | `INFRAHUB_INCLUDE_TASK_MANAGER_STORAGE` | Also collect the storage breakdown of the task manager database into `task-manager-db/storage-breakdown.json`. Each table's breakdown stops after 5 minutes. |
 
 - Registration follows `--include-backup` in [`main.go`](../../../src/cmd/infrahub-collect/main.go): a `BoolVar` on `createCmd`, bound with `viper.BindPFlag("include-task-manager-storage", ...)`, read with `viper.GetBool` into `CollectOptions.IncludeTaskManagerStorage`. The flag takes precedence over the environment variable, through the existing `INFRAHUB_` prefix binding in `ConfigureRootCommand`.
-- Help text: `Also collect the storage breakdown of the task manager database (reads every row of its largest tables; up to 5 minutes per table)`.
+- Help text: `Also collect the storage breakdown of the task manager database (reads every row of its run, state, log, event and artifact tables; up to 5 minutes per table)`.
 - `infrahub-backup` and `infrahub-taskmanager` do not change.
 
 ## No flag for the always-collected figures

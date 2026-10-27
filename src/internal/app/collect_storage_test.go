@@ -437,7 +437,7 @@ func TestTaskManagerDBStorageCollector_DefaultPassword(t *testing.T) {
 	if result.Status != collectorStatusSuccess {
 		t.Fatalf("manifest entry = %+v, want success", result)
 	}
-	if call := backend.calls[0]; call.opts == nil || call.opts.Env["PGPASSWORD"] != defaultPostgresPassword {
+	if call := backend.calls[0]; call.input != defaultPostgresPassword+"\n" {
 		t.Fatalf("the query did not use the default password %q", defaultPostgresPassword)
 	}
 
@@ -478,7 +478,7 @@ func TestTaskManagerDBStorageCollector_NotDeployed(t *testing.T) {
 // still produced. The outputs are the ones recorded in research R2 and R9.
 func TestTaskManagerDBStorageCollector_Failures(t *testing.T) {
 	statementTimeout := "ERROR:  canceling statement due to statement timeout"
-	dockerPsqlMissing := `OCI runtime exec failed: exec failed: unable to start container process: exec: "psql": executable file not found in $PATH: unknown`
+	psqlMissing := "sh: 1: exec: psql: not found"
 	badPassword := `psql: error: connection to server at "localhost" (127.0.0.1), port 5432 failed: FATAL:  password authentication failed for user "tm-owner"`
 	notRunning := "Error response from daemon: container 3f2a9c1b7d4e is not running"
 
@@ -491,7 +491,7 @@ func TestTaskManagerDBStorageCollector_Failures(t *testing.T) {
 	}{
 		{name: "PostgreSQL stops the query at its limit", stderr: statementTimeout, err: exitCodeError{code: 1}, wantReason: "timed out after 60s"},
 		{name: "the tool-side bound stops the query", err: &timeoutError{timeout: collectExecTimeout + collectDBQueryGrace}, wantReason: "timed out after 60s"},
-		{name: "psql missing in the container", stderr: dockerPsqlMissing, err: exitCodeError{code: 127}, wantReason: "psql missing: " + dockerPsqlMissing},
+		{name: "psql missing in the container", stderr: psqlMissing, err: exitCodeError{code: 127}, wantReason: "psql missing: " + psqlMissing},
 		{name: "PostgreSQL rejects the login", stderr: badPassword, err: exitCodeError{code: 2}, wantReason: "login rejected: " + badPassword},
 		{name: "container not reachable", stderr: notRunning, err: exitCodeError{code: 1}, wantReason: "not reachable: " + notRunning},
 		{name: "output that is not the storage document", stdout: "Pager usage is off.", wantReason: "query failed: could not parse the storage query output: invalid character 'P' looking for beginning of value"},
@@ -516,7 +516,7 @@ func TestTaskManagerDBStorageCollector_Failures(t *testing.T) {
 			if err != nil {
 				t.Fatalf("storage.err.txt missing from the bundle: %v", err)
 			}
-			for _, fragment := range []string{"command: psql -h localhost -U tm-owner -d tm-db", "error: " + tt.wantReason} {
+			for _, fragment := range []string{"-h localhost -U tm-owner -d tm-db", "error: " + tt.wantReason} {
 				if !strings.Contains(string(diagnostics), fragment) {
 					t.Errorf("storage.err.txt does not hold %q:\n%s", fragment, diagnostics)
 				}
@@ -525,10 +525,10 @@ func TestTaskManagerDBStorageCollector_Failures(t *testing.T) {
 	}
 }
 
-// TestTaskManagerDBStorageCollector_PasswordNeverStaged covers FR-017: when
-// kubectl or the container echoes `env PGPASSWORD=<password> psql ...` in its
-// error and output streams or in the exec error, no file of the bundle,
-// including the manifest, holds the password. It also covers a query that
+// TestTaskManagerDBStorageCollector_PasswordNeverStaged covers FR-017: the
+// password reaches psql on stdin, and if an output stream or the exec error
+// still quotes it, as `env PGPASSWORD=<password> psql ...` did when the exec
+// carried it, no file of the bundle, including the manifest, holds it. It also covers a query that
 // succeeds with output that does not parse: the runner leaves a successful
 // query's stdout unmasked, so only the collector's mask keeps the password out
 // of storage.err.txt.
@@ -571,7 +571,7 @@ func TestTaskManagerDBStorageCollector_PasswordNeverStaged(t *testing.T) {
 			if strings.Contains(result.Reason, storageCollectorPassword) {
 				t.Errorf("manifest reason holds the password: %q", result.Reason)
 			}
-			if call := backend.calls[0]; call.opts == nil || call.opts.Env["PGPASSWORD"] != storageCollectorPassword {
+			if call := backend.calls[0]; call.input != storageCollectorPassword+"\n" {
 				t.Fatalf("the query did not receive the password, so the test checks nothing")
 			}
 
@@ -714,20 +714,6 @@ func TestBreakdownQuery(t *testing.T) {
 				t.Errorf("SQL counts rows without start_time = %v, want %v:\n%s", got, tt.wantRowsWithoutStart, sql)
 			}
 		})
-	}
-}
-
-// TestBreakdownCatalogQuery checks that the catalog query asks PostgreSQL
-// about every table on the breakdown list and about no other (research R6).
-func TestBreakdownCatalogQuery(t *testing.T) {
-	for _, spec := range breakdownTables {
-		fragment := fmt.Sprintf("'%s', to_regclass('%s') IS NOT NULL", spec.table, spec.table)
-		if !strings.Contains(breakdownCatalogQuery, fragment) {
-			t.Errorf("catalog query does not hold %q:\n%s", fragment, breakdownCatalogQuery)
-		}
-	}
-	if got := strings.Count(breakdownCatalogQuery, "to_regclass("); got != len(breakdownTables) {
-		t.Errorf("catalog query checks %d tables, want the %d of the breakdown list", got, len(breakdownTables))
 	}
 }
 
@@ -1047,7 +1033,7 @@ func answerBreakdown(query string) breakdownAnswer {
 // reads (constitution principle II).
 func newBreakdownQueryBackend(t *testing.T, answer func(query string) breakdownAnswer) *dbQueryBackend {
 	t.Helper()
-	queries := map[string]string{breakdownCatalogQuery: breakdownCatalogName}
+	queries := map[string]string{breakdownCatalogQuery(): breakdownCatalogName}
 	for _, spec := range breakdownTables {
 		queries[breakdownQuery(spec)] = spec.table
 	}
@@ -1073,7 +1059,7 @@ func breakdownQueryNames(calls []dbQueryCall) []string {
 	for i, call := range calls {
 		sql := call.command[len(call.command)-1]
 		names[i] = sql
-		if sql == breakdownCatalogQuery {
+		if sql == breakdownCatalogQuery() {
 			names[i] = breakdownCatalogName
 		}
 		for _, spec := range breakdownTables {
@@ -1407,7 +1393,7 @@ func TestTaskManagerDBStorageBreakdownCollector_CatalogFails(t *testing.T) {
 			if err != nil {
 				t.Fatalf("storage-breakdown.err.txt missing from the bundle: %v", err)
 			}
-			for _, fragment := range []string{"command: psql -h localhost -U tm-owner -d tm-db", "to_regclass('events')", "error: " + tt.wantReason} {
+			for _, fragment := range []string{"-h localhost -U tm-owner -d tm-db", "to_regclass('events')", "error: " + tt.wantReason} {
 				if !strings.Contains(string(diagnostics), fragment) {
 					t.Errorf("storage-breakdown.err.txt does not hold %q:\n%s", fragment, diagnostics)
 				}
@@ -1522,9 +1508,9 @@ func TestTaskManagerDBStorageBreakdownCollector_StopsWhenInterrupted(t *testing.
 }
 
 // TestTaskManagerDBStorageBreakdownCollector_PasswordNeverStaged covers
-// FR-017: when the container echoes `env PGPASSWORD=<password> psql ...` in
-// the output of a failed query, neither the bundle files, the manifest nor
-// the progress output hold the password. It also covers a catalog query that
+// FR-017: if the output of a failed query quotes the password, as
+// `env PGPASSWORD=<password> psql ...` did when the exec carried it, neither
+// the bundle files, the manifest nor the progress output hold the password. It also covers a catalog query that
 // succeeds with output that does not parse: the runner leaves a successful
 // query's stdout unmasked, so only the collector's mask keeps the password out
 // of storage-breakdown.err.txt.
@@ -1572,7 +1558,7 @@ func TestTaskManagerDBStorageBreakdownCollector_PasswordNeverStaged(t *testing.T
 			if tt.wantReasonMasked && !strings.Contains(result.Reason, maskedValue) {
 				t.Errorf("manifest reason = %q, want the password masked", result.Reason)
 			}
-			if call := backend.calls[0]; call.opts == nil || call.opts.Env["PGPASSWORD"] != storageCollectorPassword {
+			if call := backend.calls[0]; call.input != storageCollectorPassword+"\n" {
 				t.Fatalf("the query did not receive the password, so the test checks nothing")
 			}
 			if tt.wantErrFile {

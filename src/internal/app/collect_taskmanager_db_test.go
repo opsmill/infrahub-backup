@@ -138,13 +138,41 @@ func TestResolveTaskManagerDBCredentials(t *testing.T) {
 			wantCalls: map[string]int{"task-manager": 1, taskManagerDBService: 1},
 		},
 		{
-			name: "task-manager-db user without a password falls through to the defaults",
+			name: "task-manager-db user without a password keeps the user and takes the default password",
 			env: map[string]envExecResponse{
 				"task-manager":       execFailed,
-				taskManagerDBService: {output: "POSTGRES_USER=db-owner\nPOSTGRES_DB=db-name\n"},
+				taskManagerDBService: {output: "POSTGRES_USER=db-owner\nPOSTGRES_PASSWORD_FILE=/run/secrets/pg\nPOSTGRES_DB=db-name\n"},
+			},
+			want:      taskManagerDBCredentials{user: "db-owner", password: defaultPostgresPassword, database: "db-name", source: dbCredentialsFromDatabase},
+			wantCalls: map[string]int{"task-manager": 1, taskManagerDBService: 1},
+		},
+		{
+			name: "task-manager-db password without a user logs in as postgres to the postgres database",
+			env: map[string]envExecResponse{
+				"task-manager":       execFailed,
+				taskManagerDBService: {output: "POSTGRES_PASSWORD=db-secret\n"},
+			},
+			want:      taskManagerDBCredentials{user: "postgres", password: "db-secret", database: "postgres", source: dbCredentialsFromDatabase},
+			wantCalls: map[string]int{"task-manager": 1, taskManagerDBService: 1},
+		},
+		{
+			name: "task-manager-db without a user or a password falls through to the defaults",
+			env: map[string]envExecResponse{
+				"task-manager":       execFailed,
+				taskManagerDBService: {output: "POSTGRES_DB=db-name\n"},
 			},
 			want:      taskManagerDBCredentials{user: defaultPostgresUsername, password: defaultPostgresPassword, database: defaultPostgresDatabase, source: dbCredentialsFromDefaults},
 			wantCalls: map[string]int{"task-manager": 1, taskManagerDBService: 1},
+		},
+		{
+			name: "task-manager URL without a login takes the defaults, not the operator's PostgreSQL variables",
+			operatorEnv: map[string]string{
+				"PGUSER": "op-user", "PGPASSWORD": "op-pgpassword", "PGDATABASE": "op-database",
+				"PGSERVICE": "op-service", "PGPASSFILE": "/nonexistent/pgpass",
+			},
+			env:       map[string]envExecResponse{"task-manager": {output: "PREFECT_SERVER_DATABASE_CONNECTION_URL=postgresql+asyncpg://task-manager-db:5432\n"}},
+			want:      taskManagerDBCredentials{user: defaultPostgresUsername, password: defaultPostgresPassword, database: defaultPostgresDatabase, source: dbCredentialsFromTaskManager},
+			wantCalls: map[string]int{"task-manager": 1},
 		},
 		{
 			name:      "both execs fail: defaults",
@@ -195,7 +223,7 @@ func TestResolveTaskManagerDBCredentials_ResolvesOncePerRun(t *testing.T) {
 			name: "every step tried before the defaults",
 			env: map[string]envExecResponse{
 				"task-manager":       {err: errors.New("exit status 1")},
-				taskManagerDBService: {output: "POSTGRES_USER=db-owner\n"},
+				taskManagerDBService: {output: "PATH=/usr/bin\n"},
 			},
 		},
 	}
@@ -360,27 +388,35 @@ func TestBuildPsqlCommand(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			command, env := buildPsqlCommand(creds, tt.query)
+			command, env, stdin := buildPsqlCommand(creds, tt.query)
 
 			wantCommand := []string{
-				"psql", "-h", "localhost", "-U", "tm-owner", "-d", "tm-db",
+				"sh", "-c", psqlWithPasswordFromStdin, "sh",
+				"-h", "localhost", "-U", "tm-owner", "-d", "tm-db",
 				"-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c", tt.query.sql,
 			}
 			if !slices.Equal(command, wantCommand) {
 				t.Errorf("command = %q, want %q", command, wantCommand)
 			}
-			if slices.ContainsFunc(command, func(arg string) bool { return strings.Contains(arg, creds.password) }) {
-				t.Errorf("command %q carries the password; it belongs in the environment only", command)
-			}
 
 			wantEnv := map[string]string{
-				"PGPASSWORD":        "tm-secret",
 				"PGAPPNAME":         "infrahub-collect",
 				"PGCONNECT_TIMEOUT": "10",
 				"PGOPTIONS":         tt.wantPGOptions,
 			}
 			if !maps.Equal(env, wantEnv) {
 				t.Errorf("env = %q, want %q", env, wantEnv)
+			}
+
+			// docker and kubectl pass the command and env as arguments, which
+			// other users of the host can read: the password goes on stdin.
+			if stdin != "tm-secret\n" {
+				t.Errorf("stdin = %q, want the password on its first line", stdin)
+			}
+			for _, value := range slices.Concat(command, slices.Collect(maps.Values(env))) {
+				if strings.Contains(value, creds.password) {
+					t.Errorf("argument or variable %q carries the password; it belongs on stdin only", value)
+				}
 			}
 
 			for _, name := range pgOptionsParameterNames(t, env["PGOPTIONS"]) {
@@ -411,7 +447,7 @@ func pgOptionsParameterNames(t *testing.T, pgOptions string) []string {
 	return names
 }
 
-func TestEffectiveDBQueryLimit(t *testing.T) {
+func TestDBQueryLimit(t *testing.T) {
 	tests := []struct {
 		value    string
 		want     map[time.Duration]time.Duration // base -> limit
@@ -419,6 +455,7 @@ func TestEffectiveDBQueryLimit(t *testing.T) {
 	}{
 		{value: "", want: map[time.Duration]time.Duration{collectExecTimeout: collectExecTimeout, collectDBQueryTimeout: collectDBQueryTimeout}},
 		{value: "5s", want: map[time.Duration]time.Duration{collectExecTimeout: 5 * time.Second, collectDBQueryTimeout: 5 * time.Second}},
+		{value: "90s", want: map[time.Duration]time.Duration{collectExecTimeout: collectExecTimeout, collectDBQueryTimeout: 90 * time.Second}},
 		{value: "10m", want: map[time.Duration]time.Duration{collectExecTimeout: collectExecTimeout, collectDBQueryTimeout: collectDBQueryTimeout}},
 		{value: "garbage", want: map[time.Duration]time.Duration{collectExecTimeout: collectExecTimeout, collectDBQueryTimeout: collectDBQueryTimeout}, wantWarn: true},
 		{value: "0", want: map[time.Duration]time.Duration{collectExecTimeout: collectExecTimeout, collectDBQueryTimeout: collectDBQueryTimeout}, wantWarn: true},
@@ -426,27 +463,28 @@ func TestEffectiveDBQueryLimit(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		for _, base := range []time.Duration{collectExecTimeout, collectDBQueryTimeout} {
-			t.Run(fmt.Sprintf("%s=%q base %s", dbQueryTimeoutEnvVar, tt.value, base), func(t *testing.T) {
-				getenv := func(name string) string {
-					if name == dbQueryTimeoutEnvVar {
-						return tt.value
-					}
-					return ""
-				}
+		t.Run(fmt.Sprintf("%s=%q", dbQueryTimeoutEnvVar, tt.value), func(t *testing.T) {
+			t.Setenv(dbQueryTimeoutEnvVar, tt.value)
+			cc := &collectContext{ctx: context.Background()}
+			hook := captureLogs(t)
 
-				var got time.Duration
-				logs := captureLogrus(t, func() { got = effectiveDBQueryLimit(base, getenv) })
+			// A run asks for each limit more than once, as the collectors do.
+			for _, base := range []time.Duration{collectExecTimeout, collectExecTimeout, collectDBQueryTimeout} {
+				if got := cc.dbQueryLimit(base); got != tt.want[base] {
+					t.Errorf("dbQueryLimit(%s) = %s, want %s", base, got, tt.want[base])
+				}
+			}
 
-				if got != tt.want[base] {
-					t.Errorf("effectiveDBQueryLimit(%s) = %s, want %s", base, got, tt.want[base])
+			warnings := 0
+			for _, message := range warningMessages(hook) {
+				if strings.Contains(message, dbQueryTimeoutEnvVar) {
+					warnings++
 				}
-				warned := strings.Contains(logs, "level=warning") && strings.Contains(logs, dbQueryTimeoutEnvVar)
-				if warned != tt.wantWarn {
-					t.Errorf("warning logged = %v, want %v:\n%s", warned, tt.wantWarn, logs)
-				}
-			})
-		}
+			}
+			if want := map[bool]int{false: 0, true: 1}[tt.wantWarn]; warnings != want {
+				t.Errorf("%d warnings about %s, want %d: %q", warnings, dbQueryTimeoutEnvVar, want, warningMessages(hook))
+			}
+		})
 	}
 }
 
@@ -467,8 +505,9 @@ const cnpgNotice = `Defaulted container "postgres" out of: postgres, bootstrap-c
 func TestClassifyDBQueryFailure(t *testing.T) {
 	const limit = 60 * time.Second
 	statementTimeout := "ERROR:  canceling statement due to statement timeout"
-	dockerPsqlMissing := `OCI runtime exec failed: exec failed: unable to start container process: exec: "psql": executable file not found in $PATH: unknown`
-	k8sPsqlMissing := "env: can't execute 'psql': No such file or directory"
+	dashPsqlMissing := "sh: 1: exec: psql: not found"
+	busyboxPsqlMissing := "sh: exec: line 0: psql: not found"
+	dockerShMissing := `OCI runtime exec failed: exec failed: unable to start container process: exec: "sh": executable file not found in $PATH: unknown`
 	roleMissing := `psql: error: connection to server at "localhost" (::1), port 5432 failed: FATAL:  role "nobody" does not exist`
 	badPassword := `psql: error: connection to server at "localhost" (127.0.0.1), port 5432 failed: FATAL:  password authentication failed for user "prefect"`
 	noHBAEntry := `psql: error: connection to server at "localhost" (::1), port 5432 failed: FATAL:  no pg_hba.conf entry for host "::1", user "prefect", database "prefect", no encryption`
@@ -509,44 +548,44 @@ func TestClassifyDBQueryFailure(t *testing.T) {
 			wantError:  "timed out after 60s",
 		},
 		{
-			name:       "Docker: psql not in the image",
+			name:       "dash: psql not in the image",
 			err:        exitCodeError{code: 127},
-			stderr:     dockerPsqlMissing,
+			stderr:     dashPsqlMissing,
 			wantKind:   dbQueryPsqlMissing,
-			wantDetail: dockerPsqlMissing,
-			wantError:  "psql missing: " + dockerPsqlMissing,
+			wantDetail: dashPsqlMissing,
+			wantError:  "psql missing: " + dashPsqlMissing,
 		},
 		{
-			name:       "Docker: runtime error written to stdout",
+			name:       "bash: psql not in the image",
 			err:        exitCodeError{code: 127},
-			stdout:     dockerPsqlMissing,
+			stderr:     "sh: line 1: exec: psql: not found",
 			wantKind:   dbQueryPsqlMissing,
-			wantDetail: dockerPsqlMissing,
-			wantError:  "psql missing: " + dockerPsqlMissing,
+			wantDetail: "sh: line 1: exec: psql: not found",
+			wantError:  "psql missing: sh: line 1: exec: psql: not found",
 		},
 		{
-			name:       "Kubernetes: busybox env cannot execute psql",
+			name:       "Kubernetes: busybox psql not in the image",
 			err:        exitCodeError{code: 127},
-			stderr:     k8sPsqlMissing + "\ncommand terminated with exit code 127",
+			stderr:     busyboxPsqlMissing + "\ncommand terminated with exit code 127",
 			wantKind:   dbQueryPsqlMissing,
-			wantDetail: k8sPsqlMissing,
-			wantError:  "psql missing: " + k8sPsqlMissing,
-		},
-		{
-			name:       "Kubernetes: GNU env cannot execute psql",
-			err:        exitCodeError{code: 127},
-			stderr:     "env: 'psql': No such file or directory\ncommand terminated with exit code 127",
-			wantKind:   dbQueryPsqlMissing,
-			wantDetail: "env: 'psql': No such file or directory",
-			wantError:  "psql missing: env: 'psql': No such file or directory",
+			wantDetail: busyboxPsqlMissing,
+			wantError:  "psql missing: " + busyboxPsqlMissing,
 		},
 		{
 			name:       "psql missing needs exit code 127",
 			err:        exitCodeError{code: 1},
-			stderr:     dockerPsqlMissing,
+			stderr:     dashPsqlMissing,
 			wantKind:   dbQueryFailed,
-			wantDetail: dockerPsqlMissing,
-			wantError:  "query failed: " + dockerPsqlMissing,
+			wantDetail: dashPsqlMissing,
+			wantError:  "query failed: " + dashPsqlMissing,
+		},
+		{
+			name:       "Docker: sh not in the image is not reported as psql missing",
+			err:        exitCodeError{code: 127},
+			stdout:     dockerShMissing,
+			wantKind:   dbQueryFailed,
+			wantDetail: dockerShMissing,
+			wantError:  "query failed: " + dockerShMissing,
 		},
 		{
 			name:       "unknown role",
@@ -688,16 +727,52 @@ func TestMaskSecretValue(t *testing.T) {
 	}
 }
 
-// dbQueryCall is one ExecSeparateContext call that dbQueryBackend received.
+// TestPasswordMask checks that a password equal to the user or the database
+// name is left as is, so the reason of a failed query still names them.
+func TestPasswordMask(t *testing.T) {
+	const missingDatabase = `FATAL:  database "prefect" does not exist; role "postgres"; password s3cret`
+	tests := []struct {
+		name  string
+		creds taskManagerDBCredentials
+		want  string
+	}{
+		{
+			name:  "distinct password",
+			creds: taskManagerDBCredentials{user: "postgres", password: "s3cret", database: "prefect"},
+			want:  `FATAL:  database "prefect" does not exist; role "postgres"; password ********`,
+		},
+		{
+			name:  "default login: the password is the database name",
+			creds: taskManagerDBCredentials{user: defaultPostgresUsername, password: defaultPostgresPassword, database: defaultPostgresDatabase},
+			want:  missingDatabase,
+		},
+		{
+			name:  "Docker Compose login: the password is the user name",
+			creds: taskManagerDBCredentials{user: "postgres", password: "postgres", database: "prefect"},
+			want:  missingDatabase,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.creds.passwordMask()(missingDatabase); got != tt.want {
+				t.Errorf("passwordMask()(%q) = %q, want %q", missingDatabase, got, tt.want)
+			}
+		})
+	}
+}
+
+// dbQueryCall is one ExecSeparateInputContext call that dbQueryBackend
+// received.
 type dbQueryCall struct {
 	timeout time.Duration
 	service string
 	command []string
 	opts    *ExecOptions
+	input   string
 }
 
-// dbQueryBackend answers the bounded, separated-stream exec through respond
-// and records every call, standing in for docker or kubectl exec into
+// dbQueryBackend answers the bounded, separated-stream exec with stdin through
+// respond and records every call, standing in for docker or kubectl exec into
 // task-manager-db. respond can answer by the SQL, the last argument of the
 // psql command.
 type dbQueryBackend struct {
@@ -706,13 +781,13 @@ type dbQueryBackend struct {
 	calls   []dbQueryCall
 }
 
-func (b *dbQueryBackend) ExecSeparateContext(ctx context.Context, timeout time.Duration, service string, command []string, opts *ExecOptions) (string, string, error) {
-	call := dbQueryCall{timeout: timeout, service: service, command: command, opts: opts}
+func (b *dbQueryBackend) ExecSeparateInputContext(ctx context.Context, timeout time.Duration, service string, command []string, opts *ExecOptions, input string) (string, string, error) {
+	call := dbQueryCall{timeout: timeout, service: service, command: command, opts: opts, input: input}
 	b.calls = append(b.calls, call)
 	return b.respond(call)
 }
 
-var _ separateExecer = (*dbQueryBackend)(nil)
+var _ inputExecer = (*dbQueryBackend)(nil)
 
 // newDBQueryContext returns a collect context whose task manager database
 // credentials are already resolved, so no env lookup runs.
@@ -751,7 +826,7 @@ func TestRunTaskManagerDBQuery_ExecArguments(t *testing.T) {
 			}
 
 			call := backend.calls[0]
-			wantCommand, wantEnv := buildPsqlCommand(creds, tt.query)
+			wantCommand, wantEnv, wantStdin := buildPsqlCommand(creds, tt.query)
 			if call.service != taskManagerDBService {
 				t.Errorf("service = %q, want %q", call.service, taskManagerDBService)
 			}
@@ -763,6 +838,9 @@ func TestRunTaskManagerDBQuery_ExecArguments(t *testing.T) {
 			}
 			if call.opts == nil || !maps.Equal(call.opts.Env, wantEnv) {
 				t.Errorf("exec options = %+v, want the environment %q", call.opts, wantEnv)
+			}
+			if call.input != wantStdin {
+				t.Errorf("stdin = %q, want %q", call.input, wantStdin)
 			}
 			if call.opts != nil && call.opts.User != "" {
 				t.Errorf("exec user = %q, want none", call.opts.User)
@@ -844,10 +922,10 @@ func TestRunTaskManagerDBQuery_Timeouts(t *testing.T) {
 	}
 }
 
-// TestRunTaskManagerDBQuery_MasksPassword covers FR-017: on Kubernetes the exec
-// runs `env PGPASSWORD=<password> psql ...`, and kubectl or the container can
-// echo it in the error and both streams. When the query fails, the password
-// must reach none of the strings the runner returns, since they all go to the
+// TestRunTaskManagerDBQuery_MasksPassword covers FR-017: the password reaches
+// psql on stdin, and if the error or either stream still quotes it, as
+// `env PGPASSWORD=<password> psql ...` did when the exec carried it, it must
+// reach none of the strings the runner returns, since they all go to the
 // failure diagnostics.
 func TestRunTaskManagerDBQuery_MasksPassword(t *testing.T) {
 	const password = "Sup3r-Secr3t!"
@@ -867,20 +945,13 @@ func TestRunTaskManagerDBQuery_MasksPassword(t *testing.T) {
 			stdout:   echoed,
 			stderr:   cnpgNotice + "\nOCI runtime exec failed: exec: \"" + echoed + "\": executable file not found in $PATH\ncommand terminated with exit code 127",
 			err:      exitCodeError{code: 127},
-			wantKind: dbQueryPsqlMissing,
+			wantKind: dbQueryFailed,
 		},
 		{
 			name:     "echoed in the Go error only",
 			creds:    taskManagerDBCredentials{user: "tm-owner", password: password, database: "tm-db"},
 			err:      fmt.Errorf("kubectl exec %s: %w", echoed, exitCodeError{code: 1}),
 			wantKind: dbQueryFailed,
-		},
-		{
-			name:     "user and password are the same word, as in the Docker Compose default",
-			creds:    taskManagerDBCredentials{user: password, password: password, database: "tm-db"},
-			stderr:   `psql: error: connection to server at "localhost" (::1), port 5432 failed: FATAL:  password authentication failed for user "` + password + `"`,
-			err:      exitCodeError{code: 2},
-			wantKind: dbQueryLoginRejected,
 		},
 	}
 
@@ -917,25 +988,50 @@ func TestRunTaskManagerDBQuery_MasksPassword(t *testing.T) {
 					t.Errorf("%s holds the password: %q", what, value)
 				}
 			}
-			if call := backend.calls[0]; call.opts == nil || call.opts.Env["PGPASSWORD"] != password {
-				t.Errorf("the backend did not receive the unmasked password in PGPASSWORD")
+			if call := backend.calls[0]; call.input != password+"\n" {
+				t.Errorf("the backend did not receive the unmasked password on stdin")
 			}
 		})
 	}
 }
 
+// TestRunTaskManagerDBQuery_DefaultLoginKeepsNames checks the reason of a
+// failed query with the default login, whose password "prefect" is also the
+// database name: the reason and the command still name the database.
+func TestRunTaskManagerDBQuery_DefaultLoginKeepsNames(t *testing.T) {
+	creds := taskManagerDBCredentials{user: defaultPostgresUsername, password: defaultPostgresPassword, database: defaultPostgresDatabase}
+	const stderr = `psql: error: connection to server at "localhost" (::1), port 5432 failed: FATAL:  database "prefect" does not exist`
+	backend := &dbQueryBackend{
+		fakeCollectBackend: *newFakeCollectBackend(),
+		respond: func(dbQueryCall) (string, string, error) {
+			return "", stderr, exitCodeError{code: 2}
+		},
+	}
+	cc := newDBQueryContext(t, backend, creds)
+
+	result, err := runTaskManagerDBQuery(cc, dbQuery{sql: "SELECT 1", limit: collectExecTimeout})
+
+	if err == nil || err.Error() != "login rejected: "+stderr {
+		t.Errorf("error = %v, want the reason with the database name: %q", err, "login rejected: "+stderr)
+	}
+	if command := strings.Join(result.command, " "); !strings.Contains(command, "-d prefect") {
+		t.Errorf("command = %q, want it to name the database", command)
+	}
+}
+
 // TestRunTaskManagerDBQuery_SuccessKeepsQueryResult covers the other half of
 // the masking contract: a successful query's stdout is the query result, which
-// never holds the command line, so it comes back unmasked. With the default
-// password "prefect", masking it would turn the database name and event names
-// into "********". The command and stderr stay masked.
+// never holds the password, so it comes back unmasked. With a password that is
+// a common word, such as "flow-run", masking it would turn event names into
+// "prefect.********.Completed". The command and stderr stay masked.
 func TestRunTaskManagerDBQuery_SuccessKeepsQueryResult(t *testing.T) {
-	creds := taskManagerDBCredentials{user: "prefect", password: defaultPostgresPassword, database: "prefect"}
+	const password = "flow-run"
+	creds := taskManagerDBCredentials{user: "prefect", password: password, database: "prefect"}
 	const stdout = `{"database" : "prefect", "events" : ["prefect.flow-run.Completed"]}`
 	backend := &dbQueryBackend{
 		fakeCollectBackend: *newFakeCollectBackend(),
 		respond: func(dbQueryCall) (string, string, error) {
-			return stdout, cnpgNotice + "\nenv PGPASSWORD=prefect psql", nil
+			return stdout, cnpgNotice + "\nenv PGPASSWORD=" + password + " psql", nil
 		},
 	}
 	cc := newDBQueryContext(t, backend, creds)
@@ -947,10 +1043,10 @@ func TestRunTaskManagerDBQuery_SuccessKeepsQueryResult(t *testing.T) {
 	if result.stdout != stdout {
 		t.Errorf("stdout = %q, want the query result unchanged: %q", result.stdout, stdout)
 	}
-	if command := strings.Join(result.command, " "); strings.Contains(command, defaultPostgresPassword) {
+	if command := strings.Join(result.command, " "); strings.Contains(command, password) {
 		t.Errorf("command holds the password: %q", command)
 	}
-	if strings.Contains(result.stderr, defaultPostgresPassword) || !strings.Contains(result.stderr, "PGPASSWORD="+maskedValue) {
+	if strings.Contains(result.stderr, password) || !strings.Contains(result.stderr, "PGPASSWORD="+maskedValue) {
 		t.Errorf("stderr = %q, want the password masked", result.stderr)
 	}
 }
@@ -964,10 +1060,10 @@ func TestRunTaskManagerDBQuery_BackendWithoutBoundedExec(t *testing.T) {
 	if !errors.As(err, &queryErr) || queryErr.kind != dbQueryFailed {
 		t.Fatalf("error = %v, want a *dbQueryError of kind %q", err, dbQueryFailed)
 	}
-	if !strings.Contains(err.Error(), "does not support bounded exec") {
-		t.Errorf("error = %q, want it to say the backend cannot run a bounded exec", err.Error())
+	if !strings.Contains(err.Error(), "does not support bounded exec with stdin") {
+		t.Errorf("error = %q, want it to say the backend cannot run a bounded exec with stdin", err.Error())
 	}
-	if len(result.command) == 0 || result.command[0] != "psql" {
+	if len(result.command) < 3 || result.command[2] != psqlWithPasswordFromStdin {
 		t.Errorf("result command = %q, want the psql command for the failure diagnostics", result.command)
 	}
 }

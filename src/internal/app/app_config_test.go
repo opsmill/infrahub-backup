@@ -159,7 +159,7 @@ func TestPrefectConnectionFromEnv(t *testing.T) {
 }
 
 // unparsablePrefectPassword holds an unencoded "#", so a connection URL with
-// it does not parse, and pgx's parse error quotes the part before the "#"
+// it does not parse, and Go's parse error quotes the part before the "#"
 // (`invalid port ":Kx9q" after host`). Both parts are words of no other text,
 // so finding either in a warning means the password leaked.
 const unparsablePrefectPassword = "Kx9q#Wz3v"
@@ -274,7 +274,7 @@ func TestParsePrefectConnection(t *testing.T) {
 		user     string
 		password string
 		database string
-		ok       bool
+		wantErr  string
 	}{
 		{
 			name:     "async driver suffix",
@@ -282,7 +282,6 @@ func TestParsePrefectConnection(t *testing.T) {
 			user:     "prefect",
 			password: "secret",
 			database: "prefect",
-			ok:       true,
 		},
 		{
 			name:     "plain postgres scheme",
@@ -290,30 +289,53 @@ func TestParsePrefectConnection(t *testing.T) {
 			user:     "owner",
 			password: "s3cr3t",
 			database: "server",
-			ok:       true,
+		},
+		{
+			name:     "percent-encoded password",
+			connStr:  "postgresql+asyncpg://owner:p%40ss%2Fw%23rd%25@db:5432/prefect",
+			user:     "owner",
+			password: "p@ss/w#rd%",
+			database: "prefect",
+		},
+		{
+			name:     "query parameters are ignored",
+			connStr:  "postgres://prefect:secret@task-manager-db:5432/prefect?sslmode=disable",
+			user:     "prefect",
+			password: "secret",
+			database: "prefect",
+		},
+		{
+			name:    "URL without a login or a database leaves them empty",
+			connStr: "postgresql+asyncpg://task-manager-db:5432",
 		},
 		{
 			name:    "invalid port",
 			connStr: "postgresql+asyncpg://prefect:secret@task-manager-db:badport/prefect",
+			wantErr: "the text after the host name is not a port number",
 		},
 		{
-			name:    "invalid sslmode",
-			connStr: "postgres://prefect:secret@task-manager-db:5432/prefect?sslmode=bogus",
+			name:    "not a PostgreSQL URL",
+			connStr: "sqlite+aiosqlite:///var/lib/prefect/prefect.db",
+			wantErr: "the URL does not start with postgresql:// or postgres://",
 		},
 		{
 			name:    "empty string",
 			connStr: "",
+			wantErr: "the URL does not start with postgresql:// or postgres://",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			user, password, database, ok := parsePrefectConnection(tt.connStr)
-			if ok != tt.ok {
-				t.Fatalf("ok = %v, want %v", ok, tt.ok)
-			}
-			if !tt.ok {
+			user, password, database, err := parsePrefectConnection(tt.connStr)
+			if tt.wantErr != "" {
+				if err == nil || !strings.HasPrefix(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want one starting with %q", err, tt.wantErr)
+				}
 				return
+			}
+			if err != nil {
+				t.Fatalf("error = %v, want none", err)
 			}
 			if user != tt.user {
 				t.Errorf("user = %q, want %q", user, tt.user)
@@ -323,6 +345,54 @@ func TestParsePrefectConnection(t *testing.T) {
 			}
 			if database != tt.database {
 				t.Errorf("database = %q, want %q", database, tt.database)
+			}
+		})
+	}
+}
+
+// TestParsePrefectConnection_IgnoresOperatorPostgresEnv checks that a part
+// the URL leaves out stays empty: nothing comes from the PostgreSQL variables,
+// password file or service file of the machine that runs the tool.
+func TestParsePrefectConnection_IgnoresOperatorPostgresEnv(t *testing.T) {
+	t.Setenv("PGUSER", "op-user")
+	t.Setenv("PGPASSWORD", "op-password")
+	t.Setenv("PGDATABASE", "op-database")
+	t.Setenv("PGSERVICE", "op-service")
+	t.Setenv("PGPASSFILE", "/nonexistent/pgpass")
+
+	user, password, database, err := parsePrefectConnection("postgresql+asyncpg://task-manager-db:5432")
+	if err != nil || user != "" || password != "" || database != "" {
+		t.Errorf("parsePrefectConnection() = %q, %q, %q, %v, want empty parts and no error", user, password, database, err)
+	}
+}
+
+// TestParsePrefectConnection_ErrorQuotesNoPart checks that each problem is
+// named, and that the error quotes no part of the URL, which holds the
+// password.
+func TestParsePrefectConnection_ErrorQuotesNoPart(t *testing.T) {
+	tests := []struct {
+		name     string
+		password string
+		wantErr  string
+	}{
+		{name: "unencoded hash", password: unparsablePrefectPassword, wantErr: "the text after the host name is not a port number"},
+		{name: "unencoded slash", password: "Kx9q/Wz3v", wantErr: "the text after the host name is not a port number"},
+		{name: "percent sign without two hexadecimal digits", password: "Kx9q%zzWz3v", wantErr: "a % sign is not followed by two hexadecimal digits"},
+		{name: "unexpanded variable reference", password: "${PREFECT_API_DATABASE_PASSWORD}", wantErr: "the user name or password holds a character that is not allowed"},
+		{name: "space", password: "Kx9q Wz3v", wantErr: "the user name or password holds a character that is not allowed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			url := unparsablePrefectURL(tt.password)
+			_, _, _, err := parsePrefectConnection(url)
+			if err == nil || !strings.HasPrefix(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %v, want one starting with %q", err, tt.wantErr)
+			}
+			parts := strings.FieldsFunc(tt.password, func(r rune) bool { return strings.ContainsRune("#/% ${}", r) })
+			for _, secret := range slices.Concat([]string{url, tt.password}, parts) {
+				if strings.Contains(err.Error(), secret) {
+					t.Errorf("error %q holds %q from the connection URL", err.Error(), secret)
+				}
 			}
 		})
 	}

@@ -92,6 +92,9 @@ type collectContext struct {
 	// dbCredentials caches the task manager database login, resolved on first
 	// use by resolveTaskManagerDBCredentials, so a run looks it up once.
 	dbCredentials *taskManagerDBCredentials
+	// dbQueryLimitOverride caches the value of dbQueryTimeoutEnvVar, 0 when it
+	// is not set, read on first use by dbQueryLimit.
+	dbQueryLimitOverride *time.Duration
 }
 
 // setArtifact hands the orchestrator a filesystem artifact reference to

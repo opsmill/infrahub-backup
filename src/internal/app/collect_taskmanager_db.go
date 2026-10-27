@@ -1,6 +1,7 @@
 package app
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"os"
@@ -59,9 +60,9 @@ type taskManagerDBCredentials struct {
 // in order (research R8):
 //  1. a Prefect connection URL in the operator's environment;
 //  2. a Prefect connection URL in the task-manager container's environment;
-//  3. POSTGRES_USER, POSTGRES_PASSWORD, and POSTGRES_DB or POSTGRES_DATABASE in
-//     the task-manager-db container's environment, which still answers when the
-//     Prefect server is down (critique X1);
+//  3. POSTGRES_USER or POSTGRES_PASSWORD, and POSTGRES_DB or
+//     POSTGRES_DATABASE, in the task-manager-db container's environment, which
+//     still answers when the Prefect server is down (critique X1);
 //  4. the defaults the backup tool uses.
 //
 // It neither reads nor changes iops.config, so the backup tool's credentials
@@ -112,68 +113,58 @@ func lookupTaskManagerDBCredentials(cc *collectContext) taskManagerDBCredentials
 
 // credentialsFromPrefectConnection parses the Prefect connection URL that the
 // variable name holds in source. A URL that does not parse is ignored with a
-// warning, and the lookup moves on to the next source. pgx fills a part the
-// URL leaves out from PGUSER, PGPASSWORD or PGDATABASE in the operator's
-// environment, then the user from the operating-system user that runs the
-// tool and the password from the password file (~/.pgpass or PGPASSFILE). A
-// password or database still empty after that takes the default, as
-// applyPostgresDefaults does for the backup tool; the user takes it only when
-// the operating-system user cannot be read.
+// warning, and the lookup moves on to the next source. A user, password or
+// database that the URL leaves out takes the default, as applyPostgresDefaults
+// does for the backup tool.
 func credentialsFromPrefectConnection(name, conn, source string) (taskManagerDBCredentials, bool) {
-	user, password, database, ok := parsePrefectConnection(conn)
-	if !ok {
-		warnUnparsablePrefectConnection(name, source)
+	user, password, database, err := parsePrefectConnection(conn)
+	if err != nil {
+		warnUnparsablePrefectConnection(name, source, err)
 		return taskManagerDBCredentials{}, false
 	}
 	return taskManagerDBCredentials{
-		user:     valueOrDefault(user, defaultPostgresUsername),
-		password: valueOrDefault(password, defaultPostgresPassword),
-		database: valueOrDefault(database, defaultPostgresDatabase),
+		user:     cmp.Or(user, defaultPostgresUsername),
+		password: cmp.Or(password, defaultPostgresPassword),
+		database: cmp.Or(database, defaultPostgresDatabase),
 		source:   source,
 	}, true
 }
 
 // credentialsFromPostgresEnv reads the database owner from the `env` output of
 // task-manager-db. The official image names the database POSTGRES_DB, the
-// bitnami image POSTGRES_DATABASE. The login is used only when both the user
-// and the password are set.
+// bitnami image POSTGRES_DATABASE. The login is used when the user or the
+// password is set. Without POSTGRES_USER, both images create the user
+// postgres; without POSTGRES_PASSWORD, as when the image reads the password
+// from POSTGRES_PASSWORD_FILE, the password takes the default.
 func credentialsFromPostgresEnv(envOutput string) (taskManagerDBCredentials, bool) {
 	user := envOutputValue(envOutput, "POSTGRES_USER")
 	password := envOutputValue(envOutput, "POSTGRES_PASSWORD")
-	if user == "" || password == "" {
-		logrus.Debugf("The %s environment does not name both a database user and a password", taskManagerDBService)
+	if user == "" && password == "" {
+		logrus.Debugf("The %s environment names neither a database user nor a password", taskManagerDBService)
 		return taskManagerDBCredentials{}, false
 	}
 
-	database := envOutputValue(envOutput, "POSTGRES_DB")
-	if database == "" {
-		database = envOutputValue(envOutput, "POSTGRES_DATABASE")
-	}
+	user = cmp.Or(user, defaultPostgresUsername)
 	return taskManagerDBCredentials{
 		user:     user,
-		password: password,
-		// Without POSTGRES_DB, the official image names the database after POSTGRES_USER.
-		database: valueOrDefault(database, user),
+		password: cmp.Or(password, defaultPostgresPassword),
+		// Without POSTGRES_DB, the official image names the database after the user.
+		database: cmp.Or(envOutputValue(envOutput, "POSTGRES_DB"), envOutputValue(envOutput, "POSTGRES_DATABASE"), user),
 		source:   dbCredentialsFromDatabase,
 	}, true
 }
 
-// envOutputValue returns the value of the variable name in `env` output, or ""
-// when it is not set.
-func envOutputValue(envOutput, name string) string {
-	for _, line := range strings.Split(envOutput, "\n") {
-		if after, ok := strings.CutPrefix(line, name+"="); ok {
-			return after
-		}
+// passwordMask returns the mask for the password of c (research R10). A
+// password equal to the user or the database name is not masked: that name is
+// in the command and in PostgreSQL's error messages anyway, and masking it
+// would hide only the name, for example the database in
+// `database "prefect" does not exist` with the default login, whose password
+// is also "prefect".
+func (c taskManagerDBCredentials) passwordMask() func(string) string {
+	if c.password == c.user || c.password == c.database {
+		return maskSecretValue("")
 	}
-	return ""
-}
-
-func valueOrDefault(value, fallback string) string {
-	if value == "" {
-		return fallback
-	}
-	return value
+	return maskSecretValue(c.password)
 }
 
 // dbQuery is one query against the task manager database: the SQL, the time
@@ -199,19 +190,26 @@ var dbSessionParameterAllowlist = []string{
 	"max_parallel_workers_per_gather",
 }
 
-// buildPsqlCommand returns the psql command and environment for one query in
-// task-manager-db (research R1, R2, R4). PostgreSQL enforces both the read-only
-// transaction and the time limit through PGOPTIONS, so a query the tool stops
-// waiting for still stops on the server. Breakdown queries also turn off hash
-// joins, merge joins and parallel workers, so their joins use the primary-key
-// index and never write temporary files to a disk that may be nearly full.
-// The password goes in PGPASSWORD, never in the psql arguments. The exec still
-// carries it on the docker or kubectl command line, as
-// `-e PGPASSWORD=<password>` or `env PGPASSWORD=<password>` (ADR 0008), so
-// runTaskManagerDBQuery masks it.
-func buildPsqlCommand(creds taskManagerDBCredentials, q dbQuery) ([]string, map[string]string) {
-	command := []string{
-		"psql", "-h", "localhost", "-U", creds.user, "-d", creds.database,
+// psqlWithPasswordFromStdin is the shell script that buildPsqlCommand runs in
+// task-manager-db: it reads the password from the first line of stdin into
+// PGPASSWORD, then runs psql with the script's arguments. The password is then
+// in the environment of psql only, and in no argument of the docker, kubectl
+// or psql process (ADR 0008).
+const psqlWithPasswordFromStdin = `IFS= read -r PGPASSWORD; export PGPASSWORD; exec psql "$@"`
+
+// buildPsqlCommand returns the command, the environment and the stdin for one
+// psql query in task-manager-db (research R1, R2, R4). PostgreSQL enforces
+// both the read-only transaction and the time limit through PGOPTIONS, so a
+// query the tool stops waiting for still stops on the server. Breakdown
+// queries also turn off hash joins, merge joins and parallel workers, so their
+// joins use the primary-key index and never write temporary files to a disk
+// that may be nearly full. The password goes on stdin, which
+// psqlWithPasswordFromStdin reads into PGPASSWORD. The environment variables
+// in env are not secret: docker and kubectl pass them as arguments.
+func buildPsqlCommand(creds taskManagerDBCredentials, q dbQuery) (command []string, env map[string]string, stdin string) {
+	command = []string{
+		"sh", "-c", psqlWithPasswordFromStdin, "sh",
+		"-h", "localhost", "-U", creds.user, "-d", creds.database,
 		"-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c", q.sql,
 	}
 
@@ -224,13 +222,12 @@ func buildPsqlCommand(creds taskManagerDBCredentials, q dbQuery) ([]string, map[
 		options = append(options, "enable_hashjoin=off", "enable_mergejoin=off", "max_parallel_workers_per_gather=0")
 	}
 
-	env := map[string]string{
-		"PGPASSWORD":        creds.password,
+	env = map[string]string{
 		"PGAPPNAME":         taskManagerDBAppName,
 		"PGCONNECT_TIMEOUT": "10",
 		"PGOPTIONS":         "-c " + strings.Join(options, " -c "),
 	}
-	return command, env
+	return command, env, creds.password + "\n"
 }
 
 // statementTimeoutMillis renders a limit for statement_timeout, rounded up to a
@@ -239,22 +236,36 @@ func statementTimeoutMillis(limit time.Duration) int64 {
 	return max(1, (limit + time.Millisecond - 1).Milliseconds())
 }
 
-// effectiveDBQueryLimit returns the time limit of one query: base, or the value
-// of dbQueryTimeoutEnvVar when it is shorter. The variable lets the end-to-end
+// dbQueryLimit returns the time limit of one query: base, or the value of
+// dbQueryTimeoutEnvVar when it is shorter. The variable lets the end-to-end
 // tests reach both limits in seconds and can never raise one
-// (contracts/cli.md). A value that does not parse or is not positive is
+// (contracts/cli.md). It is read on the first call of a run and cached on the
+// collect context, so a value that is not valid is reported once.
+func (cc *collectContext) dbQueryLimit(base time.Duration) time.Duration {
+	if cc.dbQueryLimitOverride == nil {
+		override := dbQueryLimitOverrideFromEnv(os.Getenv)
+		cc.dbQueryLimitOverride = &override
+	}
+	if *cc.dbQueryLimitOverride > 0 {
+		return min(base, *cc.dbQueryLimitOverride)
+	}
+	return base
+}
+
+// dbQueryLimitOverrideFromEnv returns the value of dbQueryTimeoutEnvVar, or 0
+// when it is not set. A value that does not parse or is not positive is
 // ignored with a warning.
-func effectiveDBQueryLimit(base time.Duration, getenv func(string) string) time.Duration {
+func dbQueryLimitOverrideFromEnv(getenv func(string) string) time.Duration {
 	value := strings.TrimSpace(getenv(dbQueryTimeoutEnvVar))
 	if value == "" {
-		return base
+		return 0
 	}
 	limit, err := time.ParseDuration(value)
 	if err != nil || limit <= 0 {
-		logrus.Warnf("Ignoring %s=%q: not a positive duration; using the %s limit", dbQueryTimeoutEnvVar, value, formatCommandTimeout(base))
-		return base
+		logrus.Warnf("Ignoring %s=%q: not a positive duration; using the default limits", dbQueryTimeoutEnvVar, value)
+		return 0
 	}
-	return min(base, limit)
+	return limit
 }
 
 // dbQueryErrorKind names the cause of a failed task manager database query
@@ -331,13 +342,10 @@ func (m lineMarker) matches(line string) bool {
 // Error output the classifier recognizes (research R2, R8, R9).
 var (
 	dbStatementTimeoutMarkers = []lineMarker{{"canceling statement due to statement timeout"}}
-	// How the Docker runtime, busybox env and GNU env report a missing psql.
-	dbPsqlMissingMarkers = []lineMarker{
-		{"executable file not found"},
-		{"can't execute 'psql'"},
-		{"psql: not found"},
-		{"'psql': no such file or directory"},
-	}
+	// How sh reports a missing psql when psqlWithPasswordFromStdin runs it:
+	// `sh: 1: exec: psql: not found` in dash, `sh: line 1: exec: psql: not
+	// found` in bash, `sh: exec: line 0: psql: not found` in busybox.
+	dbPsqlMissingMarkers   = []lineMarker{{"psql: not found"}}
 	dbLoginRejectedMarkers = []lineMarker{
 		{"password authentication failed"},
 		{"no pg_hba.conf entry"},
@@ -443,9 +451,9 @@ func anyLineMatches(lines []string, markers []lineMarker) bool {
 
 // maskSecretValue returns a mask that replaces every occurrence of secret with
 // maskedValue (research R10). It adds value-based masking to the key-name
-// masking of ADR 0004: on Kubernetes the exec carries the password as
-// `env PGPASSWORD=<password>`, which error output can echo. An empty secret
-// masks nothing.
+// masking of ADR 0004. The password reaches psql on stdin and is in no command
+// line, so no known output quotes it; the mask keeps it out of the bundle if
+// an error message does. An empty secret masks nothing.
 func maskSecretValue(secret string) func(string) string {
 	if secret == "" {
 		return func(s string) string { return s }
@@ -471,30 +479,30 @@ type dbQueryResult struct {
 // failed (FR-017).
 func runTaskManagerDBQuery(cc *collectContext, q dbQuery) (dbQueryResult, error) {
 	creds := resolveTaskManagerDBCredentials(cc)
-	mask := maskSecretValue(creds.password)
-	command, env := buildPsqlCommand(creds, q)
+	mask := creds.passwordMask()
+	command, env, stdin := buildPsqlCommand(creds, q)
 
 	result := dbQueryResult{command: make([]string, len(command))}
 	for i, arg := range command {
 		result.command[i] = mask(arg)
 	}
 
-	// Only the bounded exec is allowed on the collect path; there is no
-	// fallback to the unbounded Exec.
-	execer, ok := cc.backend.(separateExecer)
+	// Only the bounded exec with stdin is allowed on the collect path; there is
+	// no fallback to the unbounded Exec, or to an exec that would carry the
+	// password in its arguments.
+	execer, ok := cc.backend.(inputExecer)
 	if !ok {
 		return result, &dbQueryError{
 			kind:   dbQueryFailed,
-			detail: fmt.Sprintf("%s environment does not support bounded exec for database queries", cc.backend.Name()),
+			detail: fmt.Sprintf("%s environment does not support bounded exec with stdin for database queries", cc.backend.Name()),
 			limit:  q.limit,
 		}
 	}
 
-	stdout, stderr, err := execer.ExecSeparateContext(cc.ctx, q.limit+collectDBQueryGrace, taskManagerDBService, command, &ExecOptions{Env: env})
+	stdout, stderr, err := execer.ExecSeparateInputContext(cc.ctx, q.limit+collectDBQueryGrace, taskManagerDBService, command, &ExecOptions{Env: env}, stdin)
 	result.stderr = mask(stderr)
 	if err != nil {
-		// A failed query's stdout goes to <file>.err.txt as diagnostics, where
-		// it may echo the exec command line and with it the password.
+		// A failed query's stdout goes to <file>.err.txt as diagnostics.
 		result.stdout = mask(stdout)
 		// Classify the unmasked output, so a password that happens to be a word
 		// of the error message cannot hide the cause, then mask the detail.

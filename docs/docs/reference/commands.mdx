@@ -328,7 +328,7 @@ infrahub-collect create [flags]
 |------|-------------|---------|---------------------|
 | `--log-lines <n>` | Maximum log lines collected per container | `100000` | `INFRAHUB_LOG_LINES` |
 | `--include-backup` | Also create a backup using the standard backup behavior | `false` | `INFRAHUB_INCLUDE_BACKUP` |
-| `--include-task-manager-storage` | Also collect the storage breakdown of the task manager database (reads every row of its largest tables; up to 5 minutes per table; do not use while the task manager is being upgraded) | `false` | `INFRAHUB_INCLUDE_TASK_MANAGER_STORAGE` |
+| `--include-task-manager-storage` | Also collect the storage breakdown of the task manager database (reads every row of its run, state, log, event and artifact tables; up to 5 minutes per table; do not use while the task manager is being upgraded) | `false` | `INFRAHUB_INCLUDE_TASK_MANAGER_STORAGE` |
 | `--include-queries` | Include database query logs (may contain customer data) | `false` | `INFRAHUB_INCLUDE_QUERIES` |
 | `--benchmark` | Run the OpsMill benchmark and include its results (requires image download; skipped with a warning if unavailable) | `false` | `INFRAHUB_BENCHMARK` |
 

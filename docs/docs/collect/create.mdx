@@ -229,7 +229,7 @@ The benchmark requires downloading the OpsMill benchmark container image and mea
 
 ### Include the storage breakdown of the task manager database
 
-Every bundle holds the size of the task manager database and of each of its tables, in `task-manager-db/storage.json`. If support asks which kinds of records use the space in the largest tables, collect a new bundle with the storage breakdown:
+Every bundle holds the size of the task manager database and of each of its tables, in `task-manager-db/storage.json`. If support asks which kinds of records use the space in the run, state, log, event and artifact tables, collect a new bundle with the storage breakdown:
 
 ```bash
 infrahub-collect create --include-task-manager-storage
@@ -282,7 +282,7 @@ Run the statement as a superuser, or as the role that `infrahub-collect` logged 
 
 Only a superuser can end the session of a superuser.
 
-`infrahub-collect` logs in with the user of the Prefect database connection URL (`PREFECT_SERVER_DATABASE_CONNECTION_URL` or `PREFECT_API_DATABASE_CONNECTION_URL`) in the environment where you run it, or else in the `task-manager` container. Without such a URL, it logs in with the `POSTGRES_USER` and `POSTGRES_PASSWORD` of `task-manager-db`, and without these, with the user `postgres`.
+`infrahub-collect` logs in with the user of the Prefect database connection URL (`PREFECT_SERVER_DATABASE_CONNECTION_URL` or `PREFECT_API_DATABASE_CONNECTION_URL`) in the environment where you run it, or else in the `task-manager` container. Without such a URL, it logs in with the `POSTGRES_USER` of `task-manager-db`, and without that variable, with the user `postgres`.
 
 In the commands below, replace `<user>` with one of these roles and `<database>` with the task manager database:
 

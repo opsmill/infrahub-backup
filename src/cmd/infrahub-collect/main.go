@@ -83,7 +83,7 @@ func addCreateFlags(createCmd *cobra.Command) {
 	createCmd.Flags().BoolVar(&includeBackup, "include-backup", false, "Also create a backup using the standard backup behavior")
 	createCmd.Flags().BoolVar(&includeQueries, "include-queries", false, "Include database query logs (may contain customer data)")
 	createCmd.Flags().BoolVar(&benchmark, "benchmark", false, "Run the OpsMill benchmark and include its results (requires image download; skipped with a warning if unavailable)")
-	createCmd.Flags().BoolVar(&includeTaskManagerStorage, "include-task-manager-storage", false, "Also collect the storage breakdown of the task manager database (reads every row of its largest tables; up to 5 minutes per table)")
+	createCmd.Flags().BoolVar(&includeTaskManagerStorage, "include-task-manager-storage", false, "Also collect the storage breakdown of the task manager database (reads every row of its run, state, log, event and artifact tables; up to 5 minutes per table)")
 	createCmd.Flags().IntVar(&telemetryDays, "telemetry-days", 30, "Look-back window in days for the Infrahub product-telemetry export")
 
 	// Bind create flags to Viper for environment variable support (INFRAHUB_<FLAG_NAME>)

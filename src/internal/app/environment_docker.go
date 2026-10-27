@@ -117,6 +117,7 @@ var (
 	_ contextExecer         = (*DockerBackend)(nil)
 	_ replicaExecer         = (*DockerBackend)(nil)
 	_ separateExecer        = (*DockerBackend)(nil)
+	_ inputExecer           = (*DockerBackend)(nil)
 	_ separateReplicaExecer = (*DockerBackend)(nil)
 	_ contextCopier         = (*DockerBackend)(nil)
 	_ replicaCopier         = (*DockerBackend)(nil)
@@ -143,6 +144,12 @@ func (d *DockerBackend) ExecReplica(ctx context.Context, timeout time.Duration, 
 // the command's diagnostics being mixed into it.
 func (d *DockerBackend) ExecSeparateContext(ctx context.Context, timeout time.Duration, service string, command []string, opts *ExecOptions) (string, string, error) {
 	return d.executor.runCommandSeparateContext(ctx, timeout, "docker", d.buildExecArgs(service, command, opts)...)
+}
+
+// ExecSeparateInputContext is ExecSeparateContext with input written to the
+// command's stdin, which docker compose exec forwards to the command.
+func (d *DockerBackend) ExecSeparateInputContext(ctx context.Context, timeout time.Duration, service string, command []string, opts *ExecOptions, input string) (string, string, error) {
+	return d.executor.runCommandSeparateInputContext(ctx, timeout, input, "docker", d.buildExecArgs(service, command, opts)...)
 }
 
 // ExecReplicaSeparate is ExecReplica with stdout and stderr kept apart (see

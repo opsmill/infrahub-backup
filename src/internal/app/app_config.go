@@ -1,12 +1,12 @@
 package app
 
 import (
+	"errors"
 	"fmt"
+	"net/url"
 	"os"
-	"regexp"
 	"strings"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/sirupsen/logrus"
 )
 
@@ -111,16 +111,14 @@ func (iops *InfrahubOps) fetchNeo4jCredentials() error {
 		return fmt.Errorf("could not read the Neo4j credentials from the infrahub-server container: %w", err)
 	}
 
-	for _, line := range strings.Split(envOut, "\n") {
-		if after, ok := strings.CutPrefix(line, "INFRAHUB_DB_DATABASE="); ok && iops.config.Neo4jDatabase == "" {
-			iops.config.Neo4jDatabase = after
-		}
-		if after, ok := strings.CutPrefix(line, "INFRAHUB_DB_USERNAME="); ok && iops.config.Neo4jUsername == "" {
-			iops.config.Neo4jUsername = after
-		}
-		if after, ok := strings.CutPrefix(line, "INFRAHUB_DB_PASSWORD="); ok && iops.config.Neo4jPassword == "" {
-			iops.config.Neo4jPassword = after
-		}
+	if iops.config.Neo4jDatabase == "" {
+		iops.config.Neo4jDatabase = envOutputValue(envOut, "INFRAHUB_DB_DATABASE")
+	}
+	if iops.config.Neo4jUsername == "" {
+		iops.config.Neo4jUsername = envOutputValue(envOut, "INFRAHUB_DB_USERNAME")
+	}
+	if iops.config.Neo4jPassword == "" {
+		iops.config.Neo4jPassword = envOutputValue(envOut, "INFRAHUB_DB_PASSWORD")
 	}
 
 	return nil
@@ -146,21 +144,23 @@ func (iops *InfrahubOps) fetchPostgresCredentials() error {
 // returned so newer Prefect naming wins regardless of the order the container
 // reports its environment.
 func prefectConnectionFromEnv(envOutput string) (name, conn string) {
-	connections := map[string]string{}
-	for _, line := range strings.Split(envOutput, "\n") {
-		for _, name := range prefectConnectionEnvVars {
-			if after, ok := strings.CutPrefix(line, name+"="); ok {
-				connections[name] = after
-			}
-		}
-	}
-
 	for _, name := range prefectConnectionEnvVars {
-		if conn := connections[name]; conn != "" {
+		if conn := envOutputValue(envOutput, name); conn != "" {
 			return name, conn
 		}
 	}
 	return "", ""
+}
+
+// envOutputValue returns the value of the variable name in `env` output, or ""
+// when it is not set.
+func envOutputValue(envOutput, name string) string {
+	for _, line := range strings.Split(envOutput, "\n") {
+		if after, ok := strings.CutPrefix(line, name+"="); ok {
+			return after
+		}
+	}
+	return ""
 }
 
 // applyNeo4jDefaults applies default Neo4j credentials
@@ -197,9 +197,9 @@ func (iops *InfrahubOps) applyPrefectConnection(name, source, connStr string) {
 		return
 	}
 
-	user, password, database, ok := parsePrefectConnection(connStr)
-	if !ok {
-		warnUnparsablePrefectConnection(name, source)
+	user, password, database, err := parsePrefectConnection(connStr)
+	if err != nil {
+		warnUnparsablePrefectConnection(name, source, err)
 		return
 	}
 
@@ -215,34 +215,54 @@ func (iops *InfrahubOps) applyPrefectConnection(name, source, connStr string) {
 }
 
 // warnUnparsablePrefectConnection reports that the Prefect connection URL in
-// the variable name, found in source, does not parse and is ignored. An
-// operator who sets the URL to fix a rejected login learns this only from the
-// warning, as no flag turns on debug logging. The warning names the variable
-// and the source only: the URL holds the password, and the parse error can
-// quote part of it.
-func warnUnparsablePrefectConnection(name, source string) {
-	logrus.Warnf("Ignoring %s from the %s: not a valid PostgreSQL URL; percent-encode special characters in the password", name, source)
+// the variable name, found in source, does not parse and is ignored, and why.
+// An operator who sets the URL to fix a rejected login learns this only from
+// the warning, as no flag turns on debug logging. The warning never quotes the
+// URL, which holds the password: err is a parsePrefectConnection error, which
+// names the problem only.
+func warnUnparsablePrefectConnection(name, source string, err error) {
+	logrus.Warnf("Ignoring %s from the %s: not a valid PostgreSQL URL: %v", name, source, err)
 }
 
 // parsePrefectConnection extracts the user, password and database from a
-// Prefect database connection string. The SQLAlchemy driver suffix
-// (postgresql+asyncpg://) is normalized to postgres:// first so pgx accepts it.
-// ok is false for an empty or unparsable string. The parse error is not
-// returned: pgx redacts the password in the URL it quotes, but the cause it
-// adds can quote part of the password, for example `invalid port ":pa" after
+// Prefect database connection URL, such as
+// postgresql+asyncpg://<user>:<password>@<host>:<port>/<database>. It reads
+// the URL only: a part the URL leaves out is returned empty, and nothing is
+// taken from the environment or the files of the machine that runs the tool.
+// The error names what does not parse without quoting the URL, because Go's
+// parse errors can quote part of the password: `invalid port ":pa" after
 // host` for a password that starts with "pa" followed by an unencoded "#" or
 // "/".
-func parsePrefectConnection(connStr string) (user, password, database string, ok bool) {
-	if connStr == "" {
-		return "", "", "", false
+func parsePrefectConnection(connStr string) (user, password, database string, err error) {
+	u, parseErr := url.Parse(connStr)
+	if parseErr != nil {
+		return "", "", "", errors.New(prefectConnectionParseProblem(parseErr))
 	}
-
-	re := regexp.MustCompile("postgres(.*)://(.*)")
-	normalized := re.ReplaceAllString(connStr, "postgres://$2")
-
-	connConfig, err := pgx.ParseConfig(normalized)
-	if err != nil {
-		return "", "", "", false
+	if !strings.HasPrefix(u.Scheme, "postgres") {
+		return "", "", "", errors.New("the URL does not start with postgresql:// or postgres://")
 	}
-	return connConfig.User, connConfig.Password, connConfig.Database, true
+	if u.User != nil {
+		user = u.User.Username()
+		password, _ = u.User.Password()
+	}
+	return user, password, strings.TrimPrefix(u.Path, "/"), nil
+}
+
+// prefectConnectionParseProblem names the part of a connection URL that
+// url.Parse rejected, in words that quote no part of the URL.
+func prefectConnectionParseProblem(err error) string {
+	var escapeErr url.EscapeError
+	var hostErr url.InvalidHostError
+	switch {
+	case errors.As(err, &escapeErr):
+		return "a % sign is not followed by two hexadecimal digits; write a % in the password as %25"
+	case errors.As(err, &hostErr):
+		return "the host name holds a character that is not allowed"
+	case strings.Contains(err.Error(), "invalid userinfo"):
+		return "the user name or password holds a character that is not allowed, or a ${...} reference; percent-encode special characters in the password"
+	case strings.Contains(err.Error(), "invalid port"):
+		return "the text after the host name is not a port number, as when the password holds an unencoded / or #; percent-encode special characters in the password"
+	default:
+		return "the URL does not parse"
+	}
 }
