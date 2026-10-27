@@ -1,6 +1,6 @@
 # CloudNativePG primary-pod check (T046)
 
-Manual check of [quickstart.md](quickstart.md) scenario 6 and [FR-014](spec.md): on Kubernetes with a CloudNativePG cluster, the task manager database queries run on the primary pod. Run on 2026-10-26 with `bin/infrahub-collect` built by `make build` from commit e93ff50.
+Manual check of [quickstart.md](quickstart.md) scenario 6 and [FR-014](spec.md): on Kubernetes with a CloudNativePG cluster, the task manager database queries run on the primary pod. Run on 2026-10-26 with `bin/infrahub-collect` built by `make build` from commit e93ff50, before the branch was rebased on `main`. After the rebase, the same changes are commit 6e0413a.
 
 ## Setup
 
@@ -27,8 +27,10 @@ Manual check of [quickstart.md](quickstart.md) scenario 6 and [FR-014](spec.md):
 - The database password, a random value chosen for this check, is in no bundle file and not in the progress output of any run.
 - Tables with a non-null `last_autovacuum`: 1 in run a and 5 in run b with `taskmanagerdb-1` as primary; 0 in run c, 17 seconds after the switchover, because the new primary had not run autovacuum yet; 1 in run d. Right after a switchover, this quickstart check does not show which pod answered. The `kubectl exec` target does.
 
-## Pod lookup for Neo4j on this branch
+## Pod lookup for Neo4j before and after the rebase on `main`
 
-This branch does not contain the pod lookup changes on `main` (f673202, 1e0e522), which try `infrahub/service` first. In runs a to c, `logs/database` and `database-logs` copied `/logs/neo4j.log` from the CloudNativePG primary pod, because CloudNativePG labels its pods `app.kubernetes.io/component=database`. The manifest records them as `success`.
+The binary of runs a to c did not contain the pod lookup changes on `main` (f673202, 1e0e522), which try `infrahub/service` first. In runs a to c, `logs/database` and `database-logs` copied `/logs/neo4j.log` from the CloudNativePG primary pod, because CloudNativePG labels its pods `app.kubernetes.io/component=database`. The manifest recorded them as `success`.
 
-Run d used a binary built from the merge of this branch with `origin/main` (fa67557). It copied the Neo4j logs from `infrahub-database-0`, and it ran the `task-manager-db` queries on the primary pod, as runs a to c did. The merge has conflicts in `dev/knowledge/infrahub-collect.md` and `src/internal/app/environment_kubernetes_test.go`. The binary build does not read either file.
+Run d used a binary built from the merge of the branch with `origin/main` (fa67557). It copied the Neo4j logs from `infrahub-database-0`, and it ran the `task-manager-db` queries on the primary pod, as runs a to c did.
+
+On 2026-10-27, the branch was rebased on `origin/main` at fa67557, the commit that run d merged, so the branch now contains f673202 and 1e0e522. The check was not run again after the rebase. Run d did not include the review fixes 66e4670, 0b34492 and ef24df0, which came after the check. These fixes add warnings for a connection URL that does not parse, change the database name when the credentials come from `task-manager-db`, and correct documentation. They do not change how the tool finds the pod. In this check, the credentials came from the `task-manager` pod.

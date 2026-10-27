@@ -9,6 +9,7 @@
 - Head commit before this report: `493749d`
 - Wall-clock time: about 2 hours 55 minutes, from 2026-10-26T17:45Z to 2026-10-26T20:40Z
 - Status: DONE. All 46 tasks are ticked, and every new or modified test has local-pass evidence.
+- Rebased on `origin/main` at `fa67557` on 2026-10-27. Unless a line says that it ran after the rebase, the commit SHAs in this report are from before the rebase. The section "Rebase on `main`" lists the SHA of each commit after the rebase.
 
 ## Results of each chunk
 
@@ -23,7 +24,7 @@
 | 7 | Phase 4, end-to-end tests (T031 to T034), plus the deferred T021 assertion | 4 | 4 / 0 / 0 | `90e745b` | `task-worker` runs Prefect 3.6.13. The T034 lock is held for up to 300 seconds instead of 120, because the lock also makes the existing `task-manager-state` collector wait for its 60-second limit, so a run takes about 85 seconds. |
 | 8 | Phase 5, user documentation (T035 to T039) | 5 | 5 / 0 / 0 | `384c0f6` | Added a paragraph to "Safe to run at any time" in `index.mdx`. Vale reports "autovacuum" as a spelling error, so the pages say "manual and automatic vacuum times". |
 | 9 | Phase 5, ADR, developer pages, AGENTS.md, changelog (T040 to T044) | 5 | 5 / 0 / 0 | `fabe088`, `e93ff50` | `AGENTS.md` does not list flags where it describes the collect commands. `plan.md` calls the masking function `maskSecret`; the code calls it `maskSecretValue`. |
-| 10 | Phase 5, final gates and the CloudNativePG check (T045, T046) | 2 | 2 / 0 / 0 | `8c0813f` | Scenarios 2 to 4 were cited from chunk 7's runs because no Go or test file changed after them. Scenario 5 ran on a real Compose stack. `quickstart.md` scenario 5 was edited (see "Decisions made without the user"). The branch lacks `main`'s pod lookup fixes `f673202` and `1e0e522`. |
+| 10 | Phase 5, final gates and the CloudNativePG check (T045, T046) | 2 | 2 / 0 / 0 | `8c0813f` | Scenarios 2 to 4 were cited from chunk 7's runs because no Go or test file changed after them. Scenario 5 ran on a real Compose stack. `quickstart.md` scenario 5 was edited (see "Decisions made without the user"). Before the rebase, the branch lacked `main`'s pod lookup fixes `f673202` and `1e0e522`. |
 | R | Review fixes (not a tasks.md phase) | n/a | 7 fixes ✅ | `bad601f`, `b5e28d6`, `493749d` | pgx error text quotes part of the password, so the backup tool's warning does not restore the parse cause. The signatures of `prefectConnectionFromEnv` and `applyPrefectConnection` changed. |
 
 ## Tasks not completed
@@ -42,8 +43,12 @@ Command keys used in the table:
 - U6: `go test -count=1 -tags untested_go_version ./src/internal/app/ -run '^(TestApplyPrefectConnection|TestPrefectConnectionFromEnv|TestLoadCredentialsFromEnvironment_WarnsOnUnparsableURL|TestFetchPostgresCredentials_WarnsOnUnparsableURL|TestResolveTaskManagerDBCredentials|TestResolveTaskManagerDBCredentials_WarnsOnUnparsableURL|TestTaskManagerDBStorageCollector_PasswordNeverStaged|TestTaskManagerDBStorageBreakdownCollector_PasswordNeverStaged)$' -v` (the review-fix subagent reported this run as "these 8 tests"; the regex lists the eight tests it named)
 - E1: `uv run pytest -v -m docker tests/e2e/test_docker_collect.py -p no:cacheprovider` (run by the orchestrator on `493749d`)
 - E2: `VCLUSTER_DIR=<scratch>/vcluster/config.json uv run pytest -v -m k8s tests/e2e/test_k8s_collect.py` (run in chunk 7 on `90e745b`)
+- U7: `GOTOOLCHAIN=go1.25.0 go test -count=1 ./...` (run after the rebase on `6f21171`)
+- U8: `GOTOOLCHAIN=go1.25.0 go test -count=1 ./src/internal/app/ -run '^(TestGetPodForServiceWith_SelectsPrimaryPod|TestPodResolutionWithPostgresOperatorLabels)$' -v` (run after the rebase on `6f21171`)
+- E3: `GOTOOLCHAIN=go1.25.0 uv run pytest -v -m docker tests/e2e/test_docker_collect.py -p no:cacheprovider` (run after the rebase on `6f21171`)
+- E4: `GOTOOLCHAIN=go1.25.0 VCLUSTER_DIR=<scratch>/vcluster/config.json uv run pytest -v -m k8s tests/e2e/test_k8s_collect.py -p no:cacheprovider` (run after the rebase on `6f21171`)
 
-All unit tests ran on go1.27.3 linux/amd64 with fake backends and no containers. A test that was modified in a later chunk is listed with its latest passing run.
+All unit tests ran on go1.27.3 linux/amd64 with fake backends and no containers, except U7 and U8, which ran on go1.25.0 linux/amd64. A test that was modified in a later chunk is listed with its latest passing run. The end-to-end tests and `TestGetPodForServiceWith_SelectsPrimaryPod` are listed with their runs after the rebase. A conflict was resolved in the file of that unit test.
 
 | Test id | Type | Run command | Passed at (ISO 8601) | Environment context | Verbatim pass line |
 |---|---|---|---|---|---|
@@ -66,7 +71,7 @@ All unit tests ran on go1.27.3 linux/amd64 with fake backends and no containers.
 | `TestRunTaskManagerDBQuery_SuccessKeepsQueryResult` | unit | U3 | 2026-10-26T18:18:48Z | n/a | `--- PASS: TestRunTaskManagerDBQuery_SuccessKeepsQueryResult (0.00s)` |
 | `TestRunTaskManagerDBQuery_BackendWithoutBoundedExec` | unit | U2 | 2026-10-26T18:06:50Z | n/a | `--- PASS: TestRunTaskManagerDBQuery_BackendWithoutBoundedExec (0.00s)` |
 | `TestSkipWhenTaskManagerDBAbsent` (4 subtests) | unit | U2 | 2026-10-26T18:06:50Z | n/a | `--- PASS: TestSkipWhenTaskManagerDBAbsent (0.00s)` |
-| `TestGetPodForServiceWith_SelectsPrimaryPod` (4 subtests) | unit | U2 | 2026-10-26T18:06:50Z | n/a | `--- PASS: TestGetPodForServiceWith_SelectsPrimaryPod (0.00s)` |
+| `TestGetPodForServiceWith_SelectsPrimaryPod` (4 subtests) | unit | U8 | 2026-10-27T21:22:04Z | n/a, HEAD `6f21171` | `--- PASS: TestGetPodForServiceWith_SelectsPrimaryPod (0.00s)` |
 | `TestParseStorageReport` | unit | U3 | 2026-10-26T18:18:48Z | n/a | `--- PASS: TestParseStorageReport (0.00s)` |
 | `TestParseStorageReport_SizesAddUp` | unit | U3 | 2026-10-26T18:18:48Z | n/a | `--- PASS: TestParseStorageReport_SizesAddUp (0.00s)` |
 | `TestParseStorageReport_Nulls` (2 subtests) | unit | U3 | 2026-10-26T18:18:48Z | n/a | `--- PASS: TestParseStorageReport_Nulls (0.00s)` |
@@ -101,16 +106,22 @@ All unit tests ran on go1.27.3 linux/amd64 with fake backends and no containers.
 | `TestCollectBundle_RegisteredPlan` (existing, modified) | unit | U5 | 2026-10-26T18:48:45Z | n/a | `--- PASS: TestCollectBundle_RegisteredPlan (0.00s)` |
 | `TestResolveCollectOptions_IncludeTaskManagerStorage` (5 subtests) | unit | U4 | 2026-10-26T18:48:45Z | n/a | `--- PASS: TestResolveCollectOptions_IncludeTaskManagerStorage (0.00s)` |
 | `TestAddCreateFlags_IncludeTaskManagerStorageHelp` | unit | U4 | 2026-10-26T18:48:45Z | n/a | `--- PASS: TestAddCreateFlags_IncludeTaskManagerStorageHelp (0.00s)` |
-| `tests/e2e/test_docker_collect.py::TestDockerCollect::test_collect_full_bundle` (modified) | e2e | E1 | 2026-10-26T20:32:18Z to 20:38:10Z (run window) | Compose project `infrahub-test-bbb226a4`, `task-manager-db` image `postgres:18-alpine`, HEAD `493749d` | `tests/e2e/test_docker_collect.py::TestDockerCollect::test_collect_full_bundle PASSED [ 14%]` |
-| `tests/e2e/test_docker_collect.py::TestDockerCollect::test_collect_task_manager_storage_breakdown` (new) | e2e | E1 | 2026-10-26T20:32:18Z to 20:38:10Z (run window) | as above | `tests/e2e/test_docker_collect.py::TestDockerCollect::test_collect_task_manager_storage_breakdown PASSED [ 57%]` |
-| `tests/e2e/test_docker_collect.py::TestDockerCollect::test_collect_task_manager_storage_time_limit` (new) | e2e | E1 | 2026-10-26T20:32:18Z to 20:38:10Z (run window) | as above | `tests/e2e/test_docker_collect.py::TestDockerCollect::test_collect_task_manager_storage_time_limit PASSED [ 71%]` |
-| `tests/e2e/test_docker_collect.py::TestDockerCollect::test_collect_project_selection_without_flag` (unchanged; affected by the `tests/helpers/bundle.py` change) | e2e | E1 | 2026-10-26T20:32:18Z to 20:38:10Z (run window) | as above | `tests/e2e/test_docker_collect.py::TestDockerCollect::test_collect_project_selection_without_flag PASSED [ 28%]` |
-| `tests/e2e/test_docker_collect.py::TestDockerCollect::test_collect_log_lines_flag_and_env` (unchanged; affected by the helper change) | e2e | E1 | 2026-10-26T20:32:18Z to 20:38:10Z (run window) | as above | `tests/e2e/test_docker_collect.py::TestDockerCollect::test_collect_log_lines_flag_and_env PASSED [ 42%]` |
-| `tests/e2e/test_docker_collect.py::TestDockerCollect::test_collect_degraded_cache` (unchanged; affected by the helper change) | e2e | E1 | 2026-10-26T20:32:18Z to 20:38:10Z (run window) | as above | `tests/e2e/test_docker_collect.py::TestDockerCollect::test_collect_degraded_cache PASSED [ 85%]` |
-| `tests/e2e/test_docker_collect.py::TestDockerCollect::test_collect_include_backup` (unchanged; affected by the helper change) | e2e | E1 | 2026-10-26T20:32:18Z to 20:38:10Z (run window) | as above | `tests/e2e/test_docker_collect.py::TestDockerCollect::test_collect_include_backup PASSED [100%]` |
-| `tests/e2e/test_k8s_collect.py::test_collect_k8s_bundle` (modified) | e2e | E2 | 2026-10-26T19:11:31Z to 19:13:15Z (run window) | vcluster `pytest-a94f0bc0-3e5f-4ac8-a992-61492595c4b0`, kubeconfig `/tmp/pytest-of-root/pytest-2072/vcluster0/kubeconfig`, default Helm chart, HEAD `90e745b` | `tests/e2e/test_k8s_collect.py::test_collect_k8s_bundle PASSED            [100%]` |
+| `tests/e2e/test_docker_collect.py::TestDockerCollect::test_collect_full_bundle` (modified) | e2e | E3 | 2026-10-27T21:21:13Z to 21:27:07Z (run window) | Docker Compose project created by the test fixture (its name is not in the log), HEAD `6f21171` | `tests/e2e/test_docker_collect.py::TestDockerCollect::test_collect_full_bundle PASSED [ 14%]` |
+| `tests/e2e/test_docker_collect.py::TestDockerCollect::test_collect_task_manager_storage_breakdown` (new) | e2e | E3 | 2026-10-27T21:21:13Z to 21:27:07Z (run window) | as above | `tests/e2e/test_docker_collect.py::TestDockerCollect::test_collect_task_manager_storage_breakdown PASSED [ 57%]` |
+| `tests/e2e/test_docker_collect.py::TestDockerCollect::test_collect_task_manager_storage_time_limit` (new) | e2e | E3 | 2026-10-27T21:21:13Z to 21:27:07Z (run window) | as above | `tests/e2e/test_docker_collect.py::TestDockerCollect::test_collect_task_manager_storage_time_limit PASSED [ 71%]` |
+| `tests/e2e/test_docker_collect.py::TestDockerCollect::test_collect_project_selection_without_flag` (unchanged; affected by the `tests/helpers/bundle.py` change) | e2e | E3 | 2026-10-27T21:21:13Z to 21:27:07Z (run window) | as above | `tests/e2e/test_docker_collect.py::TestDockerCollect::test_collect_project_selection_without_flag PASSED [ 28%]` |
+| `tests/e2e/test_docker_collect.py::TestDockerCollect::test_collect_log_lines_flag_and_env` (unchanged; affected by the helper change) | e2e | E3 | 2026-10-27T21:21:13Z to 21:27:07Z (run window) | as above | `tests/e2e/test_docker_collect.py::TestDockerCollect::test_collect_log_lines_flag_and_env PASSED [ 42%]` |
+| `tests/e2e/test_docker_collect.py::TestDockerCollect::test_collect_degraded_cache` (unchanged; affected by the helper change) | e2e | E3 | 2026-10-27T21:21:13Z to 21:27:07Z (run window) | as above | `tests/e2e/test_docker_collect.py::TestDockerCollect::test_collect_degraded_cache PASSED [ 85%]` |
+| `tests/e2e/test_docker_collect.py::TestDockerCollect::test_collect_include_backup` (unchanged; affected by the helper change) | e2e | E3 | 2026-10-27T21:21:13Z to 21:27:07Z (run window) | as above | `tests/e2e/test_docker_collect.py::TestDockerCollect::test_collect_include_backup PASSED [100%]` |
+| `tests/e2e/test_k8s_collect.py::test_collect_k8s_bundle` (modified) | e2e | E4 | 2026-10-27T21:27:07Z to 21:28:51Z (run window) | vcluster `pytest-78891b09-4469-4d90-8f1f-b266e8f2336f`, kubeconfig `/tmp/pytest-of-root/pytest-2082/vcluster0/kubeconfig`, default Helm chart, HEAD `6f21171` | `tests/e2e/test_k8s_collect.py::test_collect_k8s_bundle PASSED            [100%]` |
 
-The Docker summary line of E1 was `=================== 7 passed, 1 warning in 350.17s (0:05:50) ===================`. The Kubernetes test ran on `90e745b`, before the review fixes. The decisions section explains why it was not run again.
+Before the rebase, the Docker summary line of E1 was `=================== 7 passed, 1 warning in 350.17s (0:05:50) ===================`, and the Kubernetes test ran on `90e745b` (E2), before the review fixes. After the rebase, on `6f21171`:
+
+- E3: `=================== 7 passed, 1 warning in 351.66s (0:05:51) ===================`
+- E4: `=================== 1 passed, 1 warning in 101.75s (0:01:41) ===================`
+- U7: `ok  	infrahub-ops/src/internal/app	3.254s`, and `ok` for `src/cmd/infrahub-backup`, `src/cmd/infrahub-collect` and `src/internal/updater`.
+
+In E3 and E4, the one warning is a deprecation warning that the `kr8s` library raises for `asyncio.iscoroutinefunction`.
 
 Checks that are not committed tests:
 
@@ -177,6 +188,8 @@ The review ran six aspects, one after another: code, errors, tests, types, comme
 - The Docker end-to-end file was run again after the review fixes (E1). The Kubernetes test was not run again, for two reasons:
   - Its test code did not change after `90e745b`.
   - The Go changes after it only add warnings for URLs that do not parse, fix the database-name fallback in the third credential source, and change comments. On the default Helm chart, the credentials come from the `task-manager` environment. This was confirmed on kind in T046.
+
+  After the rebase on `main`, both end-to-end files were run again on `6f21171` (E3 and E4), so the Kubernetes test now also covers the review fixes. The CloudNativePG check (T046) was not run again.
 - The review-fix subagent did not restore a parse cause in the backup tool's warning. pgx error text can quote part of the password, for example `invalid port ":pa" after host`.
 - The review-fix subagent changed the signatures of `prefectConnectionFromEnv` and `applyPrefectConnection` to pass the variable name and its source.
 - The documentation fix states two facts that the review-fix subagent could not quote from a source:
@@ -184,15 +197,58 @@ The review ran six aspects, one after another: code, errors, tests, types, comme
   - Infrahub's Docker Compose uses the official PostgreSQL image. `docker ps` showed `postgres:18-alpine` for `task-manager-db` during run E1.
 - The `speckit-checkpoint-commit` skill does not exist in this repository, so every chunk committed with `git commit`.
 
+## Rebase on `main`
+
+On 2026-10-27, the branch was rebased from `d4e4b34` to `origin/main` at `fa67557`, so it now contains the pod lookup fixes `f673202` and `1e0e522`. Each commit kept its original committer name and date. Two commits had conflicts. In both, the two sides had added text at the same place, so the resolution keeps both:
+
+- `src/internal/app/environment_kubernetes_test.go` (`6e591d5`): `main` added `TestPodResolutionWithPostgresOperatorLabels` and the commit added `TestGetPodForServiceWith_SelectsPrimaryPod`. The file keeps the test from `main` first. The commit no longer adds the `slices` import, because `main` already adds it.
+- `dev/knowledge/infrahub-collect.md` (`fabe088`): `main` added a paragraph to the telemetry section and the commit added the section "Task manager database storage". The page keeps the paragraph from `main` first.
+
+`git range-diff` shows that the other 22 commits apply the same changes as before. The branch changes the same files as before the rebase.
+
+| Before the rebase | After the rebase | Commit |
+|---|---|---|
+| `44bdfa8` | `982913b` | docs(specs): add spec for task manager database storage figures |
+| `c984826` | `6961ad0` | docs(specs): add plan for task manager database storage figures |
+| `d8a8a91` | `5e67dac` | docs(specs): apply critique to task manager database storage plan |
+| `c1881ed` | `4ae32b6` | docs(specs): add tasks for task manager database storage figures |
+| `a8b9c76` | `3766fb6` | docs(specs): add PRD alignment check for task manager database storage |
+| `5dcda69` | `af580e6` | chore(specs): record green baseline for task manager database storage |
+| `30f30e5` | `e9955f8` | refactor(app): extract Prefect connection parsers |
+| `a47de65` | `4533bda` | feat(collect): resolve task manager database credentials |
+| `629a155` | `8668b59` | feat(collect): run read-only, time-limited queries in task-manager-db |
+| `6e591d5` | `400e0d8` | test(k8s): cover primary pod selection for task-manager-db |
+| `c7fa7d2` | `5193416` | fix(collect): keep successful task manager database query output unmasked |
+| `464e169` | `be9e381` | feat(collect): report task manager database storage in every bundle |
+| `1eccf40` | `44ea644` | test(e2e): check task manager database storage figures in bundles |
+| `7472b37` | `ea93016` | feat(collect): add --include-task-manager-storage |
+| `b48075e` | `0e452c1` | feat(collect): break down the largest task manager tables by record kind |
+| `90e745b` | `36eeb17` | test(e2e): check the task manager storage breakdown and its time limit |
+| `384c0f6` | `58b66d3` | docs(collect): document the task manager database storage figures |
+| `fabe088` | `9f26631` | docs(dev): record database-enforced query limits for task manager queries |
+| `e93ff50` | `6e0413a` | chore(changelog): add fragment for task manager database storage |
+| `8c0813f` | `cc507d9` | chore(specs): record final gates for task manager database storage |
+| `bad601f` | `66e4670` | fix(collect): warn when a task manager connection URL does not parse |
+| `b5e28d6` | `0b34492` | fix(collect): name the task-manager-db database after POSTGRES_USER by default |
+| `493749d` | `ef24df0` | docs(collect): correct lock and query-termination guidance |
+| `3c1f7cd` | `6f21171` | docs(specs): add implementation report for task manager database storage |
+
+Checks on `6f21171`, the head after the rebase, all with `GOTOOLCHAIN=go1.25.0`:
+
+- `go build ./...` and `go vet ./...` passed.
+- golangci-lint v2.7.2 reported `0 issues.`
+- U7 passed (see "Local-pass evidence").
+- rumdl reported no issues in the changed documentation pages, `dev/knowledge/infrahub-collect.md` and `AGENTS.md`.
+- Both end-to-end files passed again (E3 and E4).
+
 ## Suggested next steps
 
-1. Rebase the branch on `origin/main` before opening a pull request. The branch lacks the pod lookup fixes `f673202` and `1e0e522`. Without them, when CloudNativePG is present, the Neo4j log collectors read the PostgreSQL primary pod (seen in T046). Expect conflicts in `dev/knowledge/infrahub-collect.md` and `src/internal/app/environment_kubernetes_test.go`. Then run the gates and both end-to-end files again.
-2. Open the pull request.
+1. Open the pull request.
    - Paste [t046-cnpg-check.md](t046-cnpg-check.md) into the description.
    - Mark the high-risk area: spawning processes with credentials in `task-manager-db`, covered by FR-017 and research R10.
-3. Decide on the deferred Medium findings:
+2. Decide on the deferred Medium findings:
    - Write `storage-breakdown.<table>.err.txt` for a failed table. This changes `contracts/manifest-outcomes.md` and the bundle layout checks.
    - Record why each credential source was skipped.
    - Make the T034 lock cleanup robust.
-4. Change scenario 4 of `quickstart.md` to hold the lock for longer than the run takes (about 85 seconds), as T034 does.
-5. After the merge, run `speckit-opsmill-extract` on this spec directory if the project wants the knowledge extracted.
+3. Change scenario 4 of `quickstart.md` to hold the lock for longer than the run takes (about 85 seconds), as T034 does.
+4. After the merge, run `speckit-opsmill-extract` on this spec directory if the project wants the knowledge extracted.
