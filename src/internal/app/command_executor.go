@@ -109,11 +109,20 @@ func (ce *CommandExecutor) runCommandContext(ctx context.Context, timeout time.D
 // JSON document). The returned error is a *timeoutError when the timeout
 // expired.
 func (ce *CommandExecutor) runCommandSeparateContext(ctx context.Context, timeout time.Duration, name string, args ...string) (string, string, error) {
+	return ce.runCommandSeparateInputContext(ctx, timeout, "", name, args...)
+}
+
+// runCommandSeparateInputContext is runCommandSeparateContext with input
+// written to the command's stdin. An empty input leaves stdin empty.
+func (ce *CommandExecutor) runCommandSeparateInputContext(ctx context.Context, timeout time.Duration, input string, name string, args ...string) (string, string, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	var stdout, stderr bytes.Buffer
 	cmd := exec.CommandContext(cctx, name, args...)
+	if input != "" {
+		cmd.Stdin = strings.NewReader(input)
+	}
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 

@@ -4,7 +4,9 @@ Covers spec 003-collect-tool US1 (quickstart scenario 5): archive integrity,
 manifest schema conformance, one log file per replica (task-worker scaled to
 2), previous-container logs for an induced restart, bundle layout per
 contracts/bundle-layout.md, and read-only collection (SC-003: zero pod
-restarts or scale events caused by the run).
+restarts or scale events caused by the run). Also covers spec
+006-taskmgr-db-storage quickstart scenario 6: the bundle holds the storage
+figures of the task manager database.
 """
 
 import json
@@ -16,6 +18,7 @@ import pytest
 from tests.helpers.bundle import (
     assert_bundle_layout,
     assert_collector_outcomes,
+    assert_storage_collected,
     find_bundle,
     read_bundle_archive,
     validate_manifest_schema,
@@ -284,6 +287,11 @@ async def test_collect_k8s_bundle(infrahub_k8s, collect_binary, tmp_path):
         assert previous_log in worker_logs, (
             f"Expected {previous_log} for the restarted container, found: {sorted(worker_logs)}"
         )
+
+        # 11. Storage figures of the task manager database (spec
+        # 006-taskmgr-db-storage FR-001, FR-014): collected through kubectl
+        # exec in the task-manager-db pod, valid against storage.schema.json.
+        assert_storage_collected(bundle_path, file_names, manifest)
     finally:
         # Leave the shared session cluster as we found it
         _scale_deployment(kubeconfig, namespace, deployment, original_replicas)
