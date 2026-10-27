@@ -84,7 +84,7 @@ func initPlakarContext(cfg *PlakarConfig) (*kcontext.KContext, error) {
 //  2. AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY environment variables
 //
 // TLS defaults to true (secure). It is disabled when:
-//   - URL contains userinfo (backward compat — typically local MinIO), or
+//   - URL contains userinfo (backward compat — typically a local S3-compatible server), or
 //   - INFRAHUB_S3_ENDPOINT starts with http://
 func storeConfig(repoPath string) map[string]string {
 	location := repoPath

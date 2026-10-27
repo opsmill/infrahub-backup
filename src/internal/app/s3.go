@@ -57,8 +57,8 @@ func NewS3Client(cfg *S3Config) (*S3Client, error) {
 		region = "us-east-1"
 	}
 
-	// Default to AWS S3; a custom endpoint targets MinIO, GCS, or other
-	// S3-compatible storage.
+	// Default to AWS S3; a custom endpoint targets GCS or other S3-compatible
+	// storage.
 	host := "s3.amazonaws.com"
 	secure := true
 	pathStyle := false
@@ -70,7 +70,7 @@ func NewS3Client(cfg *S3Config) (*S3Client, error) {
 		}
 		host = u.Host
 		secure = u.Scheme != "http"
-		// Path-style addressing is required for MinIO and most S3-compatible services.
+		// Path-style addressing is required for most S3-compatible services.
 		pathStyle = true
 		logrus.Debugf("Using custom S3 endpoint: %s", cfg.Endpoint)
 	}
