@@ -32,7 +32,7 @@ func ConfigureRootCommand(cmd *cobra.Command, app *InfrahubOps) {
 	// S3 configuration flags
 	cmd.PersistentFlags().StringVar(&cfg.S3.Bucket, "s3-bucket", cfg.S3.Bucket, "S3 bucket name for backup storage")
 	cmd.PersistentFlags().StringVar(&cfg.S3.Prefix, "s3-prefix", cfg.S3.Prefix, "S3 key prefix (path within bucket)")
-	cmd.PersistentFlags().StringVar(&cfg.S3.Endpoint, "s3-endpoint", cfg.S3.Endpoint, "Custom S3 endpoint URL (for MinIO or S3-compatible storage)")
+	cmd.PersistentFlags().StringVar(&cfg.S3.Endpoint, "s3-endpoint", cfg.S3.Endpoint, "Custom S3 endpoint URL (for S3-compatible storage)")
 	cmd.PersistentFlags().StringVar(&cfg.S3.Region, "s3-region", cfg.S3.Region, "AWS region for S3 bucket")
 
 	bind := func(name string) {
