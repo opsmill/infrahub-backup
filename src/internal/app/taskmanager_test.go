@@ -47,6 +47,16 @@ func TestTaskManagerOwnsRetention(t *testing.T) {
 	}{
 		{name: "before 1.13", help: flowRunsHelpBefore113, want: false},
 		{name: "from 1.13", help: flowRunsHelpFrom113, want: true},
+		{
+			name: "colored help from 1.13",
+			help: "│ \x1b[1;36m-\x1b[0m\x1b[1;36m-rewrite\x1b[0m  Return unused disk space. │",
+			want: true,
+		},
+		{
+			name: "colored legacy option still owns retention",
+			help: "--rewrite  \x1b[1;36m-\x1b[0m\x1b[1;36m-days-to-keep\x1b[0m INTEGER",
+			want: false,
+		},
 		{name: "no help", help: "", want: false},
 	}
 	for _, tc := range cases {

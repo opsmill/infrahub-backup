@@ -82,6 +82,7 @@ func (iops *InfrahubOps) FlushFlowRuns(request FlowRunsRequest) error {
 // taskManagerOwnsRetention reports whether the help of `infrahub tasks flush flow-runs` is the one of Infrahub 1.13
 // and later, which takes no number of days and offers --rewrite.
 func taskManagerOwnsRetention(help string) bool {
+	help = ansiEscapeRe.ReplaceAllString(help, "")
 	return strings.Contains(help, "--rewrite") && !strings.Contains(help, "--days-to-keep")
 }
 
