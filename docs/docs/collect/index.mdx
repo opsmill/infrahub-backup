@@ -10,6 +10,8 @@ Collection is strictly read-only. Unlike `infrahub-backup create`, the collect c
 
 The binary is self-contained. By default, collection works offline: it uses your existing Docker or kubectl access and performs no network access beyond the deployment itself. The one exception is the opt-in `--benchmark`, which downloads a benchmark image.
 
+The opt-in storage breakdown of the task manager database (`--include-task-manager-storage`) only reads data as well, but do not request it while the task manager is being upgraded. Each breakdown query locks the table it reads and the tables it joins until the query ends, so a schema change on one of these tables can wait for up to 5 minutes. While the schema change waits, the queries of the task manager on that table wait behind it. See [Include the storage breakdown of the task manager database](./create.mdx#include-the-storage-breakdown-of-the-task-manager-database).
+
 ## Collect or back up?
 
 A troubleshooting bundle contains diagnostics for support to read; a [backup](../backup/create.mdx) is a restorable snapshot of your data. They are separate operations with different safety profiles — collection is read-only, while a backup can stop containers while the snapshot is taken. When support asks for both, run `infrahub-collect create --include-backup` to produce them in one run.
@@ -26,10 +28,21 @@ Each bundle is a single `tar.gz` archive. Inside, every file lives under a top-l
 | Cache | Redis info, client list, configuration, and slow log |
 | Task worker | Prefect worker state, one directory per replica |
 | Task manager | Work pools, work queues, recent flow runs, the pending and running flow and task runs, events, and automations |
+| Task manager database storage | The size of the task manager (Prefect) database, and for each table its data, index, and TOAST sizes, its estimated live and dead rows, and its last manual and automatic vacuum times |
+| Task manager database storage breakdown (opt-in) | Exact row counts and the oldest and newest timestamps of each group of records in seven Prefect tables: events, flow runs, task runs, flow run states, task run states, logs, and artifacts (`--include-task-manager-storage`) |
 | Server | Version, installed packages, API information, configuration, schema, and masked environment variables |
 | Metrics | Container resource usage |
 | Backup (opt-in) | A standalone backup produced by the standard backup behavior and referenced in the manifest, not embedded in the archive (`--include-backup`) |
 | Benchmark (opt-in) | Host resource benchmark results (`--benchmark`) |
+
+The two task manager database collectors write to the `task-manager-db/` directory of the bundle:
+
+- `task-manager-db/storage.json` holds the database size and the figures for each table. It is in every bundle.
+- `task-manager-db/storage-breakdown.json` holds the storage breakdown. It is in the bundle only when you run `infrahub-collect create` with `--include-task-manager-storage`.
+
+In `storage.json`, TOAST is the storage PostgreSQL uses for large values, and dead rows are rows that were deleted or updated and whose space PostgreSQL has not reclaimed yet. VACUUM is the PostgreSQL command that reclaims this space.
+
+When the deployment has no `task-manager-db` service, for example because the task manager uses an external PostgreSQL server, neither file is collected, and the manifest records both collectors as skipped.
 
 The layout is identical on Docker Compose and Kubernetes.
 

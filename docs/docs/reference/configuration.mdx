@@ -84,6 +84,7 @@ Both rules combine as a union, and the most recent backup at each location alway
 |------|---------------------|-------------|
 | `--log-lines` | `INFRAHUB_LOG_LINES` | Maximum log lines collected per container (default `100000`) |
 | `--include-backup` | `INFRAHUB_INCLUDE_BACKUP` | Also create a backup during collection |
+| `--include-task-manager-storage` | `INFRAHUB_INCLUDE_TASK_MANAGER_STORAGE` | Also collect the storage breakdown of the task manager database, up to 5 minutes per table. Do not use while the task manager is being upgraded |
 | `--include-queries` | `INFRAHUB_INCLUDE_QUERIES` | Include database query logs in the bundle |
 | `--benchmark` | `INFRAHUB_BENCHMARK` | Run the OpsMill benchmark and include its results |
 

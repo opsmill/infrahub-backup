@@ -411,6 +411,7 @@ var (
 	_ contextExecer         = (*KubernetesBackend)(nil)
 	_ replicaExecer         = (*KubernetesBackend)(nil)
 	_ separateExecer        = (*KubernetesBackend)(nil)
+	_ inputExecer           = (*KubernetesBackend)(nil)
 	_ separateReplicaExecer = (*KubernetesBackend)(nil)
 	_ contextCopier         = (*KubernetesBackend)(nil)
 	_ replicaCopier         = (*KubernetesBackend)(nil)
@@ -419,14 +420,19 @@ var (
 
 // buildExecArgsContext resolves the pod under a bounded runner and constructs
 // kubectl exec arguments, so the pod-resolution kubectl call is bounded too
-// (FIX-5) rather than only the exec that follows.
-func (k *KubernetesBackend) buildExecArgsContext(ctx context.Context, timeout time.Duration, service string, command []string, opts *ExecOptions) ([]string, error) {
+// (FIX-5) rather than only the exec that follows. With stdin, kubectl forwards
+// its own stdin to the command.
+func (k *KubernetesBackend) buildExecArgsContext(ctx context.Context, timeout time.Duration, service string, command []string, opts *ExecOptions, stdin bool) ([]string, error) {
 	pod, err := k.getPodForServiceContext(ctx, timeout, service)
 	if err != nil {
 		return nil, err
 	}
 	finalCmd := k.prepareCommand(command, opts)
-	args := []string{"exec", "-n", k.namespace, pod, "--"}
+	args := []string{"exec"}
+	if stdin {
+		args = append(args, "-i")
+	}
+	args = append(args, "-n", k.namespace, pod, "--")
 	args = append(args, finalCmd...)
 	return args, nil
 }
@@ -435,7 +441,7 @@ func (k *KubernetesBackend) buildExecArgsContext(ctx context.Context, timeout ti
 // collectors (research R2: 60s per status dump). Both the pod resolution and
 // the exec itself are bounded (FIX-5).
 func (k *KubernetesBackend) ExecContext(ctx context.Context, timeout time.Duration, service string, command []string, opts *ExecOptions) (string, error) {
-	args, err := k.buildExecArgsContext(ctx, timeout, service, command, opts)
+	args, err := k.buildExecArgsContext(ctx, timeout, service, command, opts, false)
 	if err != nil {
 		return "", err
 	}
@@ -447,11 +453,21 @@ func (k *KubernetesBackend) ExecContext(ctx context.Context, timeout time.Durati
 // kubectl's own notices — most notably `Defaulted container "x" out of: …` on a
 // multi-container pod — or the command's diagnostics being mixed into it.
 func (k *KubernetesBackend) ExecSeparateContext(ctx context.Context, timeout time.Duration, service string, command []string, opts *ExecOptions) (string, string, error) {
-	args, err := k.buildExecArgsContext(ctx, timeout, service, command, opts)
+	args, err := k.buildExecArgsContext(ctx, timeout, service, command, opts, false)
 	if err != nil {
 		return "", "", err
 	}
 	return k.executor.runCommandSeparateContext(ctx, timeout, "kubectl", args...)
+}
+
+// ExecSeparateInputContext is ExecSeparateContext with input written to the
+// command's stdin, which kubectl exec -i forwards to the command.
+func (k *KubernetesBackend) ExecSeparateInputContext(ctx context.Context, timeout time.Duration, service string, command []string, opts *ExecOptions, input string) (string, string, error) {
+	args, err := k.buildExecArgsContext(ctx, timeout, service, command, opts, true)
+	if err != nil {
+		return "", "", err
+	}
+	return k.executor.runCommandSeparateInputContext(ctx, timeout, input, "kubectl", args...)
 }
 
 // ExecReplicaSeparate is ExecReplica with stdout and stderr kept apart (see

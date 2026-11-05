@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://opsmill.io/schemas/infrahub-collect/task-manager-db/storage-breakdown.json",
+  "title": "Storage breakdown of the task manager database (task-manager-db/storage-breakdown.json)",
+  "type": "object",
+  "required": ["collected_at", "database", "time_limit_per_table", "tables"],
+  "additionalProperties": false,
+  "properties": {
+    "collected_at": { "type": "string", "format": "date-time" },
+    "database": { "type": "string", "minLength": 1 },
+    "time_limit_per_table": { "type": "string", "pattern": "^[0-9].*s$" },
+    "tables": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/table" }
+    }
+  },
+  "$defs": {
+    "timestamp_or_null": {
+      "oneOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }]
+    },
+    "group": {
+      "type": "object",
+      "required": ["group", "rows", "oldest", "newest"],
+      "additionalProperties": false,
+      "properties": {
+        "group": {
+          "type": "object",
+          "additionalProperties": { "type": ["string", "null"] }
+        },
+        "rows": { "type": "integer", "minimum": 1 },
+        "rows_without_start_time": { "type": "integer", "minimum": 0 },
+        "oldest": { "$ref": "#/$defs/timestamp_or_null" },
+        "newest": { "$ref": "#/$defs/timestamp_or_null" }
+      }
+    },
+    "table": {
+      "type": "object",
+      "required": ["name", "status", "grouped_by", "timestamp_column"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "enum": ["events", "flow_run", "task_run", "flow_run_state", "task_run_state", "log", "artifact"]
+        },
+        "status": { "enum": ["collected", "absent", "failed"] },
+        "reason": { "type": "string", "minLength": 1 },
+        "grouped_by": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "enum": ["event_name", "flow_name", "state_type", "log_level", "artifact_type"] }
+        },
+        "timestamp_column": { "enum": ["occurred", "start_time", "timestamp", "created"] },
+        "rows": { "type": "integer", "minimum": 0 },
+        "groups": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/group" }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "collected" } } },
+          "then": { "required": ["rows", "groups"], "not": { "required": ["reason"] } },
+          "else": { "required": ["reason"], "not": { "anyOf": [{ "required": ["rows"] }, { "required": ["groups"] }] } }
+        }
+      ]
+    }
+  }
+}

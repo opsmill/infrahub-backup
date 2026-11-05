@@ -279,3 +279,110 @@ func TestPodResolutionWithPostgresOperatorLabels(t *testing.T) {
 		})
 	}
 }
+
+// TestGetPodForServiceWith_SelectsPrimaryPod covers FR-014 of
+// specs/006-taskmgr-db-storage: with a CloudNativePG cluster behind
+// task-manager-db, the database queries run on the primary pod, because a
+// standby does not run VACUUM or autovacuum. The pod lookup tries the label
+// selectors in podSelectors order, and the Infrahub HA examples label the pods
+// infrahub/service=task-manager-db.
+func TestGetPodForServiceWith_SelectsPrimaryPod(t *testing.T) {
+	threePods := "task-manager-db-1\ntask-manager-db-2\ntask-manager-db-3\n"
+	tests := []struct {
+		name string
+		pods string
+		// labels maps a label path of findPrimaryPod's jsonpath lookups to
+		// the value each pod carries; a pod without a value has no label.
+		labels          map[string]map[string]string
+		want            string
+		wantLabelLookup bool
+	}{
+		{
+			name: "CloudNativePG instance role",
+			pods: threePods,
+			labels: map[string]map[string]string{
+				`cnpg\.io/instanceRole`: {"task-manager-db-1": "replica", "task-manager-db-2": "primary", "task-manager-db-3": "replica"},
+			},
+			want:            "task-manager-db-2",
+			wantLabelLookup: true,
+		},
+		{
+			name: "legacy role label",
+			pods: threePods,
+			labels: map[string]map[string]string{
+				"role": {"task-manager-db-1": "replica", "task-manager-db-2": "primary", "task-manager-db-3": "replica"},
+			},
+			want:            "task-manager-db-2",
+			wantLabelLookup: true,
+		},
+		{
+			name:            "no primary label falls back to the first pod",
+			pods:            threePods,
+			labels:          map[string]map[string]string{},
+			want:            "task-manager-db-1",
+			wantLabelLookup: true,
+		},
+		{
+			name:   "a single pod is used without a label lookup",
+			pods:   "task-manager-db-0\n",
+			labels: map[string]map[string]string{},
+			want:   "task-manager-db-0",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			k := NewKubernetesBackend(&Configuration{}, NewCommandExecutor())
+			k.namespace = "infrahub"
+
+			var calls [][]string
+			labelLookups := 0
+			run := func(name string, args ...string) (string, error) {
+				calls = append(calls, args)
+				if name != "kubectl" {
+					return "", fmt.Errorf("unexpected command %s", name)
+				}
+				switch {
+				case slices.Contains(args, "pods") && slices.Contains(args, "-l"):
+					if slices.Contains(args, "infrahub/service=task-manager-db") {
+						return tt.pods, nil
+					}
+					return "", nil // a selector that matches nothing
+				case len(args) == 7 && args[0] == "get" && args[1] == "pod":
+					labelLookups++
+					pod, jsonpath := args[2], args[6]
+					for label, values := range tt.labels {
+						if jsonpath == "jsonpath={.metadata.labels."+label+"}" {
+							return values[pod], nil
+						}
+					}
+					return "", nil
+				}
+				return "", fmt.Errorf("unexpected kubectl call %q", args)
+			}
+
+			pod, err := k.getPodForServiceWith(run, "task-manager-db")
+			if err != nil {
+				t.Fatalf("getPodForServiceWith failed: %v", err)
+			}
+			if pod != tt.want {
+				t.Errorf("pod = %q, want %q", pod, tt.want)
+			}
+			if (labelLookups > 0) != tt.wantLabelLookup {
+				t.Errorf("label lookups = %d, want any: %v", labelLookups, tt.wantLabelLookup)
+			}
+			if cached := k.podCache["task-manager-db"]; cached != tt.want {
+				t.Errorf("cached pod = %q, want %q", cached, tt.want)
+			}
+
+			callsBefore := len(calls)
+			again, err := k.getPodForServiceWith(run, "task-manager-db")
+			if err != nil || again != tt.want {
+				t.Errorf("second lookup = (%q, %v), want the cached %q", again, err, tt.want)
+			}
+			if len(calls) != callsBefore {
+				t.Errorf("second lookup ran %d kubectl calls, want none: %q", len(calls)-callsBefore, calls[callsBefore:])
+			}
+		})
+	}
+}
