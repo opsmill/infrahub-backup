@@ -205,6 +205,7 @@ func main() {
 	var s3KeepLocal bool
 	var sleepDuration time.Duration
 	var restoreSleepDuration time.Duration
+	var restoreNeo4jClusterOnlineTimeout time.Duration
 
 	// Variables for from-files subcommand
 	var neo4jPath string
@@ -303,6 +304,10 @@ func main() {
 			if err != nil {
 				return err
 			}
+			if restoreNeo4jClusterOnlineTimeout <= 0 {
+				return fmt.Errorf("--neo4j-cluster-online-timeout must be greater than zero, got %s", restoreNeo4jClusterOnlineTimeout)
+			}
+			iops.Config().Neo4jClusterOnlineTimeout = restoreNeo4jClusterOnlineTimeout
 			forceRestore, _ := cmd.Flags().GetBool("force")
 			options := resolveRestoreOptions()
 
@@ -315,6 +320,7 @@ func main() {
 	restoreCmd.Flags().BoolVar(&restoreExcludeTaskManagerDB, "exclude-taskmanager", false, "Skip restoring the task manager database even if present in the archive")
 	restoreCmd.Flags().BoolVar(&restoreMigrateFormat, "migrate-format", false, "Run neo4j-admin database migrate --to-format=block after the restore completes")
 	restoreCmd.Flags().DurationVar(&restoreSleepDuration, "sleep", 0, "Sleep duration before restore begins (e.g., 5m, 300s) for manual file transfer")
+	restoreCmd.Flags().DurationVar(&restoreNeo4jClusterOnlineTimeout, "neo4j-cluster-online-timeout", app.DefaultNeo4jClusterOnlineTimeout, "With a Neo4j cluster: how long to wait for the restored database to come online on every server before the restore fails")
 	// Registered without a flag variable on purpose: resolveRestoreOptions reads these two
 	// through viper, and a variable next to the binding is what let the two disagree.
 	restoreCmd.Flags().String("decrypt-key", "", "Path to private key PEM file for decrypting an encrypted backup")
@@ -335,6 +341,8 @@ func main() {
 	//   `create` flag, and viper resolves a key through whichever command bound it last, so
 	//   binding them here would make each command answer with the other's value.
 	//   INFRAHUB_SLEEP therefore configures `create` only.
+	//   --neo4j-cluster-online-timeout is not bound because viper turns a malformed duration
+	//   in the environment into 0 instead of reporting it.
 
 	rootCmd.AddCommand(createCmd)
 	rootCmd.AddCommand(restoreCmd)
