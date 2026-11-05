@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sirupsen/logrus"
 )
@@ -60,6 +61,9 @@ type Configuration struct {
 	Retention RetentionConfig
 	Backend   BackendType
 	Plakar    *PlakarConfig
+	// Neo4jClusterOnlineTimeout is how long a restore into a Neo4j cluster waits for the
+	// restored database to come online on every server before it fails.
+	Neo4jClusterOnlineTimeout time.Duration
 }
 
 // InfrahubOps is the main application struct
@@ -85,8 +89,9 @@ func NewInfrahubOps() *InfrahubOps {
 		S3: &S3Config{
 			Region: "us-east-1",
 		},
-		Backend: BackendTarball,
-		Plakar:  &PlakarConfig{},
+		Backend:                   BackendTarball,
+		Plakar:                    &PlakarConfig{},
+		Neo4jClusterOnlineTimeout: DefaultNeo4jClusterOnlineTimeout,
 	}
 	return &InfrahubOps{
 		config:   config,

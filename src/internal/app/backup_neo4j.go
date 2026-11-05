@@ -17,6 +17,16 @@ const (
 	neo4jWatchdogInitTimeout = 5 * time.Second
 	neo4jProcessStopTimeout  = 120 * time.Second
 	neo4jMetadataScriptPath  = "/data/scripts/neo4j/restore_metadata.cypher"
+
+	// DefaultNeo4jClusterOnlineTimeout leaves time for the other cluster servers to copy a
+	// store of several gigabytes from the seed server.
+	DefaultNeo4jClusterOnlineTimeout = 10 * time.Minute
+	neo4jClusterOnlinePollInterval   = 5 * time.Second
+	neo4jDatabaseStatusOnline        = "online"
+
+	neo4jLocalBoltAddress       = "bolt://localhost:7687"
+	neo4jSeedServerOption       = "existingDataSeedServer"
+	neo4jLegacySeedServerOption = "existingDataSeedInstance"
 )
 
 // backupNeo4jEnterpriseStream returns a data factory that streams a tar archive of the Neo4j
@@ -491,6 +501,9 @@ func (iops *InfrahubOps) restoreNeo4jCluster(opts *ExecOptions) error {
 	logrus.Info("Getting current server ID...")
 	serverIdOutput, err := iops.Exec("database", []string{
 		"cypher-shell", "-u", iops.config.Neo4jUsername, "-p" + iops.config.Neo4jPassword,
+		// A routed connection runs the procedure on the system database leader, which then
+		// reports itself as the requester even though the restored store is on this server.
+		"-a", neo4jLocalBoltAddress,
 		"-d", "system",
 		"--format", "plain",
 		"CALL dbms.cluster.statusCheck([]) YIELD requester, serverId RETURN requester, serverId",
@@ -526,38 +539,215 @@ func (iops *InfrahubOps) restoreNeo4jCluster(opts *ExecOptions) error {
 
 	// 4. Create database with designated seeder
 	logrus.Info("Creating database with designated seeder...")
-	createCmd := fmt.Sprintf(`CREATE DATABASE %s
-TOPOLOGY 3 PRIMARIES
-OPTIONS {
-  existingData: 'use',
-  existingDataSeedInstance: '%s'
-}`, iops.config.Neo4jDatabase, serverId)
-
-	if _, err := iops.Exec("database", []string{
-		"cypher-shell", "-u", iops.config.Neo4jUsername, "-p" + iops.config.Neo4jPassword,
-		"-d", "system",
-		createCmd,
-	}, nil); err != nil {
-		return fmt.Errorf("failed to create database with seeder: %w", err)
+	if err := iops.createSeededNeo4jDatabase(serverId); err != nil {
+		return err
 	}
 
 	// 5. Wait for database to come online
-	logrus.Info("Waiting for database to come online...")
-	for i := 0; i < 100; i++ {
-		output, err := iops.Exec("database", []string{
-			"cypher-shell", "-u", iops.config.Neo4jUsername, "-p" + iops.config.Neo4jPassword,
-			"-d", "system", "--format", "plain",
-			"SHOW DATABASE " + iops.config.Neo4jDatabase + " YIELD currentStatus RETURN currentStatus",
-		}, nil)
-		if err == nil && strings.Contains(strings.ToLower(output), "online") {
-			logrus.Info("Database is online")
-			break
-		}
-		time.Sleep(2 * time.Second)
+	timeout := iops.config.Neo4jClusterOnlineTimeout
+	logrus.Infof("Waiting up to %s for database %s to come online on every server...", timeout, iops.config.Neo4jDatabase)
+	if err := iops.waitForNeo4jClusterDatabaseOnline(timeout, neo4jClusterOnlinePollInterval); err != nil {
+		return err
 	}
 
 	logrus.Info("Neo4j cluster restore completed successfully")
 	return nil
+}
+
+// createSeededNeo4jDatabase creates the database on every server from the store on the seed
+// server. Cypher 25 refuses existingDataSeedInstance and requires existingDataSeedServer; the
+// older name is tried first because Neo4j releases that predate the newer name accept only it.
+func (iops *InfrahubOps) createSeededNeo4jDatabase(seedServerID string) error {
+	output, err := iops.Exec("database", iops.createSeededNeo4jDatabaseCommand(neo4jLegacySeedServerOption, seedServerID), nil)
+	refused := "invalid input '" + strings.ToLower(neo4jLegacySeedServerOption) + "'"
+	if err != nil && strings.Contains(strings.ToLower(output), refused) {
+		logrus.Infof("Neo4j does not accept the %s option; creating the database with %s instead",
+			neo4jLegacySeedServerOption, neo4jSeedServerOption)
+		output, err = iops.Exec("database", iops.createSeededNeo4jDatabaseCommand(neo4jSeedServerOption, seedServerID), nil)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to create database with seeder: %w\nOutput: %s", err, strings.TrimSpace(output))
+	}
+	return nil
+}
+
+func (iops *InfrahubOps) createSeededNeo4jDatabaseCommand(seedOption, seedServerID string) []string {
+	return []string{
+		"cypher-shell", "-u", iops.config.Neo4jUsername, "-p" + iops.config.Neo4jPassword,
+		"-d", "system",
+		fmt.Sprintf(`CREATE DATABASE %s
+TOPOLOGY 3 PRIMARIES
+OPTIONS {
+  existingData: 'use',
+  %s: '%s'
+}`, iops.config.Neo4jDatabase, seedOption, seedServerID),
+	}
+}
+
+// neo4jServerDatabaseStatus is the state of the restored database on one cluster server.
+type neo4jServerDatabaseStatus struct {
+	Address string
+	Status  string
+	Message string
+}
+
+func (s neo4jServerDatabaseStatus) String() string {
+	if s.Message == "" {
+		return s.Address + ": " + s.Status
+	}
+	return s.Address + ": " + s.Status + " (" + s.Message + ")"
+}
+
+// waitForNeo4jClusterDatabaseOnline returns nil once every server that hosts the database
+// reports it online, and an error naming each server's status once the timeout has passed.
+func (iops *InfrahubOps) waitForNeo4jClusterDatabaseOnline(timeout, interval time.Duration) error {
+	database := iops.config.Neo4jDatabase
+	deadline := time.Now().Add(timeout)
+
+	var lastServers []neo4jServerDatabaseStatus
+	var lastSummary string
+	var lastErr error
+	var lastErrText string
+	for {
+		servers, err := iops.neo4jClusterDatabaseStatus()
+		lastErr = err
+		// Both kinds of line are logged only when they change, so a long store copy shows
+		// progress without repeating the same line every poll.
+		if err != nil {
+			if err.Error() != lastErrText {
+				logrus.Warnf("Failed to read the status of database %s: %v", database, err)
+				lastErrText = err.Error()
+			}
+		} else {
+			lastErrText = ""
+			if neo4jDatabaseOnlineOnEveryServer(servers) {
+				logrus.Infof("Database %s is online on %d servers", database, len(servers))
+				return nil
+			}
+			lastServers = servers
+			if summary := describeNeo4jServers(servers); summary != lastSummary {
+				logNeo4jDatabaseProgress(database, servers, summary)
+				lastSummary = summary
+			}
+		}
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			break
+		}
+		time.Sleep(min(interval, remaining))
+	}
+
+	logNeo4jDatabaseNotOnline(database, lastServers)
+	if lastErr != nil {
+		if lastSummary != "" {
+			return fmt.Errorf("database %s did not come online on every Neo4j server within %s (last status read: %s); reading its status failed: %w",
+				database, timeout, lastSummary, lastErr)
+		}
+		return fmt.Errorf("database %s did not come online on every Neo4j server within %s; reading its status failed: %w",
+			database, timeout, lastErr)
+	}
+	return fmt.Errorf("database %s did not come online on every Neo4j server within %s: %s; if a server is still copying the store, raise --neo4j-cluster-online-timeout",
+		database, timeout, lastSummary)
+}
+
+// logNeo4jDatabaseProgress logs at warning level once a server reports a status message,
+// because Neo4j sets one when the database fails to start there.
+func logNeo4jDatabaseProgress(database string, servers []neo4jServerDatabaseStatus, summary string) {
+	for _, server := range servers {
+		if server.Message != "" {
+			logrus.Warnf("Database %s is not online on every server yet: %s", database, summary)
+			return
+		}
+	}
+	logrus.Infof("Database %s is not online on every server yet: %s", database, summary)
+}
+
+// logNeo4jDatabaseNotOnline logs one line for each server where the database is not online,
+// with the reason Neo4j gives for it.
+func logNeo4jDatabaseNotOnline(database string, servers []neo4jServerDatabaseStatus) {
+	for _, server := range servers {
+		if strings.EqualFold(server.Status, neo4jDatabaseStatusOnline) {
+			continue
+		}
+		reason := server.Message
+		if reason == "" {
+			reason = "Neo4j gave no status message"
+		}
+		logrus.WithFields(logrus.Fields{
+			"server": server.Address,
+			"status": server.Status,
+			"reason": reason,
+		}).Errorf("Database %s is not online on this server", database)
+	}
+}
+
+func (iops *InfrahubOps) neo4jClusterDatabaseStatus() ([]neo4jServerDatabaseStatus, error) {
+	output, err := iops.Exec("database", []string{
+		"cypher-shell", "-u", iops.config.Neo4jUsername, "-p" + iops.config.Neo4jPassword,
+		"-d", "system", "--format", "plain",
+		"SHOW DATABASE " + iops.config.Neo4jDatabase +
+			" YIELD currentStatus, address, statusMessage" +
+			" RETURN currentStatus, coalesce(address, '') AS address, coalesce(statusMessage, '') AS statusMessage",
+	}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("%w\nOutput: %s", err, strings.TrimSpace(output))
+	}
+	return parseNeo4jDatabaseStatus(output), nil
+}
+
+// parseNeo4jDatabaseStatus reads the plain cypher-shell output of the status query: a header
+// line, then one row per server of quoted strings, with the message last because it can
+// contain commas.
+func parseNeo4jDatabaseStatus(output string) []neo4jServerDatabaseStatus {
+	var servers []neo4jServerDatabaseStatus
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		// Only rows start with a quote; the header and any notice printed with them do not.
+		if !strings.HasPrefix(line, `"`) {
+			continue
+		}
+		fields := strings.SplitN(line, ", ", 3)
+		if len(fields) != 3 {
+			continue
+		}
+		servers = append(servers, neo4jServerDatabaseStatus{
+			Status:  unquoteCypherString(fields[0]),
+			Address: unquoteCypherString(fields[1]),
+			Message: unquoteCypherString(fields[2]),
+		})
+	}
+	return servers
+}
+
+func unquoteCypherString(value string) string {
+	if unquoted, err := strconv.Unquote(value); err == nil {
+		return unquoted
+	}
+	return strings.Trim(value, `"`)
+}
+
+func neo4jDatabaseOnlineOnEveryServer(servers []neo4jServerDatabaseStatus) bool {
+	if len(servers) == 0 {
+		return false
+	}
+	for _, server := range servers {
+		if !strings.EqualFold(server.Status, neo4jDatabaseStatusOnline) {
+			return false
+		}
+	}
+	return true
+}
+
+func describeNeo4jServers(servers []neo4jServerDatabaseStatus) string {
+	if len(servers) == 0 {
+		return "no server hosts the database"
+	}
+	descriptions := make([]string, 0, len(servers))
+	for _, server := range servers {
+		descriptions = append(descriptions, server.String())
+	}
+	return strings.Join(descriptions, "; ")
 }
 
 func (iops *InfrahubOps) restoreNeo4jCommunity(restoreMigrateFormat bool) (retErr error) {
