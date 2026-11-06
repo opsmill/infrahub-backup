@@ -6,17 +6,17 @@ single Neo4j server, so this is the only place the cluster restore flow
 (`restoreNeo4jCluster` in src/internal/app/backup_neo4j.go) runs against a real cluster:
 it restores on one server and seeds the database on the others from it.
 
+The cluster runs on a vcluster with three nodes, one member on each.
+
 The cases skip unless the session sets INFRAHUB_TESTING_NEO4J_CLUSTER=internal.
 """
-
-import subprocess
 
 import pytest
 
 from tests.e2e.conftest import (
-    NEO4J_CLUSTER_PASSWORD,
     NEO4J_CLUSTER_SIZE,
-    NEO4J_CLUSTER_USERNAME,
+    assert_members_hold_the_same_graph,
+    neo4j_database_status,
     portforward_infrahub,
     requires_neo4j_cluster,
 )
@@ -34,34 +34,6 @@ CLUSTER_RESTORE_LINE = "Using Neo4j cluster restore flow"
 CLUSTER_RESTORE_DONE_LINE = "Neo4j cluster restore completed successfully"
 
 
-def neo4j_database_status(kubeconfig: str, namespace: str, pod: str = "database-0-0") -> list[str]:
-    """The status of the default database on every member, as one member reports it."""
-    result = subprocess.run(
-        [
-            "kubectl",
-            "--kubeconfig",
-            kubeconfig,
-            "-n",
-            namespace,
-            "exec",
-            pod,
-            "--",
-            "cypher-shell",
-            "-u",
-            NEO4J_CLUSTER_USERNAME,
-            "-p",
-            NEO4J_CLUSTER_PASSWORD,
-            "--format",
-            "plain",
-            "SHOW DATABASE neo4j YIELD currentStatus RETURN currentStatus",
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return [line.strip().strip('"') for line in result.stdout.splitlines()[1:] if line.strip()]
-
-
 @pytest.mark.e2e
 @pytest.mark.k8s
 @requires_neo4j_cluster("internal")
@@ -69,7 +41,7 @@ async def test_backup_restore_round_trip_on_a_neo4j_cluster(infrahub_k8s_neo4j_c
     """Back up, change the data, restore, and read the pre-backup data back from the cluster.
 
     The restore must take the cluster flow, report success only once the database is
-    online on every member, and leave all three members serving it.
+    online on every member, and leave all three members serving the same graph.
     """
     namespace = infrahub_k8s_neo4j_cluster["namespace"]
     kubeconfig = infrahub_k8s_neo4j_cluster["kubeconfig_path"]
@@ -104,6 +76,7 @@ async def test_backup_restore_round_trip_on_a_neo4j_cluster(infrahub_k8s_neo4j_c
     assert len(statuses) == NEO4J_CLUSTER_SIZE and all(status == "online" for status in statuses), (
         f"the restored database is not online on every member: {statuses}"
     )
+    assert_members_hold_the_same_graph(kubeconfig, namespace)
 
     async with portforward_infrahub(kubeconfig, namespace) as url:
         await verify_infrahub_data(url, token, seed)

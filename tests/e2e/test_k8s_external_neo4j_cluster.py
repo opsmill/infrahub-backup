@@ -8,9 +8,11 @@ in `tests/e2e/conftest.py`. The single-server external suites cannot show what t
 - the restore seeds the database on every member from the object store, and reports
   success only once the database is online on all of them.
 
-The cases skip unless the session sets INFRAHUB_TESTING_NEO4J_CLUSTER=external and
-declares the external topology (INFRAHUB_TESTING_EXTERNAL_DB=database and the variables
-that go with it).
+The cluster runs on a vcluster with three nodes, one member on each. The fixtures build
+the whole topology, including the object store the restore seeds from and the
+infrahub-backup image the external path runs its tools from.
+
+The cases skip unless the session sets INFRAHUB_TESTING_NEO4J_CLUSTER=external.
 """
 
 import pytest
@@ -18,14 +20,14 @@ import pytest
 from tests.e2e.conftest import (
     NEO4J_CLUSTER_SIZE,
     SERVICE_NEO4J,
+    assert_members_hold_the_same_graph,
     external_db_env,
     external_db_image_args,
+    neo4j_database_status,
     portforward_infrahub,
-    requires_external_db,
     requires_neo4j_cluster,
     transient_objects_after_run,
 )
-from tests.e2e.test_k8s_neo4j_cluster import neo4j_database_status
 from tests.helpers.utils import (
     find_latest_backup,
     modify_infrahub_data,
@@ -59,9 +61,8 @@ def _seed_store_env(seed_store: dict) -> dict[str, str]:
 @pytest.mark.e2e
 @pytest.mark.k8s
 @requires_neo4j_cluster("external")
-@requires_external_db(SERVICE_NEO4J, edition="enterprise", seed_store=True)
 async def test_capture_through_the_cluster_address_is_recorded(
-    infrahub_k8s_external_neo4j_cluster, external_topology, backup_binary, tmp_path
+    infrahub_k8s_external_neo4j_cluster, backup_binary, tmp_path
 ):
     """The backup goes through the address Infrahub uses, and the metadata records it.
 
@@ -76,8 +77,8 @@ async def test_capture_through_the_cluster_address_is_recorded(
     namespace = deployment["namespace"]
     kubeconfig = deployment["kubeconfig_path"]
     backup_dir = tmp_path / "backups"
-    env = {"KUBECONFIG": kubeconfig, **external_db_env(external_topology)}
-    host = external_topology["neo4j_address"].rsplit(":", 1)[0]
+    env = {"KUBECONFIG": kubeconfig, **external_db_env(deployment["topology"])}
+    host = deployment["topology"]["neo4j_address"].rsplit(":", 1)[0]
     capture_endpoint = f"{host}:6362"
 
     async with portforward_infrahub(kubeconfig, namespace) as url:
@@ -116,22 +117,23 @@ async def test_capture_through_the_cluster_address_is_recorded(
 @pytest.mark.e2e
 @pytest.mark.k8s
 @requires_neo4j_cluster("external")
-@requires_external_db(SERVICE_NEO4J, edition="enterprise", seed_store=True)
 async def test_full_round_trip_through_the_external_cluster(
-    infrahub_k8s_external_neo4j_cluster, external_topology, external_seed_store, backup_binary, tmp_path
+    infrahub_k8s_external_neo4j_cluster, backup_binary, tmp_path
 ):
     """Capture, change the data, restore, and read the pre-backup data back from the cluster.
 
     The restore seeds every member from the object store, so success means the database is
-    online on all of them, not only on the member the tool talked to.
+    online on all of them, not only on the member the tool talked to, and that every
+    member holds the same graph.
     """
     deployment = infrahub_k8s_external_neo4j_cluster
     namespace = deployment["namespace"]
     kubeconfig = deployment["kubeconfig_path"]
     token = deployment["token"]
+    seed_store = deployment["seed_store"]
     image_args = external_db_image_args(deployment)
     backup_dir = tmp_path / "backups"
-    env = {"KUBECONFIG": kubeconfig, **external_db_env(external_topology), **_seed_store_env(external_seed_store)}
+    env = {"KUBECONFIG": kubeconfig, **external_db_env(deployment["topology"]), **_seed_store_env(seed_store)}
 
     async with portforward_infrahub(kubeconfig, namespace) as url:
         seed = await seed_infrahub_data(url, token)
@@ -152,7 +154,7 @@ async def test_full_round_trip_through_the_external_cluster(
             "--k8s-namespace",
             namespace,
             *image_args,
-            *_seed_store_args(external_seed_store),
+            *_seed_store_args(seed_store),
             "restore",
             "--allow-external-restore",
             "--force",
@@ -165,6 +167,7 @@ async def test_full_round_trip_through_the_external_cluster(
     assert len(statuses) == NEO4J_CLUSTER_SIZE and all(status == "online" for status in statuses), (
         f"the restored database is not online on every member: {statuses}"
     )
+    assert_members_hold_the_same_graph(kubeconfig, deployment["neo4j_namespace"])
 
     async with portforward_infrahub(kubeconfig, namespace) as url:
         await verify_infrahub_data(url, token, seed)

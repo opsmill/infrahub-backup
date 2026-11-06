@@ -2,9 +2,10 @@ import asyncio
 import os
 import subprocess
 import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Generator
 
 import kr8s.asyncio
 import pytest
@@ -61,12 +62,20 @@ def _dump_logs_on_failure(request):
     if not vcluster:
         return
 
-    # Both deployment fixtures yield the same shape and live in different namespaces, and
-    # an external-topology test uses only the second, so dump whichever the test asked for.
-    for fixture in ("infrahub_k8s", "infrahub_k8s_external"):
+    # The deployment fixtures yield the same shape and live in different namespaces, and a
+    # test uses only one of them, so dump whichever the test asked for. A deployment whose
+    # Neo4j cluster runs in a namespace of its own names it as `neo4j_namespace`.
+    for fixture in (
+        "infrahub_k8s",
+        "infrahub_k8s_external",
+        "infrahub_k8s_neo4j_cluster",
+        "infrahub_k8s_external_neo4j_cluster",
+    ):
         deployment = request.getfixturevalue(fixture) if fixture in request.fixturenames else None
         if deployment:
             _dump_namespace_logs(vcluster["kubeconfig_path"], deployment["namespace"])
+            if deployment.get("neo4j_namespace"):
+                _dump_namespace_logs(vcluster["kubeconfig_path"], deployment["neo4j_namespace"])
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +213,9 @@ def s3_server(request: pytest.FixtureRequest) -> dict:
         "access_key": S3_ACCESS_KEY,
         "secret_key": S3_SECRET_KEY,
         "bucket": S3_BUCKET,
+        "region": "us-east-1",  # `s3_region` in garage.toml
+        # For a fixture that attaches the container to another Docker network.
+        "container_id": container.get_wrapped_container().id,
     }
 
 
@@ -754,8 +766,15 @@ def external_topology_args() -> list[str]:
 
 
 def external_db_image_args(deployment: dict) -> list[str]:
-    """The root flags that select how the external path runs, for a CLI invocation."""
-    return ["--external-db-image", deployment["external_db_image"], *external_topology_args()]
+    """The root flags that select how the external path runs, for a CLI invocation.
+
+    A deployment that builds its own topology carries its flags as `topology_args`; the
+    others take them from the environment.
+    """
+    topology_args = deployment.get("topology_args")
+    if topology_args is None:
+        topology_args = external_topology_args()
+    return ["--external-db-image", deployment["external_db_image"], *topology_args]
 
 
 # A Dockerfile, built with no context, that derives an image from the one under test whose
@@ -1062,21 +1081,23 @@ async def transient_objects(kubeconfig_path: str, namespace: str) -> list[str]:
 #             finds three `database` pods and restores through the cluster flow
 #             (restoreNeo4jCluster), which seeds the database on every server.
 #   external  The cluster runs in a namespace of its own, so the Infrahub namespace has no
-#             `database` workload and the tool takes the external path: it reads the
-#             members from the cluster, captures through `neo4j-admin database backup
-#             --from=<members>`, and restores by seeding every member from the object
-#             store.
+#             `database` workload and the tool takes the external path: it captures with
+#             `neo4j-admin database backup --from=<host>:6362` for each host in
+#             INFRAHUB_DB_ADDRESS, which here is the headless service, and restores by
+#             seeding every member from an object store.
 #
-# Declared by INFRAHUB_TESTING_NEO4J_CLUSTER, set to `internal` or `external`. Each
-# topology is its own pytest session, so one vcluster holds one Neo4j cluster and one
-# Infrahub deployment. The external topology also needs everything the single-server
-# external suites need: INFRAHUB_TESTING_EXTERNAL_DB=database, the
-# INFRAHUB_TESTING_EXTERNAL_NEO4J_* variables naming the cluster's headless service, the
-# INFRAHUB_TESTING_EXTERNAL_SEED_* store, and INFRAHUB_TESTING_EXTERNAL_DB_IMAGE. The
-# Neo4j servers read the seed store at INFRAHUB_TESTING_EXTERNAL_SEED_SERVER_ENDPOINT, or
-# at INFRAHUB_TESTING_EXTERNAL_SEED_ENDPOINT when that is unset. The two differ when the
-# pods and the tool reach the store by different names, as on Docker Desktop, where only
-# containers resolve `host.docker.internal`.
+# A session declares one topology with INFRAHUB_TESTING_NEO4J_CLUSTER, set to `internal`
+# or `external`, and needs nothing else: the fixtures below build the whole topology.
+#
+# - The `vcluster` fixture (tests/conftest.py) creates three nodes for such a session,
+#   and the members keep the chart's anti-affinity, so each runs on a node of its own.
+#   `install_neo4j_cluster` checks that they do.
+# - The external topology stages restores in the session's Garage container
+#   (`s3_server`). The fixture attaches that container to the vcluster's Docker network,
+#   so the Neo4j servers reach it at its address on that network while the tool, on the
+#   host, reaches it at its published port.
+# - The external topology runs the database tools from an infrahub-backup image built
+#   from this checkout, unless INFRAHUB_TESTING_EXTERNAL_DB_IMAGE names one already built.
 
 NEO4J_CLUSTER_ENV_VAR = "INFRAHUB_TESTING_NEO4J_CLUSTER"
 
@@ -1096,6 +1117,10 @@ NEO4J_CLUSTER_PASSWORD = "admin12345"
 NEO4J_CLUSTER_AUTH_SECRET = "neo4j-user"
 # The namespace the external topology's cluster runs in.
 NEO4J_EXTERNAL_CLUSTER_NAMESPACE = "neo4j-cluster"
+# Neo4j 2025.x reports no store size, so an external capture needs one (tasks.md T158).
+NEO4J_CLUSTER_SCRATCH_SIZE = "2Gi"
+# Where in the Garage bucket the external restores stage their seed.
+NEO4J_CLUSTER_SEED_PREFIX = "neo4j-cluster-seed"
 
 
 def neo4j_cluster_topology() -> str:
@@ -1123,15 +1148,121 @@ def neo4j_cluster_headless_address(namespace: str) -> str:
     return f"{NEO4J_CLUSTER_NAME}-headless.{namespace}.svc.cluster.local:7687"
 
 
+def neo4j_member_pods() -> list[str]:
+    """The pod of each member: release `database-<n>` runs StatefulSet pod `database-<n>-0`."""
+    return [f"database-{index}-0" for index in range(NEO4J_CLUSTER_SIZE)]
+
+
+def neo4j_cypher(kubeconfig_path: str, namespace: str, pod: str, query: str, member_only: bool = False) -> list[str]:
+    """Run a Cypher query with cypher-shell in a member pod and return the result rows.
+
+    By default the query goes through the cluster's routing, like Infrahub's own queries.
+    With `member_only`, it is a read on that member alone, which shows what that member
+    holds rather than what the cluster answers.
+    """
+    shell = ["cypher-shell", "-u", NEO4J_CLUSTER_USERNAME, "-p", NEO4J_CLUSTER_PASSWORD, "--format", "plain"]
+    if member_only:
+        shell += ["-a", "bolt://localhost:7687", "--access-mode", "read"]
+    result = subprocess.run(
+        ["kubectl", "--kubeconfig", kubeconfig_path, "-n", namespace, "exec", pod, "--", *shell, query],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"cypher-shell in {namespace}/{pod} failed: {result.stdout}{result.stderr}")
+    return [line.strip().strip('"') for line in result.stdout.splitlines()[1:] if line.strip()]
+
+
+def neo4j_database_status(kubeconfig_path: str, namespace: str) -> list[str]:
+    """The status of the default database on every member, as the first member reports it."""
+    return neo4j_cypher(
+        kubeconfig_path,
+        namespace,
+        neo4j_member_pods()[0],
+        "SHOW DATABASE neo4j YIELD currentStatus RETURN currentStatus",
+    )
+
+
+def wait_for_neo4j_cluster_online(kubeconfig_path: str, namespace: str, timeout: float = 300) -> None:
+    """Wait until the default database is online on every member."""
+    deadline = time.monotonic() + timeout
+    statuses: list[str] | str = []
+    while time.monotonic() < deadline:
+        try:
+            statuses = neo4j_database_status(kubeconfig_path, namespace)
+        except RuntimeError as exc:
+            statuses = str(exc)
+        if len(statuses) == NEO4J_CLUSTER_SIZE and all(status == "online" for status in statuses):
+            return
+        time.sleep(5)
+    raise RuntimeError(f"the Neo4j cluster in {namespace} did not bring the database online: {statuses}")
+
+
+def neo4j_member_nodes(kubeconfig_path: str, namespace: str) -> dict[str, str]:
+    """The Kubernetes node each member pod runs on."""
+    nodes = {}
+    for pod in neo4j_member_pods():
+        result = subprocess.run(
+            [
+                "kubectl",
+                "--kubeconfig",
+                kubeconfig_path,
+                "-n",
+                namespace,
+                "get",
+                "pod",
+                pod,
+                "-o",
+                "jsonpath={.spec.nodeName}",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        nodes[pod] = result.stdout.strip()
+    return nodes
+
+
+def neo4j_member_graph_sizes(kubeconfig_path: str, namespace: str) -> dict[str, str]:
+    """The number of nodes and relationships each member holds, read on that member alone."""
+
+    def count(pod: str, query: str) -> str:
+        return ", ".join(neo4j_cypher(kubeconfig_path, namespace, pod, query, member_only=True))
+
+    sizes = {}
+    for pod in neo4j_member_pods():
+        nodes = count(pod, "MATCH (n) RETURN count(n)")
+        relationships = count(pod, "MATCH ()-[r]->() RETURN count(r)")
+        sizes[pod] = f"{nodes} nodes, {relationships} relationships"
+    return sizes
+
+
+def assert_members_hold_the_same_graph(kubeconfig_path: str, namespace: str, timeout: float = 120) -> None:
+    """Check that every member holds the same graph after a restore.
+
+    Infrahub reads through one member at a time, so a member left with the data from
+    before the restore would not show in a check made through Infrahub. Each member is
+    read on its own instead. The members can lag the leader for a moment, so the check
+    waits for them to agree.
+    """
+    deadline = time.monotonic() + timeout
+    sizes = neo4j_member_graph_sizes(kubeconfig_path, namespace)
+    while len(set(sizes.values())) != 1 and time.monotonic() < deadline:
+        time.sleep(5)
+        sizes = neo4j_member_graph_sizes(kubeconfig_path, namespace)
+    assert len(set(sizes.values())) == 1, f"the members hold different graphs after the restore: {sizes}"
+
+
 def _neo4j_cluster_values(labels: dict[str, str], env: dict[str, str]) -> dict:
     """Helm values for one member of the cluster.
 
     The resource figures keep three members and an Infrahub deployment inside one CI
-    runner. Anti-affinity is off because a vcluster has one node, and the chart otherwise
-    refuses to schedule two members on it. The backup listener is bound to every interface
-    so that a client outside the pod can take an online backup, which is what the external
-    path does: it runs `neo4j-admin database backup --from=<host>:6362` for each host in
-    INFRAHUB_DB_ADDRESS, and the headless service resolves straight to the member pods.
+    runner. The chart's anti-affinity stays on, as in production: the session's vcluster
+    has three nodes, and each member must run on a node of its own. The backup listener is
+    bound to every interface so that a client outside the pod can take an online backup,
+    which is what the external path does: it runs `neo4j-admin database backup
+    --from=<host>:6362` for each host in INFRAHUB_DB_ADDRESS, and the headless service
+    resolves straight to the member pods.
     """
     config = {
         "server.memory.heap.initial_size": "512m",
@@ -1154,7 +1285,7 @@ def _neo4j_cluster_values(labels: dict[str, str], env: dict[str, str]) -> dict:
         },
         "config": config,
         "env": env,
-        "podSpec": {"podAntiAffinity": False},
+        "podSpec": {"podAntiAffinity": True},
         "logInitialPassword": False,
         "volumes": {
             "data": {
@@ -1260,37 +1391,12 @@ def install_neo4j_cluster(
 
     # Ready means each member answers Bolt, not that the default database is online on all
     # three, which is what Infrahub's first write needs.
-    deadline = time.monotonic() + 300
-    status = ""
-    while time.monotonic() < deadline:
-        result = subprocess.run(
-            [
-                "kubectl",
-                "--kubeconfig",
-                kubeconfig_path,
-                "-n",
-                namespace,
-                "exec",
-                "database-0-0",
-                "--",
-                "cypher-shell",
-                "-u",
-                NEO4J_CLUSTER_USERNAME,
-                "-p",
-                NEO4J_CLUSTER_PASSWORD,
-                "--format",
-                "plain",
-                "SHOW DATABASE neo4j YIELD currentStatus RETURN currentStatus",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        status = result.stdout + result.stderr
-        rows = [line.strip().strip('"') for line in result.stdout.splitlines()[1:] if line.strip()]
-        if len(rows) == NEO4J_CLUSTER_SIZE and all(row == "online" for row in rows):
-            return
-        time.sleep(5)
-    raise RuntimeError(f"the Neo4j cluster in {namespace} did not bring the database online:\n{status}")
+    wait_for_neo4j_cluster_online(kubeconfig_path, namespace)
+
+    # A cluster whose members share a node is not the topology these cases claim to test.
+    placement = neo4j_member_nodes(kubeconfig_path, namespace)
+    if len(set(placement.values())) != NEO4J_CLUSTER_SIZE:
+        raise RuntimeError(f"the Neo4j members in {namespace} do not run on distinct nodes: {placement}")
 
 
 def _neo4j_cluster_infrahub_overlay(address: str) -> dict:
@@ -1342,38 +1448,104 @@ async def infrahub_k8s_neo4j_cluster(vcluster: dict, tmp_path_factory) -> AsyncG
 
 
 @pytest.fixture(scope="session")
+def neo4j_cluster_seed_store(vcluster: dict, s3_server: dict) -> Generator[dict, None, None]:
+    """The session's Garage container, reachable from the Neo4j servers and from the tool.
+
+    The container is attached to the vcluster's Docker network for the session, and
+    detached again before the vcluster is deleted, which cannot remove a network that a
+    container is still attached to.
+    """
+    network = f"vcluster.{vcluster['cluster_name']}"
+    container = s3_server["container_id"]
+    subprocess.run(["docker", "network", "connect", network, container], check=True)
+    try:
+        address = subprocess.run(
+            [
+                "docker",
+                "inspect",
+                container,
+                "--format",
+                f'{{{{(index .NetworkSettings.Networks "{network}").IPAddress}}}}',
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        yield {
+            "bucket": s3_server["bucket"],
+            "prefix": NEO4J_CLUSTER_SEED_PREFIX,
+            "region": s3_server["region"],
+            "access_key": s3_server["access_key"],
+            "secret_key": s3_server["secret_key"],
+            # The tool runs on the host and uploads through the published port.
+            "endpoint": s3_server["endpoint"],
+            # The Neo4j servers fetch the seed through the vcluster's network.
+            "server_endpoint": f"http://{address}:3900",
+        }
+    finally:
+        subprocess.run(["docker", "network", "disconnect", network, container], check=False)
+
+
+@pytest.fixture(scope="session")
+def neo4j_cluster_backup_image(vcluster: dict) -> Generator[str, None, None]:
+    """The infrahub-backup image the external path runs its tools from, loaded into the vcluster.
+
+    A session that already built the image names it in INFRAHUB_TESTING_EXTERNAL_DB_IMAGE.
+    Otherwise the image is built from this checkout and removed at the end of the session.
+    """
+    image = os.environ.get(EXTERNAL_DB_IMAGE_ENV_VAR, "").strip()
+    built = not image
+    if built:
+        image = f"infrahub-backup:e2e-{uuid.uuid4().hex[:12]}"
+        subprocess.run(["docker", "build", "-t", image, str(PROJECT_ROOT)], check=True)
+    _require_pinned_tag(image)
+    try:
+        load_image_into_vcluster(image, vcluster["cluster_name"])
+        yield image
+    finally:
+        if built:
+            subprocess.run(["docker", "image", "rm", "-f", image], check=False, capture_output=True)
+
+
+@pytest.fixture(scope="session")
 async def infrahub_k8s_external_neo4j_cluster(
     vcluster: dict,
-    external_topology: dict,
-    external_seed_store: dict,
-    external_db_image: str,
+    neo4j_cluster_seed_store: dict,
+    neo4j_cluster_backup_image: str,
     tmp_path_factory,
 ) -> AsyncGenerator[dict, None]:
     """Infrahub pointed at a three-member Neo4j cluster outside its namespace.
 
     The cluster's servers read a restore's seed from the object store themselves, so they
-    carry the store's credentials and endpoint, as the single external server in CI does.
+    carry the store's credentials and endpoint.
     """
     if neo4j_cluster_topology() != "external":
         pytest.skip(f"needs {NEO4J_CLUSTER_ENV_VAR}=external")
 
     kubeconfig_path = vcluster["kubeconfig_path"]
     namespace = "infrahub-external-cluster"
+    seed_store = neo4j_cluster_seed_store
+    address = neo4j_cluster_headless_address(NEO4J_EXTERNAL_CLUSTER_NAMESPACE)
+    topology = {
+        "services": {SERVICE_NEO4J},
+        "neo4j_address": address,
+        "neo4j_username": NEO4J_CLUSTER_USERNAME,
+        "neo4j_password": NEO4J_CLUSTER_PASSWORD,
+        "neo4j_edition": "enterprise",
+    }
 
     install_neo4j_cluster(
         kubeconfig_path,
         NEO4J_EXTERNAL_CLUSTER_NAMESPACE,
         tmp_path_factory,
         env={
-            "AWS_ACCESS_KEY_ID": external_seed_store["access_key"],
-            "AWS_SECRET_ACCESS_KEY": external_seed_store["secret_key"],
-            "AWS_REGION": external_seed_store["region"],
-            "AWS_ENDPOINT_URL_S3": os.environ.get(
-                "INFRAHUB_TESTING_EXTERNAL_SEED_SERVER_ENDPOINT", external_seed_store["endpoint"]
-            ),
+            "AWS_ACCESS_KEY_ID": seed_store["access_key"],
+            "AWS_SECRET_ACCESS_KEY": seed_store["secret_key"],
+            "AWS_REGION": seed_store["region"],
+            "AWS_ENDPOINT_URL_S3": seed_store["server_endpoint"],
         },
     )
-    overlay = _neo4j_cluster_infrahub_overlay(external_topology["neo4j_address"])
+    overlay = _neo4j_cluster_infrahub_overlay(address)
     _helm_install_infrahub(kubeconfig_path, namespace, _infrahub_values_path(tmp_path_factory, overlay=overlay))
 
     async with portforward_infrahub(kubeconfig_path, namespace):
@@ -1384,6 +1556,39 @@ async def infrahub_k8s_external_neo4j_cluster(
         "kubeconfig_path": kubeconfig_path,
         "token": INFRAHUB_ADMIN_TOKEN,
         "external_services": {SERVICE_NEO4J},
-        "external_db_image": external_db_image,
+        "external_db_image": neo4j_cluster_backup_image,
+        # The cluster serves no TLS, which the tool accepts only when told to (FR-029).
+        "topology_args": ["--external-db-insecure-tls", "--external-db-scratch-size", NEO4J_CLUSTER_SCRATCH_SIZE],
+        "topology": topology,
+        "seed_store": seed_store,
         "neo4j_namespace": NEO4J_EXTERNAL_CLUSTER_NAMESPACE,
     }
+
+
+# The test module of each topology. A session that declares a topology and passes none of
+# its cases has tested nothing, and would otherwise report success.
+NEO4J_CLUSTER_TEST_MODULES = {
+    "internal": "test_k8s_neo4j_cluster.py",
+    "external": "test_k8s_external_neo4j_cluster.py",
+}
+_passed_test_files: set[str] = set()
+
+
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    if report.when == "call" and report.passed:
+        _passed_test_files.add(Path(report.fspath).name)
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    topology = neo4j_cluster_topology()
+    module = NEO4J_CLUSTER_TEST_MODULES.get(topology)
+    if not topology or exitstatus != 0:
+        return
+    if module is None:
+        print(
+            f"\n{NEO4J_CLUSTER_ENV_VAR}={topology} names no topology: use one of {sorted(NEO4J_CLUSTER_TEST_MODULES)}"
+        )
+        session.exitstatus = pytest.ExitCode.USAGE_ERROR
+    elif module not in _passed_test_files:
+        print(f"\n{NEO4J_CLUSTER_ENV_VAR}={topology} is set, but no case in {module} passed")
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED

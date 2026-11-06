@@ -347,40 +347,6 @@ jobs:
       - name: Build binaries (infrahub-backup, infrahub-taskmanager, infrahub-collect)
         run: make build
 
-      - name: Build the infrahub-backup image under test
-        if: matrix.topology == 'external'
-        run: |
-          docker build -t "infrahub-backup:e2e-${GITHUB_SHA}" .
-          echo "INFRAHUB_TESTING_EXTERNAL_DB_IMAGE=infrahub-backup:e2e-${GITHUB_SHA}" >> "$GITHUB_ENV"
-
-      # The external cluster runs in its own namespace of the vcluster. Its servers fetch a
-      # restore's seed from this object store, which they and the tool on the runner both
-      # reach through the Docker host's bridge address.
-      - name: Start the seed object store
-        if: matrix.topology == 'external'
-        run: |
-          docker rm -f ext-minio 2>/dev/null || true
-          docker run -d --name ext-minio -p 19000:9000 \
-            -e MINIO_ROOT_USER=extaccess -e MINIO_ROOT_PASSWORD=extsecretkey \
-            --entrypoint sh pgsty/minio:RELEASE.2026-08-04T00-00-00Z \
-            -c 'mkdir -p /data/infrahub-seed && minio server /data'
-          host=$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')
-          {
-            echo "INFRAHUB_TESTING_EXTERNAL_DB=database"
-            echo "INFRAHUB_TESTING_EXTERNAL_NEO4J_ADDRESS=infrahub-headless.neo4j-cluster.svc.cluster.local:7687"
-            echo "INFRAHUB_TESTING_EXTERNAL_NEO4J_USERNAME=neo4j"
-            echo "INFRAHUB_TESTING_EXTERNAL_NEO4J_PASSWORD=admin12345"
-            echo "INFRAHUB_TESTING_EXTERNAL_NEO4J_EDITION=enterprise"
-            echo "INFRAHUB_TESTING_EXTERNAL_SEED_BUCKET=infrahub-seed"
-            echo "INFRAHUB_TESTING_EXTERNAL_SEED_ENDPOINT=http://${host}:19000"
-            echo "INFRAHUB_TESTING_EXTERNAL_SEED_ACCESS_KEY=extaccess"
-            echo "INFRAHUB_TESTING_EXTERNAL_SEED_SECRET_KEY=extsecretkey"
-            # The cluster has no TLS, which the tool accepts only when told to.
-            echo "INFRAHUB_TESTING_EXTERNAL_INSECURE_TLS=true"
-            # Neo4j 2025.x reports no store size, so a capture needs one (tasks.md T158).
-            echo "INFRAHUB_TESTING_EXTERNAL_SCRATCH_SIZE=2Gi"
-          } >> "$GITHUB_ENV"
-
       - name: Install Python dependencies
         run: uv sync --all-packages
 
@@ -389,14 +355,22 @@ jobs:
           RUNNER_NAME=$(echo "${{ runner.name }}" | grep -o 'ghrunner[0-9]\+' | sed 's/ghrunner\([0-9]\+\)/ghrunner_\1/')
           echo "VCLUSTER_DIR=/var/lib/github/${RUNNER_NAME}/_temp/.vcluster/config.json" >> $GITHUB_ENV
 
+      # The fixtures build the whole topology: the three-node vcluster, the Neo4j cluster,
+      # the object store and the infrahub-backup image (tests/e2e/conftest.py, "Neo4j
+      # cluster topologies"). The cases of the other topology skip.
       - name: Run e2e tests (Kubernetes, Neo4j cluster)
-        env:
-          TEST_FILE: ${{ matrix.topology == 'external' && 'tests/e2e/test_k8s_external_neo4j_cluster.py' || 'tests/e2e/test_k8s_neo4j_cluster.py' }}
-        run: exec tini -s -g -- uv run pytest -v -m k8s "$TEST_FILE"
+        run: >-
+          exec tini -s -g -- uv run pytest -v -rs -m k8s
+          tests/e2e/test_k8s_neo4j_cluster.py tests/e2e/test_k8s_external_neo4j_cluster.py
+          --junitxml=neo4j-cluster-${{ matrix.topology }}-results.xml
 
-      - name: Remove the seed object store
-        if: always() && matrix.topology == 'external'
-        run: docker rm -f ext-minio 2>/dev/null || true
+      - name: Upload the test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: neo4j-cluster-${{ matrix.topology }}-results
+          path: neo4j-cluster-${{ matrix.topology }}-results.xml
+          if-no-files-found: ignore
 
   nix-build:
     if: needs.files-changed.outputs.nix == 'true'
