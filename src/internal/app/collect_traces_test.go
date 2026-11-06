@@ -901,3 +901,45 @@ func TestCollectTracesSkipsInvalidTraceID(t *testing.T) {
 		t.Error("a file was written outside the bundle")
 	}
 }
+
+func TestCollectTracesRequestTimeout(t *testing.T) {
+	previous := tracesRequestTimeout
+	tracesRequestTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { tracesRequestTimeout = previous })
+
+	slow := func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(2 * time.Second):
+		}
+	}
+
+	t.Run("search timeout is skipped", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(slow))
+		t.Cleanup(server.Close)
+		cc := newTracesContext(t, stackTempo(server), TraceOptions{})
+		err := collectTraces(cc)
+		var skip *collectSkipError
+		if !errors.As(err, &skip) || !strings.Contains(skip.reason, "did not answer within 100ms") || !strings.Contains(skip.reason, "--traces-tempo-url") {
+			t.Fatalf("error = %v, want a skip that names the time limit", err)
+		}
+	})
+
+	t.Run("fetch timeout is a failure", func(t *testing.T) {
+		searchBody := string(readTraceTestdata(t, "search_response.json"))
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/search" {
+				fmt.Fprint(w, searchBody)
+				return
+			}
+			slow(w, r)
+		}))
+		t.Cleanup(server.Close)
+		cc := newTracesContext(t, stackTempo(server), TraceOptions{})
+		err := collectTraces(cc)
+		var skip *collectSkipError
+		if err == nil || errors.As(err, &skip) || !strings.Contains(err.Error(), "timed out after") {
+			t.Fatalf("error = %v, want a failure", err)
+		}
+	})
+}

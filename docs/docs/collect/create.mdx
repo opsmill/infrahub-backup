@@ -257,7 +257,7 @@ Everything else is removed before the file is written, including the text of dat
 - On Docker Compose, it reads the published port 3200 of the `infrahub-tempo` service of the project. With a remote Docker context, this port is on the remote host; use `--traces-tempo-url` instead.
 - On Kubernetes, it finds the service labelled `app.kubernetes.io/name=tempo` in the Infrahub namespace and forwards a local port to its port 3100 for the duration of the collection.
 
-When no Tempo is found, or when your Kubernetes role cannot list services or forward a port, the `traces` entry is `skipped` and the reason names what is missing.
+When no Tempo is found, when Tempo does not answer the search within 60 seconds, or when your Kubernetes role lacks a permission, the `traces` entry is `skipped` and the reason names what is missing.
 
 **Your own trace backend.** To read the traces from another Tempo-compatible backend, give its URL. If the backend needs a token, set it in your shell; the collector sends it as a bearer token and never writes it to the bundle or the output:
 

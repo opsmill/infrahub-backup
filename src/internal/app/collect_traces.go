@@ -50,6 +50,8 @@ var (
 	tracesTimeLimit   = collectTransferTimeout
 	// tracesMegabyte converts --traces-max-size to bytes.
 	tracesMegabyte int64 = 1024 * 1024
+	// tracesRequestTimeout limits each Tempo request.
+	tracesRequestTimeout = collectExecTimeout
 )
 
 // TraceOptions are the validated options of the traces collector.
@@ -375,10 +377,10 @@ func newTempoClient(baseURL, token string) *tempoClient {
 	return &tempoClient{baseURL: strings.TrimRight(baseURL, "/"), token: token, client: &http.Client{}}
 }
 
-// get sends one GET request limited by collectExecTimeout and returns the body
-// of a 2xx answer.
+// get sends one GET request limited by tracesRequestTimeout and returns the
+// body of a 2xx answer.
 func (c *tempoClient) get(ctx context.Context, path string, query url.Values) ([]byte, error) {
-	rctx, cancel := context.WithTimeout(ctx, collectExecTimeout)
+	rctx, cancel := context.WithTimeout(ctx, tracesRequestTimeout)
 	defer cancel()
 
 	target := c.baseURL + path
@@ -397,7 +399,7 @@ func (c *tempoClient) get(ctx context.Context, path string, query url.Values) ([
 	resp, err := c.client.Do(req)
 	if err != nil {
 		if errors.Is(rctx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-			return nil, &timeoutError{timeout: collectExecTimeout}
+			return nil, &timeoutError{timeout: tracesRequestTimeout}
 		}
 		return nil, err
 	}
@@ -770,8 +772,11 @@ func partialTracesError(details *traceCollectionDetails, err error) error {
 }
 
 // tempoError turns a Tempo request error into the collector outcome: a
-// backend that does not answer the search is skipped, a rejected request
-// names the token variable, and any other answer is a failure.
+// backend that does not answer the search, or does not answer it in time, is
+// skipped (INFP-744: without a reachable Tempo, the collector is skipped); a
+// rejected request names the token variable; any other answer is a failure.
+// A fetch that does not answer stays a failure, because the search showed
+// that the backend is reachable.
 func tempoError(err error, customURL bool, backend, step string) error {
 	var status *tempoStatusError
 	if errors.As(err, &status) {
@@ -784,10 +789,15 @@ func tempoError(err error, customURL bool, backend, step string) error {
 		return fmt.Errorf("the trace backend %s failed: %w", step, err)
 	}
 
-	var timeout *timeoutError
-	var netErr net.Error
-	if step == "search" && !errors.As(err, &timeout) && errors.As(err, &netErr) {
-		return &collectSkipError{reason: fmt.Sprintf("Tempo at %s did not answer; use --traces-tempo-url", backend)}
+	if step == "search" {
+		var timeout *timeoutError
+		if errors.As(err, &timeout) {
+			return &collectSkipError{reason: fmt.Sprintf("Tempo at %s did not answer within %s; use --traces-tempo-url", backend, formatTraceDuration(timeout.timeout))}
+		}
+		var netErr net.Error
+		if errors.As(err, &netErr) {
+			return &collectSkipError{reason: fmt.Sprintf("Tempo at %s did not answer; use --traces-tempo-url", backend)}
+		}
 	}
 	return fmt.Errorf("the trace backend %s failed: %w", step, err)
 }
