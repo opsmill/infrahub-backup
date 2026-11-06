@@ -24,7 +24,7 @@ Before collecting a bundle:
 - The `infrahub-collect` binary is installed ([installation guide](./install.mdx))
 - `kubectl` is configured with access to the cluster running Infrahub
 - Your role can read pod logs and execute commands in pods (`pods/log` and `pods/exec`); no write or scale permissions are needed
-- To include traces (`--include-traces`), your role can also list services (`list` on `services`) and forward a port to a pod (`create` on `pods/portforward`)
+- To include traces from the deployment's Tempo (`--include-traces` without `--traces-tempo-url`), your role can also find the Tempo service and forward a port to its pod: `list` and `get` on `services`, `get` and `list` on `pods`, and `create` on `pods/portforward`
 
 </TabItem>
 </Tabs>
@@ -307,7 +307,7 @@ On Docker Compose, confirm the project is running with `docker compose ls`; the 
 
 Log collection needs the `pods/log` permission and the status collectors need `pods/exec`. If your role lacks one of them, the affected collectors are recorded as failed in the manifest. Ask your cluster administrator for read access to both — collection needs no write or scale permissions.
 
-With `--include-traces`, the collector also needs `list` on `services` and `create` on `pods/portforward`. Without them, the `traces` entry is `skipped` and the reason names the missing permission. You can also read the traces through a URL that your machine reaches, with `--traces-tempo-url`.
+With `--include-traces`, the collector finds the deployment's Tempo and forwards a port to it, which needs `list` and `get` on `services`, `get` and `list` on `pods`, and `create` on `pods/portforward`. `kubectl port-forward` reads the service and the pod behind it before it opens the port. Without these permissions, the `traces` entry is `skipped` and the reason names what is missing. With `--traces-tempo-url`, the collector reads a URL that your machine reaches and needs none of them.
 
 ### Docker or kubectl not found
 

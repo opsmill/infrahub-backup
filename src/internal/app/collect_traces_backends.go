@@ -129,7 +129,7 @@ func (k *KubernetesBackend) LocateTempo(ctx context.Context) (string, func(), er
 	}, "kubectl", "port-forward", "-n", k.namespace, "service/"+service, ":"+tempoServicePort)
 	if err != nil {
 		if isForbidden(err.Error()) {
-			return "", nil, &tempoPermissionError{action: "forward a port to the Tempo pod", grant: "create on pods/portforward"}
+			return "", nil, &tempoPermissionError{action: "forward a port to the Tempo pod", grant: "get on services, get and list on pods, and create on pods/portforward"}
 		}
 		return "", nil, fmt.Errorf("kubectl port-forward service/%s: %w", service, err)
 	}
