@@ -1200,34 +1200,37 @@ def install_neo4j_cluster(
     )
 
     values_dir = tmp_path_factory.mktemp(f"neo4j-cluster-{namespace}")
-    installs = []
+    installs: list[tuple[str, subprocess.Popen]] = []
     for index in range(NEO4J_CLUSTER_SIZE):
         release = f"database-{index}"
         values_path = values_dir / f"{release}.yaml"
         values = _neo4j_cluster_values(labels or {}, env or {})
         values_path.write_text(yaml.dump(values))
         installs.append(
-            subprocess.Popen(
-                [
-                    "helm",
-                    "upgrade",
-                    "--install",
-                    release,
-                    "neo4j",
-                    "--repo",
-                    "https://helm.neo4j.com/neo4j",
-                    "--version",
-                    NEO4J_CLUSTER_CHART_VERSION,
-                    "-n",
-                    namespace,
-                    "-f",
-                    str(values_path),
-                    "--kubeconfig",
-                    kubeconfig_path,
-                ]
+            (
+                release,
+                subprocess.Popen(
+                    [
+                        "helm",
+                        "upgrade",
+                        "--install",
+                        release,
+                        "neo4j",
+                        "--repo",
+                        "https://helm.neo4j.com/neo4j",
+                        "--version",
+                        NEO4J_CLUSTER_CHART_VERSION,
+                        "-n",
+                        namespace,
+                        "-f",
+                        str(values_path),
+                        "--kubeconfig",
+                        kubeconfig_path,
+                    ]
+                ),
             )
         )
-    failed = [install.args[3] for install in installs if install.wait() != 0]
+    failed = [release for release, install in installs if install.wait() != 0]
     if failed:
         raise RuntimeError(f"helm could not install the Neo4j cluster members {failed}")
 
