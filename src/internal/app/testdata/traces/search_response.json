@@ -1,0 +1,132 @@
+{
+  "traces": [
+    {
+      "traceID": "9949940536b9e55f8c62cd48c077580f",
+      "rootServiceName": "infrahub-server",
+      "rootTraceName": "task-run",
+      "startTimeUnixNano": "1793889067218777000",
+      "durationMs": 1500,
+      "spanSet": {
+        "spans": [
+          {
+            "spanID": "45011773c831995f",
+            "startTimeUnixNano": "1793889067218777000",
+            "durationNanos": "1500000000"
+          }
+        ],
+        "matched": 1
+      },
+      "spanSets": [
+        {
+          "spans": [
+            {
+              "spanID": "45011773c831995f",
+              "startTimeUnixNano": "1793889067218777000",
+              "durationNanos": "1500000000"
+            }
+          ],
+          "matched": 1
+        }
+      ],
+      "serviceStats": {
+        "infrahub-server": {
+          "spanCount": 1
+        }
+      }
+    },
+    {
+      "traceID": "5b0c30fdad6ed0e4637277ab4a9f1554",
+      "rootServiceName": "infrahub-server",
+      "rootTraceName": "flow-run",
+      "startTimeUnixNano": "1793889066218777000",
+      "durationMs": 12000,
+      "spanSet": {
+        "spans": [
+          {
+            "spanID": "d44d5e99dee629ee",
+            "startTimeUnixNano": "1793889066218777000",
+            "durationNanos": "12000000000"
+          }
+        ],
+        "matched": 1
+      },
+      "spanSets": [
+        {
+          "spans": [
+            {
+              "spanID": "d44d5e99dee629ee",
+              "startTimeUnixNano": "1793889066218777000",
+              "durationNanos": "12000000000"
+            }
+          ],
+          "matched": 1
+        }
+      ],
+      "serviceStats": {
+        "infrahub-server": {
+          "spanCount": 1
+        }
+      }
+    },
+    {
+      "traceID": "f459bd9861636b0ddf4ccb23154e120",
+      "rootServiceName": "infrahub-server",
+      "rootTraceName": "POST /graphql",
+      "startTimeUnixNano": "1793889065218777000",
+      "durationMs": 3000,
+      "spanSet": {
+        "spans": [
+          {
+            "spanID": "4ad43e77dad73957",
+            "startTimeUnixNano": "1793889065218777000",
+            "durationNanos": "3000000000"
+          },
+          {
+            "spanID": "01b13b89fae09111",
+            "startTimeUnixNano": "1793889065418777000",
+            "durationNanos": "2600000000"
+          },
+          {
+            "spanID": "7f624077c9820a0b",
+            "startTimeUnixNano": "1793889065318777000",
+            "durationNanos": "2800000000"
+          }
+        ],
+        "matched": 3
+      },
+      "spanSets": [
+        {
+          "spans": [
+            {
+              "spanID": "4ad43e77dad73957",
+              "startTimeUnixNano": "1793889065218777000",
+              "durationNanos": "3000000000"
+            },
+            {
+              "spanID": "01b13b89fae09111",
+              "startTimeUnixNano": "1793889065418777000",
+              "durationNanos": "2600000000"
+            },
+            {
+              "spanID": "7f624077c9820a0b",
+              "startTimeUnixNano": "1793889065318777000",
+              "durationNanos": "2800000000"
+            }
+          ],
+          "matched": 3
+        }
+      ],
+      "serviceStats": {
+        "infrahub-server": {
+          "spanCount": 3,
+          "errorCount": 1
+        }
+      }
+    }
+  ],
+  "metrics": {
+    "inspectedBytes": "22085",
+    "completedJobs": 3,
+    "totalJobs": 3
+  }
+}
