@@ -236,3 +236,23 @@ func sameKeys(got, want []string) bool {
 	}
 	return true
 }
+
+func TestBase64IDToHexLength(t *testing.T) {
+	traceID := base64.StdEncoding.EncodeToString(make([]byte, 16))
+	spanID := base64.StdEncoding.EncodeToString(make([]byte, 8))
+	if _, err := base64IDToHex(traceID, otlpTraceIDBytes); err != nil {
+		t.Errorf("16-byte trace ID rejected: %v", err)
+	}
+	if _, err := base64IDToHex(spanID, otlpSpanIDBytes); err != nil {
+		t.Errorf("8-byte span ID rejected: %v", err)
+	}
+	if _, err := base64IDToHex(spanID, otlpTraceIDBytes); err == nil {
+		t.Error("8-byte trace ID accepted")
+	}
+	if _, err := base64IDToHex(traceID, otlpSpanIDBytes); err == nil {
+		t.Error("16-byte span ID accepted")
+	}
+	if got, err := base64IDToHex("", otlpSpanIDBytes); err != nil || got != "" {
+		t.Errorf("empty ID = %q, %v", got, err)
+	}
+}

@@ -145,15 +145,15 @@ func filterTrace(answer []byte, allow *traceAttributes) ([]byte, error) {
 
 // filterSpan keeps the allowed fields of one span.
 func filterSpan(span otlpSpan, allow *traceAttributes) (otlpSpan, error) {
-	traceID, err := base64IDToHex(span.TraceID)
+	traceID, err := base64IDToHex(span.TraceID, otlpTraceIDBytes)
 	if err != nil {
 		return otlpSpan{}, fmt.Errorf("invalid traceId %q: %w", span.TraceID, err)
 	}
-	spanID, err := base64IDToHex(span.SpanID)
+	spanID, err := base64IDToHex(span.SpanID, otlpSpanIDBytes)
 	if err != nil {
 		return otlpSpan{}, fmt.Errorf("invalid spanId %q: %w", span.SpanID, err)
 	}
-	parentID, err := base64IDToHex(span.ParentSpanID)
+	parentID, err := base64IDToHex(span.ParentSpanID, otlpSpanIDBytes)
 	if err != nil {
 		return otlpSpan{}, fmt.Errorf("invalid parentSpanId %q: %w", span.ParentSpanID, err)
 	}
@@ -216,9 +216,16 @@ func spanKindName(raw json.RawMessage) string {
 	return ""
 }
 
+// OTLP ID sizes: a trace ID has 16 bytes, a span ID 8 bytes.
+const (
+	otlpTraceIDBytes = 16
+	otlpSpanIDBytes  = 8
+)
+
 // base64IDToHex converts a base64 trace or span ID, as Tempo returns it, to
-// lowercase hex. An empty ID stays empty.
-func base64IDToHex(id string) (string, error) {
+// lowercase hex. The decoded ID must have exactly size bytes, so the file
+// holds IDs that an OTLP receiver accepts. An empty ID stays empty.
+func base64IDToHex(id string, size int) (string, error) {
 	if id == "" {
 		return "", nil
 	}
@@ -229,8 +236,8 @@ func base64IDToHex(id string) (string, error) {
 			return "", err
 		}
 	}
-	if len(decoded) != 8 && len(decoded) != 16 {
-		return "", fmt.Errorf("decodes to %d bytes, want 8 or 16", len(decoded))
+	if len(decoded) != size {
+		return "", fmt.Errorf("decodes to %d bytes, want %d", len(decoded), size)
 	}
 	return hex.EncodeToString(decoded), nil
 }
