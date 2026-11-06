@@ -10,7 +10,7 @@ import (
 
 // manifestVersion is the date-serial version of the bundle manifest schema
 // (bump on breaking manifest changes), mirroring metadataVersion for backups.
-const manifestVersion = 2026070200
+const manifestVersion = 2026110500
 
 // bundleManifestFilename is the manifest file written at the bundle root.
 const bundleManifestFilename = "bundle_information.json"
@@ -31,12 +31,16 @@ const (
 // manifest. Reason is required whenever Status is not success. Artifact
 // optionally references a filesystem artifact the collector produced outside
 // the bundle (e.g. the --include-backup archive path); it is only ever set
-// on success.
+// on success. Details optionally holds structured values a collector records
+// about its run (e.g. the traces collector's window and counts); it can be set
+// for every status, because a skipped or failed run still reports what it
+// tried.
 type CollectorResult struct {
 	Name     string          `json:"name"`
 	Status   collectorStatus `json:"status"`
 	Reason   string          `json:"reason,omitempty"`
 	Artifact string          `json:"artifact,omitempty"`
+	Details  any             `json:"details,omitempty"`
 }
 
 // HelmRelease captures the Helm chart provenance of a Kubernetes install: the
@@ -109,6 +113,15 @@ func (m *BundleManifest) recordFailed(name, reason string) {
 // recordSkipped appends a skipped outcome with a human-readable reason.
 func (m *BundleManifest) recordSkipped(name, reason string) {
 	m.Collectors = append(m.Collectors, CollectorResult{Name: name, Status: collectorStatusSkipped, Reason: reason})
+}
+
+// attachDetails sets the details of the most recently recorded collector
+// entry. A nil details value leaves the entry unchanged.
+func (m *BundleManifest) attachDetails(details any) {
+	if details == nil || len(m.Collectors) == 0 {
+		return
+	}
+	m.Collectors[len(m.Collectors)-1].Details = details
 }
 
 // write serializes the manifest as bundle_information.json in bundleDir.

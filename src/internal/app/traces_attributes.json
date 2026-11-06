@@ -1,0 +1,34 @@
+{
+    "resource": [
+        "service.name",
+        "service.version",
+        "worker.id"
+    ],
+    "by_span_name": {
+        "execute_db_query_with_metadata": [
+            "query_name",
+            "rows"
+        ],
+        "execute_graphql": [
+            "type",
+            "operation",
+            "name",
+            "branch"
+        ]
+    },
+    "by_span_kind": {
+        "SPAN_KIND_SERVER": [
+            "http.method",
+            "http.route",
+            "http.status_code"
+        ]
+    },
+    "removed": [
+        "query",
+        "query_id",
+        "http.url",
+        "http.target",
+        "http.user_agent",
+        "net.peer.ip"
+    ]
+}
