@@ -32,6 +32,7 @@ EXPECTED_COLLECTORS = {f"logs/{service}" for service in LOG_SERVICES} | {
     "task-manager-state",
     "server-info",
     "telemetry",
+    "traces",
     "metrics",
     "benchmark",
     "backup",
@@ -39,7 +40,7 @@ EXPECTED_COLLECTORS = {f"logs/{service}" for service in LOG_SERVICES} | {
 
 # Opt-in extras: always present in the manifest, skipped ("not requested")
 # unless their flag is set.
-OPT_IN_COLLECTORS = {"backup", "benchmark"}
+OPT_IN_COLLECTORS = {"backup", "benchmark", "traces"}
 
 # Bundle directory owned by each non-log collector (contracts/bundle-layout.md).
 COLLECTOR_DIRS = {
@@ -53,7 +54,9 @@ COLLECTOR_DIRS = {
     "metrics": "metrics",
 }
 
-ALLOWED_TOP_LEVEL = {"bundle_information.json", "logs", "benchmark"} | set(COLLECTOR_DIRS.values())
+# traces/ is not in COLLECTOR_DIRS: a successful traces collection that finds
+# no slow trace writes no folder, so the collector does not always own one.
+ALLOWED_TOP_LEVEL = {"bundle_information.json", "logs", "benchmark", "traces"} | set(COLLECTOR_DIRS.values())
 
 COLLECT_ID_RE = re.compile(r"^[0-9]{8}_[0-9]{6}$")
 
