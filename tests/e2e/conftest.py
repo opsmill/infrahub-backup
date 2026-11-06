@@ -1002,6 +1002,13 @@ DIRECT_MODE_RULES = [
     {"apiGroups": ["apps"], "resources": ["deployments/scale", "statefulsets/scale"], "verbs": ["get", "patch"]},
 ]
 
+# The line a run logs when it takes direct mode, from `decideDirectMode` in
+# src/internal/app/external_local.go, the one it logs when it takes the transient Job path
+# instead, and the one it logs when it creates a transient workload.
+DIRECT_MODE_LINE = "Running the external database tools in this process, with no transient Job"
+JOB_PATH_LINE = "Running the external database tools in a transient Job"
+TRANSIENT_WORKLOAD_LINE = "Creating a transient"
+
 
 async def transient_jobs(kubeconfig_path: str, namespace: str) -> list[str]:
     """Every Job in the namespace carrying the transient marker, as `job/name`."""
