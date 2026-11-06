@@ -1044,3 +1044,343 @@ async def transient_objects(kubeconfig_path: str, namespace: str) -> list[str]:
         if not isinstance(secret, dict):
             found.append(f"secret/{secret.name}")
     return found
+
+
+# ---------------------------------------------------------------------------
+# Neo4j cluster topologies (stacked on spec 007-external-database-backup)
+# ---------------------------------------------------------------------------
+# Every other Kubernetes case runs against one Neo4j server. These two topologies run
+# Infrahub against a three-server Neo4j cluster instead, built the way Infrahub's own HA
+# example builds it (`development/k8s/neo4j-values.yaml` and `development/deploy.tf` in
+# opsmill/infrahub): three releases of the Neo4j Helm chart that discover each other
+# because they share `neo4j.name`, and a `neo4j-headless-service` release in front of
+# them, which Infrahub connects to with the `neo4j` protocol so that the driver routes
+# writes to the current leader.
+#
+#   internal  The cluster runs in the Infrahub namespace and its pods carry
+#             `infrahub/service: database`, as the HA example labels them. The tool
+#             finds three `database` pods and restores through the cluster flow
+#             (restoreNeo4jCluster), which seeds the database on every server.
+#   external  The cluster runs in a namespace of its own, so the Infrahub namespace has no
+#             `database` workload and the tool takes the external path: it reads the
+#             members from the cluster, captures through `neo4j-admin database backup
+#             --from=<members>`, and restores by seeding every member from the object
+#             store.
+#
+# Declared by INFRAHUB_TESTING_NEO4J_CLUSTER, set to `internal` or `external`. Each
+# topology is its own pytest session, so one vcluster holds one Neo4j cluster and one
+# Infrahub deployment. The external topology also needs everything the single-server
+# external suites need: INFRAHUB_TESTING_EXTERNAL_DB=database, the
+# INFRAHUB_TESTING_EXTERNAL_NEO4J_* variables naming the cluster's headless service, the
+# INFRAHUB_TESTING_EXTERNAL_SEED_* store, and INFRAHUB_TESTING_EXTERNAL_DB_IMAGE. The
+# Neo4j servers read the seed store at INFRAHUB_TESTING_EXTERNAL_SEED_SERVER_ENDPOINT, or
+# at INFRAHUB_TESTING_EXTERNAL_SEED_ENDPOINT when that is unset. The two differ when the
+# pods and the tool reach the store by different names, as on Docker Desktop, where only
+# containers resolve `host.docker.internal`.
+
+NEO4J_CLUSTER_ENV_VAR = "INFRAHUB_TESTING_NEO4J_CLUSTER"
+
+# The Neo4j version of the cluster. It is the version the infrahub-backup image carries
+# its Neo4j tools from (`FROM neo4j:...` in the Dockerfile): the external path refuses
+# tools older than the server (FR-006), so a newer cluster would test that refusal instead.
+NEO4J_CLUSTER_CHART_VERSION = "2025.10.1"
+NEO4J_CLUSTER_SIZE = 3
+# `neo4j.name` in every release: the members discover each other by it, and the headless
+# service is named after it.
+NEO4J_CLUSTER_NAME = "infrahub"
+NEO4J_CLUSTER_USERNAME = "neo4j"
+NEO4J_CLUSTER_PASSWORD = "admin12345"
+# The Secret every release reads the password from. One Secret shared by all three, as in
+# the HA example: a password set in the values makes each release create the same
+# `<name>-auth` Secret, and the three releases then fight over it.
+NEO4J_CLUSTER_AUTH_SECRET = "neo4j-user"
+# The namespace the external topology's cluster runs in.
+NEO4J_EXTERNAL_CLUSTER_NAMESPACE = "neo4j-cluster"
+
+
+def neo4j_cluster_topology() -> str:
+    """The cluster topology this session declares: `internal`, `external` or ""."""
+    return os.environ.get(NEO4J_CLUSTER_ENV_VAR, "").strip().lower()
+
+
+def requires_neo4j_cluster(topology: str):
+    """Skip unless the session declares this Neo4j cluster topology.
+
+    The cluster cases deploy a cluster of their own, which no other session has, so they
+    skip by name in every session that does not declare them, including the default
+    `pytest -m k8s tests/e2e` run.
+    """
+    declared = neo4j_cluster_topology()
+    reason = (
+        f"needs a {topology} Neo4j cluster: set {NEO4J_CLUSTER_ENV_VAR}={topology}. In CI, the "
+        "e2e-tests-k8s-neo4j-cluster job runs one session per topology"
+    )
+    return pytest.mark.skipif(declared != topology, reason=reason)
+
+
+def neo4j_cluster_headless_address(namespace: str) -> str:
+    """The address Infrahub connects to: the headless service in front of every member."""
+    return f"{NEO4J_CLUSTER_NAME}-headless.{namespace}.svc.cluster.local:7687"
+
+
+def _neo4j_cluster_values(labels: dict[str, str], env: dict[str, str]) -> dict:
+    """Helm values for one member of the cluster.
+
+    The resource figures keep three members and an Infrahub deployment inside one CI
+    runner. Anti-affinity is off because a vcluster has one node, and the chart otherwise
+    refuses to schedule two members on it. The backup listener is bound to every interface
+    so that a client outside the pod can take an online backup, which is what the external
+    path does: it runs `neo4j-admin database backup --from=<host>:6362` for each host in
+    INFRAHUB_DB_ADDRESS, and the headless service resolves straight to the member pods.
+    """
+    config = {
+        "server.memory.heap.initial_size": "512m",
+        "server.memory.heap.max_size": "512m",
+        "server.memory.pagecache.size": "256m",
+        "server.backup.enabled": "true",
+        "server.backup.listen_address": "0.0.0.0:6362",
+        "dbms.security.auth_minimum_password_length": "4",
+    }
+
+    return {
+        "neo4j": {
+            "name": NEO4J_CLUSTER_NAME,
+            "minimumClusterSize": NEO4J_CLUSTER_SIZE,
+            "edition": "enterprise",
+            "acceptLicenseAgreement": "yes",
+            "passwordFromSecret": NEO4J_CLUSTER_AUTH_SECRET,
+            "labels": labels,
+            "resources": {"cpu": "500m", "memory": "2Gi"},
+        },
+        "config": config,
+        "env": env,
+        "podSpec": {"podAntiAffinity": False},
+        "logInitialPassword": False,
+        "volumes": {
+            "data": {
+                "mode": "defaultStorageClass",
+                "defaultStorageClass": {"requests": {"storage": "2Gi"}},
+            }
+        },
+        # The chart's own load balancer service is not part of the HA example.
+        "services": {"neo4j": {"enabled": False}},
+    }
+
+
+def install_neo4j_cluster(
+    kubeconfig_path: str,
+    namespace: str,
+    tmp_path_factory,
+    labels: dict[str, str] | None = None,
+    env: dict[str, str] | None = None,
+) -> None:
+    """Install a three-member Neo4j Enterprise cluster and wait until it serves requests.
+
+    The members are installed at the same time, without `helm --wait`: a member becomes
+    ready only once the cluster has formed, so waiting on the first install alone would
+    wait for members that were never started.
+    """
+
+    def kubectl(*args: str, stdin: str | None = None) -> None:
+        subprocess.run(
+            ["kubectl", "--kubeconfig", kubeconfig_path, "-n", namespace, *args], input=stdin, text=True, check=True
+        )
+
+    subprocess.run(
+        ["kubectl", "--kubeconfig", kubeconfig_path, "create", "namespace", namespace],
+        check=False,
+        capture_output=True,
+    )
+    kubectl(
+        "create",
+        "secret",
+        "generic",
+        NEO4J_CLUSTER_AUTH_SECRET,
+        f"--from-literal=NEO4J_AUTH={NEO4J_CLUSTER_USERNAME}/{NEO4J_CLUSTER_PASSWORD}",
+    )
+
+    values_dir = tmp_path_factory.mktemp(f"neo4j-cluster-{namespace}")
+    installs = []
+    for index in range(NEO4J_CLUSTER_SIZE):
+        release = f"database-{index}"
+        values_path = values_dir / f"{release}.yaml"
+        values = _neo4j_cluster_values(labels or {}, env or {})
+        values_path.write_text(yaml.dump(values))
+        installs.append(
+            subprocess.Popen(
+                [
+                    "helm",
+                    "upgrade",
+                    "--install",
+                    release,
+                    "neo4j",
+                    "--repo",
+                    "https://helm.neo4j.com/neo4j",
+                    "--version",
+                    NEO4J_CLUSTER_CHART_VERSION,
+                    "-n",
+                    namespace,
+                    "-f",
+                    str(values_path),
+                    "--kubeconfig",
+                    kubeconfig_path,
+                ]
+            )
+        )
+    failed = [install.args[3] for install in installs if install.wait() != 0]
+    if failed:
+        raise RuntimeError(f"helm could not install the Neo4j cluster members {failed}")
+
+    subprocess.run(
+        [
+            "helm",
+            "upgrade",
+            "--install",
+            "database-service",
+            "neo4j-headless-service",
+            "--repo",
+            "https://helm.neo4j.com/neo4j",
+            "--version",
+            NEO4J_CLUSTER_CHART_VERSION,
+            "-n",
+            namespace,
+            "--set",
+            f"neo4j.name={NEO4J_CLUSTER_NAME}",
+            "--kubeconfig",
+            kubeconfig_path,
+        ],
+        check=True,
+    )
+
+    for index in range(NEO4J_CLUSTER_SIZE):
+        kubectl("rollout", "status", f"statefulset/database-{index}", "--timeout=10m")
+
+    # Ready means each member answers Bolt, not that the default database is online on all
+    # three, which is what Infrahub's first write needs.
+    deadline = time.monotonic() + 300
+    status = ""
+    while time.monotonic() < deadline:
+        result = subprocess.run(
+            [
+                "kubectl",
+                "--kubeconfig",
+                kubeconfig_path,
+                "-n",
+                namespace,
+                "exec",
+                "database-0-0",
+                "--",
+                "cypher-shell",
+                "-u",
+                NEO4J_CLUSTER_USERNAME,
+                "-p",
+                NEO4J_CLUSTER_PASSWORD,
+                "--format",
+                "plain",
+                "SHOW DATABASE neo4j YIELD currentStatus RETURN currentStatus",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        status = result.stdout + result.stderr
+        rows = [line.strip().strip('"') for line in result.stdout.splitlines()[1:] if line.strip()]
+        if len(rows) == NEO4J_CLUSTER_SIZE and all(row == "online" for row in rows):
+            return
+        time.sleep(5)
+    raise RuntimeError(f"the Neo4j cluster in {namespace} did not bring the database online:\n{status}")
+
+
+def _neo4j_cluster_infrahub_overlay(address: str) -> dict:
+    """Helm values that point Infrahub at a Neo4j cluster instead of the chart's own Neo4j.
+
+    The same keys as the external overlay (see `_external_values_overlay`), plus the
+    `neo4j` protocol, which the HA example sets so that the driver routes each query to
+    the member that can serve it.
+    """
+    env = {
+        "INFRAHUB_DB_ADDRESS": address.rsplit(":", 1)[0],
+        "INFRAHUB_DB_PORT": address.rsplit(":", 1)[1],
+        "INFRAHUB_DB_PROTOCOL": "neo4j",
+        "INFRAHUB_DB_USERNAME": NEO4J_CLUSTER_USERNAME,
+        "INFRAHUB_DB_PASSWORD": NEO4J_CLUSTER_PASSWORD,
+    }
+    overlay: dict = {"neo4j": {"enabled": False}}
+    for component in ("infrahubServer", "infrahubTaskWorker"):
+        overlay[component] = {component: {"env": dict(env)}}
+    return overlay
+
+
+@pytest.fixture(scope="session")
+async def infrahub_k8s_neo4j_cluster(vcluster: dict, tmp_path_factory) -> AsyncGenerator[dict, None]:
+    """Infrahub with a three-member Neo4j cluster in its own namespace (internal topology)."""
+    if neo4j_cluster_topology() != "internal":
+        pytest.skip(f"needs {NEO4J_CLUSTER_ENV_VAR}=internal")
+
+    kubeconfig_path = vcluster["kubeconfig_path"]
+    namespace = "infrahub-cluster"
+
+    install_neo4j_cluster(
+        kubeconfig_path,
+        namespace,
+        tmp_path_factory,
+        labels={"infrahub/service": "database"},
+    )
+    overlay = _neo4j_cluster_infrahub_overlay(neo4j_cluster_headless_address(namespace))
+    _helm_install_infrahub(kubeconfig_path, namespace, _infrahub_values_path(tmp_path_factory, overlay=overlay))
+
+    async with portforward_infrahub(kubeconfig_path, namespace):
+        pass  # health check happens inside the context manager
+
+    yield {
+        "namespace": namespace,
+        "kubeconfig_path": kubeconfig_path,
+        "token": INFRAHUB_ADMIN_TOKEN,
+    }
+
+
+@pytest.fixture(scope="session")
+async def infrahub_k8s_external_neo4j_cluster(
+    vcluster: dict,
+    external_topology: dict,
+    external_seed_store: dict,
+    external_db_image: str,
+    tmp_path_factory,
+) -> AsyncGenerator[dict, None]:
+    """Infrahub pointed at a three-member Neo4j cluster outside its namespace.
+
+    The cluster's servers read a restore's seed from the object store themselves, so they
+    carry the store's credentials and endpoint, as the single external server in CI does.
+    """
+    if neo4j_cluster_topology() != "external":
+        pytest.skip(f"needs {NEO4J_CLUSTER_ENV_VAR}=external")
+
+    kubeconfig_path = vcluster["kubeconfig_path"]
+    namespace = "infrahub-external-cluster"
+
+    install_neo4j_cluster(
+        kubeconfig_path,
+        NEO4J_EXTERNAL_CLUSTER_NAMESPACE,
+        tmp_path_factory,
+        env={
+            "AWS_ACCESS_KEY_ID": external_seed_store["access_key"],
+            "AWS_SECRET_ACCESS_KEY": external_seed_store["secret_key"],
+            "AWS_REGION": external_seed_store["region"],
+            "AWS_ENDPOINT_URL_S3": os.environ.get(
+                "INFRAHUB_TESTING_EXTERNAL_SEED_SERVER_ENDPOINT", external_seed_store["endpoint"]
+            ),
+        },
+    )
+    overlay = _neo4j_cluster_infrahub_overlay(external_topology["neo4j_address"])
+    _helm_install_infrahub(kubeconfig_path, namespace, _infrahub_values_path(tmp_path_factory, overlay=overlay))
+
+    async with portforward_infrahub(kubeconfig_path, namespace):
+        pass  # health check happens inside the context manager
+
+    yield {
+        "namespace": namespace,
+        "kubeconfig_path": kubeconfig_path,
+        "token": INFRAHUB_ADMIN_TOKEN,
+        "external_services": {SERVICE_NEO4J},
+        "external_db_image": external_db_image,
+        "neo4j_namespace": NEO4J_EXTERNAL_CLUSTER_NAMESPACE,
+    }
