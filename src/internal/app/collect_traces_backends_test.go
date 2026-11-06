@@ -136,9 +136,9 @@ const fakeKubectlTempoScript = `case "$1 $2" in
 		echo 'error: error upgrading connection: pods "tempo-0" is forbidden: User "x" cannot create resource "pods/portforward"' >&2
 		exit 1
 	fi
+	echo $$ > "$dir/pid"
 	echo "Forwarding from 127.0.0.1:43210 -> 3100"
 	echo "Forwarding from [::1]:43210 -> 3100"
-	echo $$ > "$dir/pid"
 	exec sleep 30 ;;
 "exec -i")
 	cat > "$dir/stdin"
@@ -170,8 +170,11 @@ func TestKubernetesLocateTempo(t *testing.T) {
 			t.Errorf("calls = %q", calls)
 		}
 
+		pid, err := os.ReadFile(filepath.Join(dir, "pid"))
+		if err != nil || strings.TrimSpace(string(pid)) == "" {
+			t.Fatalf("cannot read the pid of the port-forward process: %v", err)
+		}
 		stop()
-		pid, _ := os.ReadFile(filepath.Join(dir, "pid"))
 		if alive := exec.Command("kill", "-0", strings.TrimSpace(string(pid))).Run() == nil; alive {
 			t.Error("the port-forward process still runs after stop")
 		}

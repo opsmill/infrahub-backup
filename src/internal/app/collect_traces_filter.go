@@ -13,8 +13,10 @@ import (
 )
 
 // tracesAttributesJSON is the allow-list of the trace attributes kept in the
-// bundle. The same file lists the keys removed on purpose, so the end-to-end
-// test can fail on a key that is in neither list (FR-007 of INFP-744).
+// bundle. The same file lists the keys removed on purpose, so that a planned
+// end-to-end test (FR-007 of INFP-744, not written yet) can fail on a key that
+// is in neither list. Today, the unit tests check only that no key is both
+// kept and removed.
 //
 //go:embed traces_attributes.json
 var tracesAttributesJSON []byte
