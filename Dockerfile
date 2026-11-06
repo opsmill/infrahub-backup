@@ -72,7 +72,7 @@ RUN cd /opt/neo4j/lib && rm -f \
 # modules loaded by reflection or service lookup. binutils provides the objcopy that --strip-debug runs.
 # No --compress: the image layer compresses an uncompressed lib/modules better than jlink does.
 FROM alpine:3.23 AS java-runtime
-ARG OPENJDK_VERSION=21.0.12_p8-r0
+ARG OPENJDK_VERSION=21.0.13.0.3_p1-r0
 RUN apk add --no-cache "openjdk21-jdk=${OPENJDK_VERSION}" "openjdk21-jmods=${OPENJDK_VERSION}" binutils && \
     /usr/lib/jvm/java-21-openjdk/bin/jlink \
       --add-modules java.base,java.compiler,java.datatransfer,java.desktop,java.instrument,java.logging,java.management,java.naming,java.net.http,java.prefs,java.rmi,java.scripting,java.security.jgss,java.security.sasl,java.sql,java.transaction.xa,java.xml,jdk.attach,jdk.charsets,jdk.crypto.cryptoki,jdk.crypto.ec,jdk.httpserver,jdk.incubator.vector,jdk.jdi,jdk.jfr,jdk.management,jdk.management.jfr,jdk.naming.dns,jdk.net,jdk.security.auth,jdk.unsupported,jdk.zipfs \
