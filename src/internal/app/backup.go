@@ -272,6 +272,9 @@ func (iops *InfrahubOps) CreateBackup(force bool, neo4jMetadata string, excludeT
 		return err
 	}
 	if editionInfo.RequiresOfflineCapture() {
+		if err := iops.recordReplicaCounts(appServicesStoppedForBackup...); err != nil {
+			return err
+		}
 		logrus.Warn("Neo4j Community Edition detected; Infrahub services will be stopped and restarted before the backup begins.")
 		logrus.Warn("Waiting 10 seconds to allow the user to abort... CTRL+C to cancel.")
 		time.Sleep(10 * time.Second)
@@ -621,6 +624,10 @@ func (iops *InfrahubOps) RestoreBackup(backupFile string, excludeTaskManager boo
 	// every exit path from here on (FR-011). An all-internal deployment created
 	// none and the call does nothing.
 	defer iops.releaseTransientWorkloads()
+
+	if err := iops.recordReplicaCounts(restoreServices...); err != nil {
+		return err
+	}
 
 	workDir, err := os.MkdirTemp("", "infrahub_restore_*")
 	if err != nil {

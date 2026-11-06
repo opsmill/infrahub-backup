@@ -2,7 +2,6 @@ package app
 
 import (
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -221,15 +220,17 @@ func TestMetadataCompatibilityHoldsInBothDirections(t *testing.T) {
 			t.Errorf("Checksums = %v, want nil rather than an empty map that reads as 'verified nothing'", metadata.Checksums)
 		}
 
-		// An unstated edition is not a refusal: ResolveRestoreEdition falls back
-		// conservatively, which is what keeps such an artefact restorable
-		// without operator action.
-		edition, err := NewNeo4jEditionInfo("", errors.New("probe failed")).ResolveRestoreEdition(metadata.Neo4jEdition)
+		// An unstated edition is not a refusal: ResolveRestoreEdition uses the
+		// edition the target reports, which is what keeps such an artefact
+		// restorable without operator action. A probe that did not answer is a
+		// different case: the restore method cannot be chosen, so the restore
+		// stops before anything is stopped (TestResolveRestoreEdition).
+		edition, err := NewNeo4jEditionInfo(neo4jEditionCommunity, nil).ResolveRestoreEdition(metadata.Neo4jEdition)
 		if err != nil {
 			t.Fatalf("an older artefact's unstated edition stopped the restore: %v", err)
 		}
-		if edition == "" {
-			t.Error("ResolveRestoreEdition() = \"\", want a conservative fallback")
+		if edition != neo4jEditionCommunity {
+			t.Errorf("ResolveRestoreEdition() = %q, want the edition the target reported", edition)
 		}
 	})
 }

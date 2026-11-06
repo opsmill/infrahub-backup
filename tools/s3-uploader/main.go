@@ -50,7 +50,7 @@ func NewS3Client(cfg *S3Config) (*S3Client, error) {
 		}
 		host = u.Host
 		secure = u.Scheme != "http"
-		pathStyle = true // Required for MinIO and most S3-compatible services
+		pathStyle = true // Required for most S3-compatible services
 		fmt.Printf("Using custom S3 endpoint: %s\n", cfg.Endpoint)
 	}
 
@@ -146,7 +146,7 @@ func formatBytes(bytes int64) string {
 func main() {
 	bucket := flag.String("bucket", "", "S3 bucket name (required)")
 	prefix := flag.String("prefix", "", "S3 key prefix (optional)")
-	endpoint := flag.String("endpoint", "", "Custom S3 endpoint for S3-compatible storage (e.g., http://localhost:9000 for MinIO)")
+	endpoint := flag.String("endpoint", "", "Custom S3 endpoint for S3-compatible storage (e.g., http://localhost:9000)")
 	region := flag.String("region", "us-east-1", "AWS region")
 	filePath := flag.String("file", "", "Path to the file to upload (required)")
 
@@ -162,7 +162,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
 		fmt.Fprintf(os.Stderr, "  # Upload to AWS S3\n")
 		fmt.Fprintf(os.Stderr, "  %s -bucket my-bucket -file /path/to/file.tar.gz\n\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  # Upload to MinIO\n")
+		fmt.Fprintf(os.Stderr, "  # Upload to a local S3-compatible server\n")
 		fmt.Fprintf(os.Stderr, "  %s -bucket my-bucket -endpoint http://localhost:9000 -file /path/to/file.tar.gz\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  # Upload to Google Cloud Storage\n")
 		fmt.Fprintf(os.Stderr, "  %s -bucket my-bucket -endpoint https://storage.googleapis.com -region auto -file /path/to/file.tar.gz\n\n", os.Args[0])

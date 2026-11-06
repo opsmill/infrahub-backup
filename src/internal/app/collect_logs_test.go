@@ -122,6 +122,19 @@ func TestKubectlLogArgs(t *testing.T) {
 	}
 }
 
+func TestKubectlReplicaCopyArgs(t *testing.T) {
+	replica := Replica{Service: "task-worker", Pod: "task-worker-abc", Container: "infrahub-task-worker"}
+
+	got := kubectlReplicaCopyArgs("infrahub", replica, "/tmp/export.json", "/bundle/export.json")
+	want := []string{
+		"cp", "-c", "infrahub-task-worker",
+		"infrahub/task-worker-abc:/tmp/export.json", "/bundle/export.json",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("kubectlReplicaCopyArgs() = %v, want %v", got, want)
+	}
+}
+
 func TestKubectlContainerStatusArgs(t *testing.T) {
 	got := kubectlContainerStatusArgs("infrahub", "database-0")
 	want := []string{

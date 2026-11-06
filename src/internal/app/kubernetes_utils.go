@@ -8,10 +8,23 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// neo4jInstanceSelector matches the server pods the Neo4j Helm chart deploys.
+const neo4jInstanceSelector = "helm.neo4j.com/pod_category=neo4j-instance"
+
+// podSelectors returns the label selectors tried, in order, to find a
+// service's pods. infrahub/service comes first because the Infrahub Helm chart
+// and the HA deployment examples set it on every component. The generic labels
+// come last because other software in the namespace sets them too: a
+// PostgreSQL operator such as CloudNativePG labels its pods
+// app.kubernetes.io/component=database, the same value as the Neo4j service.
 func (k *KubernetesBackend) podSelectors(service string) []string {
-	selectors := make([]string, 0, len(serviceLabelKeys))
+	selectors := make([]string, 0, len(serviceLabelKeys)+1)
 	for _, key := range serviceLabelKeys {
 		selectors = append(selectors, fmt.Sprintf("%s=%s", key, service))
+		if key == "infrahub/service" && service == "database" {
+			// A Neo4j installed from its own chart without the infrahub/service label.
+			selectors = append(selectors, neo4jInstanceSelector)
+		}
 	}
 
 	return selectors

@@ -8,6 +8,11 @@ infrahub-backup:
 infrahubServer:
   replicas: 1
   infrahubServer:
+    env:
+      # The reset_database_pod fixture replaces the Neo4j pod while Infrahub
+      # keeps running. Test every pooled connection before reuse, so a request
+      # does not fail with 503 on a connection to the old pod.
+      INFRAHUB_DB_LIVENESS_CHECK_TIMEOUT: "0"
     livenessProbe:
       failureThreshold: 120
       initialDelaySeconds: 1
@@ -24,6 +29,9 @@ infrahubServer:
 
 infrahubTaskWorker:
   replicas: 1
+  infrahubTaskWorker:
+    env:
+      INFRAHUB_DB_LIVENESS_CHECK_TIMEOUT: "0"
 
 upgrade:
   enabled: false

@@ -11,13 +11,14 @@ async def wait_for_http(
     timeout: float = 120.0,
     interval: float = 2.0,
     expected_status: int = 200,
+    headers: dict[str, str] | None = None,
 ) -> None:
     """Poll an HTTP endpoint until it returns the expected status code."""
     import asyncio
     import time
 
     start = time.time()
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(headers=headers) as client:
         while time.time() - start < timeout:
             try:
                 resp = await client.get(url, timeout=5)

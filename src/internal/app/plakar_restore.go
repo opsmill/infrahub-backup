@@ -44,6 +44,10 @@ func (iops *InfrahubOps) RestorePlakarBackup(excludeTaskManager bool, restoreMig
 	// deployment creates none and the call does nothing.
 	defer iops.releaseTransientWorkloads()
 
+	if err := iops.recordReplicaCounts(restoreServices...); err != nil {
+		return err
+	}
+
 	// Initialize Plakar context and repository
 	kctx, err := initPlakarContext(iops.config.Plakar)
 	if err != nil {
@@ -179,15 +183,19 @@ func (iops *InfrahubOps) restoreBackupGroup(kctx *kcontext.KContext, repo *repos
 		return err
 	}
 
-	// Detect Neo4j edition for restore
-	detectedEdition, detectionErr := iops.detectNeo4jEdition()
-	editionInfo := NewNeo4jEditionInfo(detectedEdition, detectionErr)
+	// Detect Neo4j edition for restore. A group without a Neo4j snapshot restores no Neo4j
+	// data, so a failed probe must not stop it.
+	neo4jEdition := metadata.Neo4jEdition
+	if neo4jSnapInfo != nil {
+		detectedEdition, detectionErr := iops.detectNeo4jEdition()
+		editionInfo := NewNeo4jEditionInfo(detectedEdition, detectionErr)
 
-	neo4jEdition, err := editionInfo.ResolveRestoreEdition(metadata.Neo4jEdition)
-	if err != nil {
-		return err
+		neo4jEdition, err = editionInfo.ResolveRestoreEdition(metadata.Neo4jEdition)
+		if err != nil {
+			return err
+		}
+		editionInfo.LogDetection("restore")
 	}
-	editionInfo.LogDetection("restore")
 
 	// For enterprise, export neo4j snapshot and extract the tar archive for file-based restore
 	isCommunity := strings.EqualFold(neo4jEdition, neo4jEditionCommunity)
@@ -457,6 +465,7 @@ func (iops *InfrahubOps) restoreSingleSnapshot(kctx *kcontext.KContext, repo *re
 			if err != nil {
 				return err
 			}
+			editionInfo.LogDetection("restore")
 			neo4jEdition = resolvedEdition
 		}
 	}

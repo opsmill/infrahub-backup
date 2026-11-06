@@ -1,10 +1,12 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -193,6 +195,37 @@ func (iops *InfrahubOps) waitForRunningTasks() error {
 var appServicesStoppedForBackup = []string{
 	"infrahub-server", "task-worker", "task-manager",
 	"task-manager-background-svc", "cache", "message-queue",
+}
+
+// restoreServices are the services a restore starts: the application services
+// and task-manager-db, which restorePostgreSQL starts before it loads the dump.
+var restoreServices = slices.Concat(appServicesStoppedForBackup, []string{"task-manager-db"})
+
+// replicaRecorder is implemented by backends that stop a service by scaling
+// its workload to 0 replicas, and so must know the workload's replica count to
+// start it again.
+type replicaRecorder interface {
+	RecordReplicaCounts(services ...string) error
+}
+
+// recordReplicaCounts reads the replica count of each service's workload, so
+// that starting a service brings its workload back with that count. Backup and
+// restore call it before they change anything in the deployment, so that they
+// stop with an error, and leave the deployment as it was, when a count cannot
+// be read. Backends that stop containers directly have nothing to record.
+func (iops *InfrahubOps) recordReplicaCounts(services ...string) error {
+	backend, err := iops.ensureBackend()
+	if err != nil {
+		return err
+	}
+	recorder, ok := backend.(replicaRecorder)
+	if !ok {
+		return nil
+	}
+	if err := recorder.RecordReplicaCounts(services...); err != nil {
+		return fmt.Errorf("failed to read the workload replica counts; nothing in the deployment was changed: %w", err)
+	}
+	return nil
 }
 
 func (iops *InfrahubOps) stopAppContainers() ([]string, error) {
@@ -452,12 +485,218 @@ func (iops *InfrahubOps) startAppContainers(services []string) error {
 func (iops *InfrahubOps) wipeTransientData() error {
 	logrus.Info("Wiping cache and message queue data...")
 
-	if _, err := iops.Exec("message-queue", []string{"find", "/var/lib/rabbitmq", "-mindepth", "1", "-delete"}, nil); err != nil {
+	if err := iops.deleteMessageQueues(); err != nil {
 		logrus.Warnf("Failed to wipe message queue data: %v", err)
 	}
-	if _, err := iops.Exec("cache", []string{"find", "/data", "-mindepth", "1", "-delete"}, nil); err != nil {
+	if err := iops.deleteCacheKeys(); err != nil {
 		logrus.Warnf("Failed to wipe cache data: %v", err)
 	}
 	logrus.Info("Transient data wiped")
 	return nil
+}
+
+// redisCLIScript runs redis-cli with the arguments that follow it. When the
+// container sets REDIS_PASSWORD_FILE or REDIS_PASSWORD, as the Bitnami Redis
+// image does when authentication is enabled, redis-cli reads that password
+// from REDISCLI_AUTH. The arguments reach redis-cli as positional parameters,
+// never as part of the script.
+const redisCLIScript = `if [ -n "${REDIS_PASSWORD_FILE:-}" ]; then REDISCLI_AUTH=$(cat "$REDIS_PASSWORD_FILE") && export REDISCLI_AUTH; elif [ -n "${REDIS_PASSWORD:-}" ]; then REDISCLI_AUTH=$REDIS_PASSWORD && export REDISCLI_AUTH; fi; exec redis-cli "$@"`
+
+// redisDeleteKeysScript deletes every key of the selected Redis database, one
+// SCAN page at a time, and returns how many keys it deleted.
+const redisDeleteKeysScript = `local cursor = "0"
+local deleted = 0
+repeat
+  local reply = redis.call("SCAN", cursor, "COUNT", 1000)
+  cursor = reply[1]
+  for _, key in ipairs(reply[2]) do
+    redis.call("UNLINK", key)
+    deleted = deleted + 1
+  end
+until cursor == "0"
+return deleted`
+
+// redisKeyspaceDBRe matches a database line of `INFO keyspace`, such as
+// "db0:keys=12,expires=0,avg_ttl=0".
+var redisKeyspaceDBRe = regexp.MustCompile(`^db(\d+):keys=`)
+
+// deleteCacheKeys deletes every key in every database of the cache. Infrahub
+// uses database 0 by default, and a task manager configured with Redis
+// messaging can use another one. Redis keeps its data in memory and writes it to disk when it
+// stops, so deleting the files under /data while Redis runs left the data in
+// place.
+//
+// The keys are deleted by redisDeleteKeysScript rather than FLUSHALL, because
+// the Bitnami Redis chart that the Infrahub Helm chart uses disables FLUSHALL
+// and FLUSHDB by default. redis-cli exits with 0 when Redis answers with an
+// error, such as NOAUTH, so every reply is checked.
+func (iops *InfrahubOps) deleteCacheKeys() error {
+	master, err := iops.redisMasterArgs()
+	if err != nil {
+		return err
+	}
+
+	keyspace, err := iops.redisCLI(slices.Concat(master, []string{"INFO", "keyspace"})...)
+	if err != nil {
+		return fmt.Errorf("failed to list the Redis databases: %w", err)
+	}
+	if !strings.HasPrefix(keyspace, "# Keyspace") {
+		return fmt.Errorf("the cache answered INFO keyspace with %q", keyspace)
+	}
+
+	var errs []error
+	deleted := 0
+	for _, line := range strings.Split(keyspace, "\n") {
+		match := redisKeyspaceDBRe.FindStringSubmatch(strings.TrimSpace(line))
+		if match == nil {
+			continue
+		}
+		db := match[1]
+		reply, err := iops.redisCLI(slices.Concat(master, []string{"-n", db, "EVAL", redisDeleteKeysScript, "0"})...)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("failed to delete the keys of database %s: %w", db, err))
+			continue
+		}
+		count, err := strconv.Atoi(reply)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("the cache answered the key deletion in database %s with %q", db, reply))
+			continue
+		}
+		logrus.Debugf("Deleted %d keys of cache database %s", count, db)
+		deleted += count
+	}
+
+	logrus.Infof("Deleted cache keys: %d", deleted)
+	return errors.Join(errs...)
+}
+
+// redisMasterArgs returns the redis-cli arguments that address the Redis
+// master from the cache service. The commands run in one pod or container of
+// the service. When ROLE reports a read-only replica, as with Bitnami Redis
+// and Sentinel, the arguments name the master that ROLE reports, and the
+// replicas apply the master's changes from there.
+func (iops *InfrahubOps) redisMasterArgs() ([]string, error) {
+	role, err := iops.redisCLI("ROLE")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read the Redis role: %w", err)
+	}
+
+	lines := strings.Split(role, "\n")
+	switch strings.TrimSpace(lines[0]) {
+	case "master":
+		return nil, nil
+	case "slave", "replica":
+		if len(lines) < 3 {
+			return nil, fmt.Errorf("unexpected ROLE reply from a Redis replica: %q", role)
+		}
+		host, port := strings.TrimSpace(lines[1]), strings.TrimSpace(lines[2])
+		logrus.Debugf("The cache is a Redis replica; sending the commands to its master %s:%s", host, port)
+		return []string{"-h", host, "-p", port}, nil
+	}
+	return nil, fmt.Errorf("the cache answered ROLE with %q", role)
+}
+
+// redisCLI runs redis-cli in the cache service and returns its stdout.
+func (iops *InfrahubOps) redisCLI(args ...string) (string, error) {
+	return iops.execOutput("cache", append([]string{"sh", "-c", redisCLIScript, "redis-cli"}, args...))
+}
+
+// transientDataExecTimeout bounds each command that wipeTransientData runs in
+// a service. Each returns in under a second on a running service.
+const transientDataExecTimeout = 60 * time.Second
+
+// rabbitmqVhost is one entry of `rabbitmqctl list_vhosts --formatter json name`.
+type rabbitmqVhost struct {
+	Name string `json:"name"`
+}
+
+// rabbitmqQueue is one entry of
+// `rabbitmqctl list_queues --formatter json name exclusive`.
+type rabbitmqQueue struct {
+	Name      string `json:"name"`
+	Exclusive bool   `json:"exclusive"`
+}
+
+// deleteMessageQueues deletes the queues of every virtual host on the message
+// queue, and with them the messages queued before the restore. Infrahub
+// declares its queues again when it starts. Exclusive queues are skipped: each
+// belongs to a connected client, and RabbitMQ deletes it when that client
+// stops.
+//
+// The queues are deleted through rabbitmqctl while the broker runs. Deleting
+// the broker's data directory under it could leave RabbitMQ, once restarted,
+// with a durable queue it cannot start ("home node ... is down or
+// inaccessible"), which stops Infrahub from starting. Resetting the node
+// instead would remove it from a RabbitMQ cluster. Users, permissions and
+// policies are kept.
+func (iops *InfrahubOps) deleteMessageQueues() error {
+	output, err := iops.rabbitmqctl("list_vhosts", "--quiet", "--formatter", "json", "name")
+	if err != nil {
+		return fmt.Errorf("failed to list the virtual hosts: %w", err)
+	}
+	var vhosts []rabbitmqVhost
+	if err := json.Unmarshal([]byte(output), &vhosts); err != nil {
+		return fmt.Errorf("failed to parse the virtual host list %q: %w", output, err)
+	}
+
+	var errs []error
+	deleted := 0
+	for _, vhost := range vhosts {
+		output, err := iops.rabbitmqctl("list_queues", "--quiet", "--formatter", "json", "-p", vhost.Name, "name", "exclusive")
+		if err != nil {
+			errs = append(errs, fmt.Errorf("failed to list the queues of virtual host %q: %w", vhost.Name, err))
+			continue
+		}
+		var queues []rabbitmqQueue
+		if err := json.Unmarshal([]byte(output), &queues); err != nil {
+			errs = append(errs, fmt.Errorf("failed to parse the queue list of virtual host %q: %w", vhost.Name, err))
+			continue
+		}
+
+		for _, queue := range queues {
+			if queue.Exclusive {
+				continue
+			}
+			if _, err := iops.rabbitmqctl("delete_queue", "--quiet", "-p", vhost.Name, "--", queue.Name); err != nil {
+				errs = append(errs, fmt.Errorf("failed to delete queue %q of virtual host %q: %w", queue.Name, vhost.Name, err))
+				continue
+			}
+			logrus.Debugf("Deleted queue %s of virtual host %s", queue.Name, vhost.Name)
+			deleted++
+		}
+	}
+
+	logrus.Infof("Deleted message queues: %d", deleted)
+	return errors.Join(errs...)
+}
+
+// rabbitmqctl runs rabbitmqctl in the message-queue service and returns its
+// stdout.
+func (iops *InfrahubOps) rabbitmqctl(args ...string) (string, error) {
+	return iops.execOutput("message-queue", append([]string{"rabbitmqctl"}, args...))
+}
+
+// execOutput runs command in service and returns its stdout. Stdout and stderr
+// are kept apart, so that a notice written to stderr, such as a docker compose
+// warning about an unset variable or kubectl's "Defaulted container" notice,
+// does not end up in the output the caller parses. When the command fails, the
+// error carries its stderr on one line.
+func (iops *InfrahubOps) execOutput(service string, command []string) (string, error) {
+	backend, err := iops.ensureBackend()
+	if err != nil {
+		return "", err
+	}
+	execer, ok := backend.(separateExecer)
+	if !ok {
+		return "", fmt.Errorf("the %s backend cannot run %s in %s", backend.Name(), command[0], service)
+	}
+
+	stdout, stderr, err := execer.ExecSeparateContext(context.Background(), transientDataExecTimeout, service, command, nil)
+	if err != nil {
+		if stderr != "" {
+			return "", fmt.Errorf("%w: %s", err, strings.Join(strings.Fields(stderr), " "))
+		}
+		return "", err
+	}
+	return stdout, nil
 }

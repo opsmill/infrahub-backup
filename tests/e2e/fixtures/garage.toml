@@ -1,0 +1,19 @@
+# Single-node Garage, the S3 server of the e2e tests. The s3_server fixture in
+# tests/e2e/conftest.py bind-mounts this file into the container.
+metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+db_engine = "sqlite"
+
+# Single node, so one copy of every block is all there is.
+replication_factor = 1
+
+rpc_bind_addr = "[::]:3901"
+rpc_public_addr = "127.0.0.1:3901"
+
+[s3_api]
+# The region every S3 client in the suite signs requests for.
+s3_region = "us-east-1"
+api_bind_addr = "[::]:3900"
+
+[admin]
+api_bind_addr = "[::]:3903"

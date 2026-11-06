@@ -38,6 +38,11 @@ const sidebars: SidebarsConfig = {
     'self-update',
     {
       type: 'category',
+      label: 'Release notes',
+      items: ['release-notes/index'],
+    },
+    {
+      type: 'category',
       label: 'Reference',
       items: [
         'reference/commands',

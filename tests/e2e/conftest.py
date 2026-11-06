@@ -94,50 +94,116 @@ def collect_binary() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Fixture: minio_docker (testcontainers)
+# Fixture: s3_server (Garage, testcontainers)
 # ---------------------------------------------------------------------------
+GARAGE_IMAGE = "dxflrs/garage:v2.4.1"
+GARAGE_ADMIN_TOKEN = "infrahub-backup-e2e-admin-token"
+GARAGE_RPC_SECRET = "a0b1c2d3e4f5061728394a5b6c7d8e9fa0b1c2d3e4f5061728394a5b6c7d8e9f"
+# Garage only imports keys shaped like the ones it generates: "GK" and 24 hex
+# characters, with a 64-character hex secret. Fixed test values, not secrets.
+S3_ACCESS_KEY = "GKdeadbeefdeadbeefdeadbeef"
+S3_SECRET_KEY = "deadbeef" * 8
+S3_BUCKET = "backups"
+# Mounted from the checkout rather than written to a pytest temporary directory:
+# in the Kubernetes CI job, Garage did not start with its config mounted from /tmp.
+GARAGE_CONFIG_PATH = FIXTURES_DIR / "garage.toml"
+
+
+def _bootstrap_garage(admin_url: str) -> None:
+    """Make a fresh Garage node serve the test bucket.
+
+    A new node stores nothing until a layout is assigned, and the access key and
+    bucket have to be created through the admin API. The key may also create
+    buckets, which the retention tests do for each case.
+    """
+    import requests
+
+    def api(method: str, endpoint: str, payload: dict | None = None) -> dict:
+        resp = requests.request(
+            method,
+            f"{admin_url}/v2/{endpoint}",
+            headers={"Authorization": f"Bearer {GARAGE_ADMIN_TOKEN}"},
+            json=payload,
+            timeout=5,
+        )
+        resp.raise_for_status()
+        return resp.json() if resp.content else {}
+
+    deadline = time.time() + 30
+    while True:
+        try:
+            status = api("GET", "GetClusterStatus")
+            break
+        except requests.RequestException:
+            if time.time() > deadline:
+                raise
+            time.sleep(1)
+
+    node_id = status["nodes"][0]["id"]
+    api("POST", "UpdateClusterLayout", {"roles": [{"id": node_id, "zone": "e2e", "capacity": 10**9, "tags": []}]})
+    api("POST", "ApplyClusterLayout", {"version": status["layoutVersion"] + 1})
+
+    api("POST", "ImportKey", {"accessKeyId": S3_ACCESS_KEY, "secretAccessKey": S3_SECRET_KEY, "name": "e2e"})
+    api("POST", f"UpdateKey?id={S3_ACCESS_KEY}", {"allow": {"createBucket": True}})
+    bucket = api("POST", "CreateBucket", {"globalAlias": S3_BUCKET})
+    api(
+        "POST",
+        "AllowBucketKey",
+        {
+            "bucketId": bucket["id"],
+            "accessKeyId": S3_ACCESS_KEY,
+            "permissions": {"read": True, "write": True, "owner": True},
+        },
+    )
+
+    # The admin API reports healthy only once the layout is applied.
+    while requests.get(f"{admin_url}/health", timeout=5).status_code != 200:
+        if time.time() > deadline:
+            raise TimeoutError(f"Garage at {admin_url} did not become healthy")
+        time.sleep(1)
+
+
+def _container_report(container: DockerContainer) -> str:
+    """Describe a container that did not start serving: its state, its mounts and its logs."""
+    wrapped = container.get_wrapped_container()
+    wrapped.reload()
+    state = wrapped.attrs.get("State", {})
+    mounts = ", ".join(
+        f"{mount.get('Source')} -> {mount.get('Destination')}" for mount in wrapped.attrs.get("Mounts", [])
+    )
+    stdout, stderr = container.get_logs()
+    logs = (stdout + stderr).decode(errors="replace").strip() or "<no output>"
+    return (
+        f"container {wrapped.short_id} is {state.get('Status')} (exit code {state.get('ExitCode')}), "
+        f"mounts: {mounts or '<none>'}\n{logs}"
+    )
+
+
 @pytest.fixture(scope="session")
-def minio_docker(request: pytest.FixtureRequest) -> dict:
-    """Start a MinIO container using testcontainers for S3 testing."""
+def s3_server(request: pytest.FixtureRequest) -> dict:
+    """Start a single-node Garage container that serves an S3 bucket for the tests."""
     container = (
-        # minio/minio is no longer published on Docker Hub or quay.io; pgsty/minio is a
-        # community build of the same server, so the command and health endpoint are unchanged.
-        DockerContainer("pgsty/minio:RELEASE.2026-08-04T00-00-00Z")
-        .with_exposed_ports(9000)
-        .with_env("MINIO_ROOT_USER", "minioadmin")
-        .with_env("MINIO_ROOT_PASSWORD", "minioadmin")
-        .with_kwargs(entrypoint="sh")
-        .with_command("-c 'mkdir -p /data/backups && minio server /data --console-address :9001'")
+        DockerContainer(GARAGE_IMAGE)
+        .with_exposed_ports(3900, 3903)
+        .with_env("GARAGE_RPC_SECRET", GARAGE_RPC_SECRET)
+        .with_env("GARAGE_ADMIN_TOKEN", GARAGE_ADMIN_TOKEN)
+        .with_volume_mapping(str(GARAGE_CONFIG_PATH), "/etc/garage.toml", "ro")
     )
 
     container.start()
     request.addfinalizer(container.stop)
 
-    # Get the mapped host port
     host = container.get_container_host_ip()
-    port = container.get_exposed_port(9000)
-    endpoint = f"http://{host}:{port}"
-
-    # Wait for MinIO to be ready
-    import requests
-
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        try:
-            resp = requests.get(f"{endpoint}/minio/health/ready", timeout=2)
-            if resp.status_code == 200:
-                break
-        except Exception:
-            pass
-        time.sleep(1)
-    else:
-        raise TimeoutError(f"MinIO at {endpoint} did not become ready")
+    try:
+        _bootstrap_garage(f"http://{host}:{container.get_exposed_port(3903)}")
+    except Exception as exc:
+        raise RuntimeError(f"Garage did not start serving S3: {_container_report(container)}") from exc
 
     return {
-        "endpoint": endpoint,
-        "access_key": "minioadmin",
-        "secret_key": "minioadmin",
-        "bucket": "backups",
+        "endpoint": f"http://{host}:{container.get_exposed_port(3900)}",
+        "access_key": S3_ACCESS_KEY,
+        "secret_key": S3_SECRET_KEY,
+        "bucket": S3_BUCKET,
     }
 
 
@@ -150,15 +216,24 @@ async def portforward_infrahub(kubeconfig_path: str, namespace: str):
 
     Pods may be restarted by infrahub-backup during restore, which kills any
     long-lived port-forward.  Call this each time you need to talk to Infrahub.
+
+    Waits until Infrahub can query Neo4j, not only until it answers HTTP.
+    /api/config and anonymous requests answer without Neo4j, but Infrahub
+    looks an API key up in Neo4j, so the wait sends the admin token.
     """
     kr8s_api = await kr8s.asyncio.api(kubeconfig=kubeconfig_path)
     service = await AsyncService.get("infrahub-infrahub-server", namespace=namespace, api=kr8s_api)
     async with service.portforward(remote_port=8000, local_port="auto") as local_port:
         url = f"http://localhost:{local_port}"
-        await wait_for_http(f"{url}/api/config", timeout=300.0, interval=5.0)
-        # /api/config (and even /api/schema) answer before the server can reach its
-        # database again after a restore or the database pod reset between tests, so wait
-        # for a query that reads the database.
+        await wait_for_http(
+            f"{url}/api/schema?branch=main",
+            timeout=300.0,
+            interval=5.0,
+            headers={"X-INFRAHUB-KEY": INFRAHUB_ADMIN_TOKEN},
+        )
+        # /api/schema answers before every server worker can reach the database again
+        # after a restore or the database pod reset between tests, so also wait for a
+        # query that reads the database.
         await wait_for_database_query(url, INFRAHUB_ADMIN_TOKEN)
         yield url
 

@@ -103,6 +103,7 @@ func TestReplicasFromComposePS(t *testing.T) {
 		{Name: "proj-cache-1", Service: "cache", State: "running"},
 		{Name: "proj-task-worker-1", Service: "task-worker", State: "running"},
 		{Name: "", Service: "task-worker", State: "running"}, // nameless entries are dropped
+		{Name: "proj-task-manager-1", Service: "task-manager", State: "exited"},
 	}
 
 	tests := []struct {
@@ -126,6 +127,13 @@ func TestReplicasFromComposePS(t *testing.T) {
 			},
 		},
 		{
+			name:    "a container that is not running is marked stopped",
+			service: "task-manager",
+			want: []Replica{
+				{Service: "task-manager", Container: "proj-task-manager-1", Stopped: true},
+			},
+		},
+		{
 			name:    "service without containers yields an empty slice",
 			service: "task-manager-background-svc",
 			want:    []Replica{},
@@ -144,6 +152,18 @@ func TestReplicasFromComposePS(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDockerReplicaCopyArgs(t *testing.T) {
+	replica := Replica{Service: "task-worker", Container: "proj-task-worker-2"}
+
+	got := dockerReplicaCopyArgs(replica, "/tmp/export.json", "/bundle/export.json")
+	// docker cp by container name, not docker compose cp by service: the
+	// compose form reads from whichever replica the daemon lists first.
+	want := []string{"cp", "proj-task-worker-2:/tmp/export.json", "/bundle/export.json"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("dockerReplicaCopyArgs() = %v, want %v", got, want)
 	}
 }
 

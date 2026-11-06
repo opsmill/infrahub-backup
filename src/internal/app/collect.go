@@ -43,11 +43,15 @@ type CollectOptions struct {
 // On Docker, Container carries the container name and Pod is empty; on
 // Kubernetes there is one Replica per pod container, and Restarted reports
 // whether that container has restartCount > 0 (previous logs available).
+// Stopped is Docker-only: the enumeration includes containers that are not
+// running (`docker compose ps -a`), and Stopped marks them so a collector that
+// needs one replica to exec into can pick a running one.
 type Replica struct {
 	Service   string
 	Pod       string
 	Container string
 	Restarted bool
+	Stopped   bool
 }
 
 // collectBackend is the narrow read-only surface collectors consume on top of

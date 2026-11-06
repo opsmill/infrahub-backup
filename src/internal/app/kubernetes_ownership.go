@@ -62,11 +62,17 @@ import (
 // so the keys the tool queries by and the keys it reads ownership from cannot
 // drift apart — and they are the same four externalMisdiagnosisHint names to
 // the operator.
+//
+// infrahub/service comes first because the Infrahub Helm chart and the HA
+// deployment examples set it on every component. The generic keys come after
+// it because other software in the namespace sets them too: CloudNativePG
+// labels its PostgreSQL pods app.kubernetes.io/component=database, the same
+// value as the Neo4j service.
 var serviceLabelKeys = []string{
+	"infrahub/service",
 	"app.kubernetes.io/component",
 	"app",
 	"component",
-	"infrahub/service",
 }
 
 // infrahubServiceLabelValues is the deployment's own vocabulary: the values a

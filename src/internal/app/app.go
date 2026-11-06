@@ -264,6 +264,9 @@ type Configuration struct {
 	// ExternalDB holds the settings for databases that live outside the
 	// deployment. It is inert for a deployment whose databases are all internal.
 	ExternalDB ExternalDBConfig
+	// Neo4jClusterOnlineTimeout is how long a restore into a Neo4j cluster waits for the
+	// restored database to come online on every server before it fails.
+	Neo4jClusterOnlineTimeout time.Duration
 }
 
 // InfrahubOps is the main application struct
@@ -381,6 +384,10 @@ type InfrahubOps struct {
 	// Nil until a root command is configured, which is every binary's second
 	// statement and no test's obligation.
 	resolveConfiguration func() error
+	// neo4jCredentialLookupErr is why the Neo4j credentials could not be read from the
+	// deployment when the default username or password was used in their place, so a
+	// rejected Neo4j login can be reported against the lookup that caused it.
+	neo4jCredentialLookupErr error
 }
 
 // NewInfrahubOps creates a new InfrahubOps instance
@@ -392,8 +399,9 @@ func NewInfrahubOps() *InfrahubOps {
 		S3: &S3Config{
 			Region: "us-east-1",
 		},
-		Backend: BackendTarball,
-		Plakar:  &PlakarConfig{},
+		Backend:                   BackendTarball,
+		Plakar:                    &PlakarConfig{},
+		Neo4jClusterOnlineTimeout: DefaultNeo4jClusterOnlineTimeout,
 		ExternalDB: ExternalDBConfig{
 			Neo4jBackupPort: defaultNeo4jBackupPort,
 			Image:           defaultExternalDBImage(),
