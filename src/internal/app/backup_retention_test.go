@@ -56,6 +56,7 @@ type fakeS3Endpoint struct {
 	uploadCode int
 	listCode   int
 	uploaded   []string
+	deleted    []string
 	listed     int
 }
 
@@ -84,6 +85,9 @@ func (e *fakeS3Endpoint) handle(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
 		e.uploaded = append(e.uploaded, r.URL.Path)
 		w.Header().Set("ETag", `"fake-etag"`)
+	case http.MethodDelete:
+		e.deleted = append(e.deleted, r.URL.Path)
+		w.WriteHeader(http.StatusNoContent)
 	case http.MethodGet:
 		e.listed++
 		if e.listCode != http.StatusOK {
@@ -286,4 +290,180 @@ func TestCreateBackupReportsRetentionFailureAfterSuccess(t *testing.T) {
 	if got := pruneDirNames(t, fixture.dir); !slices.Equal(got, want) {
 		t.Errorf("backup directory = %v, want the local leg pruned %v", got, want)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// T045: an incomplete capture is not retained anywhere (FR-012)
+// ---------------------------------------------------------------------------
+
+// retentionDecision is what the policy would do at one location, as the two name
+// sets it splits a listing into. Comparing decisions rather than directories is
+// what FR-012's verification asks for: the requirement is that an incomplete run
+// leaves retention deciding exactly what it would have decided had the run
+// failed before writing anything.
+type retentionDecision struct {
+	keep  []string
+	prune []string
+}
+
+func decideRetention(t *testing.T, dir string, policy RetentionPolicy, now time.Time) retentionDecision {
+	t.Helper()
+
+	refs, err := newLocalLocation(dir).List(t.Context())
+	if err != nil {
+		t.Fatalf("listing %s = %v, want nil", dir, err)
+	}
+
+	keep, prune := selectPrunable(refs, policy, now)
+
+	decision := retentionDecision{keep: make([]string, 0, len(keep)), prune: make([]string, 0, len(prune))}
+	for _, ref := range keep {
+		decision.keep = append(decision.keep, ref.Name)
+	}
+	for _, ref := range prune {
+		decision.prune = append(decision.prune, ref.Name)
+	}
+	slices.Sort(decision.keep)
+	slices.Sort(decision.prune)
+
+	return decision
+}
+
+// TestIncompleteCaptureIsRetainedNowhere is FR-012's verification: fail one
+// component, and the run fails leaving no artefact at any location and leaving
+// retention's decisions identical to a run that failed before anything was
+// written.
+//
+// The two failures are deliberately different in kind. The copy failure never
+// produces an archive; the incomplete capture is the one that could — it is the
+// verdict a backup command reaches after writing something, on the exit status
+// it shares with an outright failure — and the point of the requirement is that
+// the two are indistinguishable from retention's side afterwards.
+func TestIncompleteCaptureIsRetainedNowhere(t *testing.T) {
+	now := time.Now()
+
+	// The run that failed before writing anything: the reference decision.
+	failedEarly := newCreateRetentionFixture(t)
+	failedEarly.backend.copyFromErr = errors.New("no space left on device")
+	if _, err := failedEarly.run(t, false); err == nil {
+		t.Fatal("CreateBackup() = nil, want the failed database copy reported")
+	}
+	reference := decideRetention(t, failedEarly.dir, failedEarly.iops.config.Retention.Policy(), now)
+
+	// The run whose capture reported something short of a complete capture.
+	// runExternalNeo4jCapture records exactly this before it returns its error;
+	// recording it here stands in for a cluster that could not be reached.
+	incomplete := newCreateRetentionFixture(t)
+	before := pruneDirNames(t, incomplete.dir)
+	incomplete.iops.recordIncompleteCapture(serviceNeo4j,
+		"the operation produced an artifact and then reported a problem")
+
+	output, err := incomplete.run(t, false)
+	if err == nil {
+		t.Fatal("CreateBackup() = nil, want an incomplete capture to fail the run")
+	}
+	if !strings.Contains(err.Error(), "incomplete") {
+		t.Errorf("error = %q, want it to say the backup is incomplete", err)
+	}
+
+	t.Run("no artefact is left behind", func(t *testing.T) {
+		if got := pruneDirNames(t, incomplete.dir); !slices.Equal(got, before) {
+			t.Errorf("backup directory after an incomplete capture = %v, want it untouched %v", got, before)
+		}
+	})
+
+	t.Run("retention never runs", func(t *testing.T) {
+		// An incomplete run must not prune. Retention ranks by recency, so an
+		// archive written and then removed would still have been the newest
+		// while the prune ran and would have evicted the real newest.
+		if strings.Contains(output, "Applying retention policy") {
+			t.Errorf("log output = %q, want no retention pass after an incomplete capture", output)
+		}
+	})
+
+	t.Run("retention decides exactly what it would have decided", func(t *testing.T) {
+		got := decideRetention(t, incomplete.dir, incomplete.iops.config.Retention.Policy(), now)
+		if !slices.Equal(got.keep, reference.keep) || !slices.Equal(got.prune, reference.prune) {
+			t.Errorf("retention after an incomplete capture keeps %v and prunes %v;\nafter a run that failed before writing anything it keeps %v and prunes %v",
+				got.keep, got.prune, reference.keep, reference.prune)
+		}
+	})
+}
+
+// TestIncompleteCaptureIsRemovedFromEveryLocationItReached covers the half the
+// run above cannot reach: an artefact that had already been written locally and
+// uploaded before the capture was judged incomplete.
+//
+// The ordinary path fails at the gate, before an archive exists, so nothing is
+// there to remove — which is why the removal is written as an invariant over
+// wherever the archive got to rather than as a step of one code path. This is
+// what exercises it, and it is the S3 leg that matters: an object left in the
+// bucket is one a later `restore --latest --s3` can select, and neither
+// retention nor a released reader would know not to.
+func TestIncompleteCaptureIsRemovedFromEveryLocationItReached(t *testing.T) {
+	endpoint := newFakeS3Endpoint(t)
+
+	archive := backupNameAt(time.Now())
+	encrypted := archive + ".enc"
+	dir := seedPruneDir(t, archive, encrypted)
+
+	cfg := createRetentionConfig(dir, RetentionConfig{Days: 7})
+	cfg.S3.Endpoint = endpoint.server.URL
+	iops := &InfrahubOps{config: cfg, executor: NewCommandExecutor()}
+	iops.recordIncompleteCapture(serviceNeo4j, "some servers were uncontactable")
+
+	// The archive reached the backup directory under both names — encrypting
+	// renames it, and removing the plaintext afterwards is only a warning — and
+	// the encrypted one reached the bucket.
+	reach := artifactReach{s3Name: encrypted}
+	reach.reachedLocally(archive)
+	reach.reachedLocally(encrypted)
+
+	err := iops.discardIncompleteCapture(reach)
+	if err == nil {
+		t.Fatal("discardIncompleteCapture() = nil, want the incomplete backup reported as a failure")
+	}
+	if !strings.Contains(err.Error(), "some servers were uncontactable") {
+		t.Errorf("error = %q, want it to carry the capture's own account", err)
+	}
+	if strings.Contains(err.Error(), "may still be present") {
+		t.Errorf("error = %q, want no leftover reported: every location was cleared", err)
+	}
+
+	t.Run("both local names are gone", func(t *testing.T) {
+		want := slices.Clone(pruneDecoys)
+		slices.Sort(want)
+		if got := pruneDirNames(t, dir); !slices.Equal(got, want) {
+			t.Errorf("backup directory = %v, want only the non-archive decoys %v", got, want)
+		}
+	})
+
+	t.Run("the object is deleted under the key the upload built", func(t *testing.T) {
+		want := []string{"/infrahub-backups/prod/" + encrypted}
+		if !slices.Equal(endpoint.deleted, want) {
+			t.Errorf("S3 deletions = %v, want %v: a base name where the full key belongs succeeds silently against real S3",
+				endpoint.deleted, want)
+		}
+	})
+
+	t.Run("a location the archive never reached is left alone", func(t *testing.T) {
+		// Configuration alone never authorises a deletion, which is the rule
+		// retentionLegsForCreate follows for pruning and the reason an S3
+		// bucket that this run never uploaded to is not touched.
+		local := newFakeS3Endpoint(t)
+		localOnly := createRetentionConfig(seedPruneDir(t, archive), RetentionConfig{Days: 7})
+		localOnly.S3.Endpoint = local.server.URL
+
+		iops := &InfrahubOps{config: localOnly, executor: NewCommandExecutor()}
+		iops.recordIncompleteCapture(serviceNeo4j, "some servers were uncontactable")
+
+		notUploaded := artifactReach{}
+		notUploaded.reachedLocally(archive)
+		if err := iops.discardIncompleteCapture(notUploaded); err == nil {
+			t.Fatal("discardIncompleteCapture() = nil, want the failure reported")
+		}
+		if len(local.deleted) != 0 {
+			t.Errorf("S3 deletions = %v, want none: this run never uploaded there", local.deleted)
+		}
+	})
 }

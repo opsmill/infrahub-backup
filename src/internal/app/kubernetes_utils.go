@@ -18,16 +18,16 @@ const neo4jInstanceSelector = "helm.neo4j.com/pod_category=neo4j-instance"
 // PostgreSQL operator such as CloudNativePG labels its pods
 // app.kubernetes.io/component=database, the same value as the Neo4j service.
 func (k *KubernetesBackend) podSelectors(service string) []string {
-	selectors := []string{fmt.Sprintf("infrahub/service=%s", service)}
-	if service == "database" {
-		// A Neo4j installed from its own chart without the infrahub/service label.
-		selectors = append(selectors, neo4jInstanceSelector)
+	selectors := make([]string, 0, len(serviceLabelKeys)+1)
+	for _, key := range serviceLabelKeys {
+		selectors = append(selectors, fmt.Sprintf("%s=%s", key, service))
+		if key == "infrahub/service" && service == "database" {
+			// A Neo4j installed from its own chart without the infrahub/service label.
+			selectors = append(selectors, neo4jInstanceSelector)
+		}
 	}
-	return append(selectors,
-		fmt.Sprintf("app.kubernetes.io/component=%s", service),
-		fmt.Sprintf("app=%s", service),
-		fmt.Sprintf("component=%s", service),
-	)
+
+	return selectors
 }
 
 // findPrimaryPod searches for a pod with primary role label (for HA PostgreSQL
@@ -104,12 +104,7 @@ func selectorMatchesLabels(selector string, labels map[string]string) bool {
 		return false
 	}
 
-	conditions := strings.Split(selector, ",")
-	for _, condition := range conditions {
-		condition = strings.TrimSpace(condition)
-		if condition == "" {
-			continue
-		}
+	for _, condition := range commaFields(selector) {
 		kv := strings.SplitN(condition, "=", 2)
 		if len(kv) != 2 {
 			if _, ok := labels[condition]; !ok {

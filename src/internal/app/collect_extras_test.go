@@ -470,3 +470,83 @@ func TestNewestNewArchive(t *testing.T) {
 		})
 	}
 }
+
+// TestCollectionRefusesAnExternalDatabaseCapture is T118's boundary, asserted
+// on both halves of it.
+//
+// ADR-0003 says without qualification that `infrahub-collect` never stops,
+// restarts or scales a workload of the deployment's, and it is the reason the
+// tool can be handed to a customer to run against their own production cluster.
+// `--include-backup` delegates to CreateBackup (ADR-0006), and CreateBackup
+// against a database that lives outside the deployment creates a pod and a
+// secret in the operator's namespace. So the external path is refused from
+// collection rather than the ADR being weakened — the cost being that such a
+// deployment gets no backup inside its bundle, which the message says.
+func TestCollectionRefusesAnExternalDatabaseCapture(t *testing.T) {
+	t.Run("a collection run is marked as one that may not create a workload", func(t *testing.T) {
+		iops := NewInfrahubOps()
+		iops.backend = newFakeCollectBackend()
+		opts := CollectOptions{OutputDir: filepath.Join(t.TempDir(), "bundles"), LogLines: 100}
+
+		if err := iops.CollectBundle(opts); err != nil {
+			t.Fatalf("CollectBundle() = %v, want the bundle produced", err)
+		}
+
+		if !iops.externalCaptureForbidden {
+			t.Error("CollectBundle left the run permitted to capture an external database; --include-backup would then create and delete a pod and a secret (ADR-0003)")
+		}
+	})
+
+	t.Run("the refusal is raised where a transient workload becomes possible", func(t *testing.T) {
+		iops := NewInfrahubOps()
+		iops.backend = newTestKubernetesBackend()
+		iops.forbidExternalCapture()
+
+		_, err := iops.externalCaptureOps()
+		if err == nil {
+			t.Fatal("externalCaptureOps() = nil, want the refusal: this is the only function a transient object can come from")
+		}
+		for _, want := range []string{"namespace infrahub", "infrahub-backup create", "--include-backup"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("err = %v, want it to name %q (condition, resource and operator action)", err, want)
+			}
+		}
+	})
+
+	t.Run("the backup a collection delegates stops at the gate, before anything is stopped", func(t *testing.T) {
+		queries := deploymentQueries{
+			locate: func(service string) (EndpointLocation, error) {
+				if service == serviceNeo4j {
+					return EndpointLocationExternal, nil
+				}
+
+				return EndpointLocationInternal, nil
+			},
+			discover: func(string) error { return nil },
+		}
+
+		iops := NewInfrahubOps()
+		iops.backend = newTestKubernetesBackend()
+		iops.forbidExternalCapture()
+
+		err := iops.prepareDatabaseCaptureWith(queries, true)
+		if err == nil {
+			t.Fatal("prepareDatabaseCaptureWith() = nil, want the collection refused before the capture path")
+		}
+		if !strings.Contains(err.Error(), "infrahub-collect") {
+			t.Errorf("err = %v, want it to say which tool declined", err)
+		}
+		if !strings.Contains(err.Error(), "infrahub-backup create") {
+			t.Errorf("err = %v, want it to name the tool that does perform the capture", err)
+		}
+	})
+
+	t.Run("a backup run is unaffected", func(t *testing.T) {
+		iops := NewInfrahubOps()
+		iops.backend = newTestKubernetesBackend()
+
+		if err := iops.refuseForbiddenExternalCapture("infrahub"); err != nil {
+			t.Errorf("refuseForbiddenExternalCapture() = %v on a backup run, want nil: only collection is refused", err)
+		}
+	})
+}

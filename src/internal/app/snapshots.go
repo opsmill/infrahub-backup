@@ -56,6 +56,12 @@ type BackupGroupInfo struct {
 	Snapshots       []SnapshotInfo `json:"snapshots"`
 	Redacted        bool           `json:"redacted,omitempty"`
 	Timestamp       time.Time      `json:"-"`
+
+	// captureIncomplete records that a snapshot in this group was tagged
+	// incomplete by the run that created it. It is the capture's own verdict
+	// (FR-012) rather than an inference from what is present, and no listing
+	// serialises it — what it changes is Status.
+	captureIncomplete bool
 }
 
 // collectBackupGroups reads all snapshots from a repository and groups them by backup-id tag.
@@ -99,6 +105,13 @@ func collectBackupGroups(repo *repository.Repository) ([]BackupGroupInfo, error)
 			groupMap[backupID] = group
 		}
 
+		// Read from every snapshot rather than only the first: the verdict is
+		// carried by whichever snapshot was created after the captures ran, and
+		// which one that is depends on the component order.
+		if tags[TagBackupStatus] == StatusIncomplete {
+			group.captureIncomplete = true
+		}
+
 		if component != "" {
 			group.Snapshots = append(group.Snapshots, SnapshotInfo{
 				SnapshotID: fmt.Sprintf("%x", mac[:8]),
@@ -125,8 +138,21 @@ func collectBackupGroups(repo *repository.Repository) ([]BackupGroupInfo, error)
 	return groups, nil
 }
 
-// determineGroupStatus checks if all expected components are present.
+// determineGroupStatus reports whether a group is a restore point.
+//
+// Two things can make it not one, and only one of them is visible from the
+// repository's shape. A group missing a component it declared is incomplete on
+// the evidence of what is there — which is what this function used to be the
+// whole of. A group whose components are all present but whose *capture* did
+// not finish is equally not a restore point, and nothing about the snapshot
+// list says so: the run that made it recorded that in the backup-status tag,
+// and reading it here is what stops FR-012 from being defeated by a capture
+// that reported itself incomplete and was ranked as a restore point anyway.
 func determineGroupStatus(group *BackupGroupInfo) string {
+	if group.captureIncomplete {
+		return StatusIncomplete
+	}
+
 	if len(group.Components) == 0 {
 		if len(group.Snapshots) > 0 {
 			return StatusComplete
