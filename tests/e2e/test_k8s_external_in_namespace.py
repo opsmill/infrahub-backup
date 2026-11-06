@@ -18,19 +18,16 @@ import pytest
 import yaml
 
 from tests.e2e.conftest import (
+    DIRECT_MODE_LINE,
     DIRECT_MODE_RULES,
+    JOB_PATH_LINE,
     SERVICE_NEO4J,
+    TRANSIENT_WORKLOAD_LINE,
     external_db_env,
     external_topology_args,
     requires_external_db,
     transient_objects_after_run,
 )
-
-# The line the run logs when it takes direct mode, from src/internal/app/external_local.go,
-# and the one it logs when it creates a transient workload instead.
-DIRECT_MODE_LINE = "Running the external database tools in this process, with no transient Job"
-TRANSIENT_WORKLOAD_LINE = "Creating a transient"
-JOB_PATH_LINE = "Running the external database tools in a transient Job"
 
 # The Job, its service account and its Role share this name. It contains no deployment
 # service name as a substring, so the tool's name-based fallbacks cannot take this pod for
