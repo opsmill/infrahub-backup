@@ -857,3 +857,47 @@ func TestCollectTracesManifestEntry(t *testing.T) {
 		t.Errorf("details leaked into the next entry: %+v", manifest.Collectors[1])
 	}
 }
+
+func TestNormalizeTraceID(t *testing.T) {
+	for _, tt := range []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{in: "5B0C30FDAD6ED0E4637277AB4A9F1554", want: "5b0c30fdad6ed0e4637277ab4a9f1554", ok: true},
+		{in: "f459bd9861636b0ddf4ccb23154e120", want: "0f459bd9861636b0ddf4ccb23154e120", ok: true},
+		{in: "../../etc/passwd", ok: false},
+		{in: "abc/def", ok: false},
+		{in: "", ok: false},
+		{in: strings.Repeat("a", 33), ok: false},
+	} {
+		got, ok := normalizeTraceID(tt.in)
+		if ok != tt.ok || got != tt.want {
+			t.Errorf("normalizeTraceID(%q) = %q, %v, want %q, %v", tt.in, got, ok, tt.want, tt.ok)
+		}
+	}
+}
+
+func TestCollectTracesSkipsInvalidTraceID(t *testing.T) {
+	ft := &fakeTempo{search: func(map[string]string) (int, string) {
+		return http.StatusOK, `{"traces":[{"traceID":"../../outside","durationMs":9000},{"traceID":"5b0c30fdad6ed0e4637277ab4a9f1554","durationMs":3000}]}`
+	}}
+	cc := newTracesContext(t, stackTempo(newFakeTempo(t, ft)), TraceOptions{})
+	if err := collectTraces(cc); err != nil {
+		t.Fatal(err)
+	}
+	if len(ft.fetched) != 1 || ft.fetched[0] != "5b0c30fdad6ed0e4637277ab4a9f1554" {
+		t.Errorf("fetched = %v, want only the valid ID", ft.fetched)
+	}
+	files := writtenTraces(t, cc)
+	if len(files) != 1 || files[0] != "0002-5b0c30fdad6ed0e4637277ab4a9f1554.json" {
+		t.Errorf("files = %v", files)
+	}
+	details := tracesDetails(t, cc)
+	if details.TracesFound != 2 || details.TracesWritten != 1 || details.TracesLeftOut != 1 {
+		t.Errorf("details = %+v", details)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(cc.bundleDir), "outside.json")); err == nil {
+		t.Error("a file was written outside the bundle")
+	}
+}

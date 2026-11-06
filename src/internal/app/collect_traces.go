@@ -486,13 +486,24 @@ func searchSlowTraces(ctx context.Context, client *tempoClient, window traceWind
 }
 
 // normalizeTraceID returns a trace ID of the search as 32 lowercase hex
-// characters. Tempo can drop the leading zeros of a trace ID.
-func normalizeTraceID(id string) string {
+// characters, and false when the ID is not hex or is too long. Tempo can drop
+// the leading zeros of a trace ID. The ID becomes part of a file name, so only
+// hex characters are accepted: a backend cannot make the collector write
+// outside traces/.
+func normalizeTraceID(id string) (string, bool) {
 	id = strings.ToLower(strings.TrimSpace(id))
+	if id == "" || len(id) > 32 {
+		return "", false
+	}
+	for _, r := range id {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return "", false
+		}
+	}
 	if len(id) < 32 {
 		id = strings.Repeat("0", 32-len(id)) + id
 	}
-	return id
+	return id, true
 }
 
 // Output messages of the sampling ratio (contracts/cli.md).
@@ -704,7 +715,11 @@ func writeTraces(cc *collectContext, client *tempoClient, traces []traceSummary,
 			break
 		}
 
-		id := normalizeTraceID(summary.TraceID)
+		id, ok := normalizeTraceID(summary.TraceID)
+		if !ok {
+			logrus.Warnf("Skipping a trace with an invalid ID from the trace backend: %q", summary.TraceID)
+			continue
+		}
 		raw, err := client.fetch(cc.ctx, id)
 		if err != nil {
 			return partialTracesError(details, tempoError(err, opts.TempoURL != "", details.Backend, "fetch of trace "+id))
