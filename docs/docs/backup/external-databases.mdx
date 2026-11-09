@@ -257,6 +257,8 @@ the Job or CronJob that the [backup Helm chart](./kubernetes-backup.mdx) deploys
 runs the `infrahub-backup` image, it already carries `neo4j-admin`, `cypher-shell` and the
 PostgreSQL client. In that case `infrahub-backup` runs these tools in its own container and creates
 no Job and no Secret in the namespace.
+To set up the chart for an external database, see
+[Configure the `infrahub-backup` Helm chart](#configure-the-infrahub-backup-helm-chart).
 
 `infrahub-backup` runs the tools in its own container when both of these conditions hold:
 
@@ -314,6 +316,100 @@ because no Job is created. All other checks are unchanged: the version and editi
 scratch-size check, the removal of an incomplete capture, and the authorization of a restore.
 
 `infrahub-collect --include-backup` still refuses to capture an external database in this mode.
+
+### Configure the `infrahub-backup` Helm chart
+
+The Job and the CronJob of the `infrahub-backup` Helm chart run in the Infrahub namespace, so they
+always run the database tools in their own container. The chart's `externalDatabase` values set
+the environment variables of `infrahub-backup` for an external database:
+
+- `externalDatabase.neo4jAddress` sets `INFRAHUB_NEO4J_ADDRESS`, the Neo4j hosts to back up from.
+  For a Neo4j cluster, list every member. Empty uses the address the Infrahub server is configured
+  with.
+- `externalDatabase.neo4jBackupPort` sets `INFRAHUB_NEO4J_BACKUP_PORT`, the port you exposed in
+  Step 1. Empty uses `6362`.
+- `externalDatabase.postgresAddress` sets `INFRAHUB_POSTGRES_ADDRESS`. Empty uses the address the
+  task manager is configured with.
+- `externalDatabase.insecureTLS` sets `INFRAHUB_EXTERNAL_DB_INSECURE_TLS`, the opt-out from Step 3.
+  An external Neo4j server with TLS disabled needs it.
+- `externalDatabase.timeout` sets `INFRAHUB_EXTERNAL_DB_TIMEOUT`, the time limit of each operation
+  against the database, such as `4h`. Empty uses the default, 2 hours.
+- `externalDatabase.allowRestore` sets `INFRAHUB_ALLOW_EXTERNAL_RESTORE`, the authorization from
+  Step 4. The chart sets it on the restore containers only.
+- `restore.options.neo4jClusterOnlineTimeout` passes `--neo4j-cluster-online-timeout`: how long a
+  restore waits for the database to come online on every member of a Neo4j cluster.
+
+The chart has no value for the following settings. Set them with the chart's `extraEnv`,
+`extraVolumes` and `extraVolumeMounts` values:
+
+- The scratch size: set `INFRAHUB_EXTERNAL_DB_SCRATCH_SIZE`, such as `20Gi`. A backup of a Neo4j
+  2025 server needs it, because that server does not report the size of its store.
+- A larger volume for the temporary files: mount it with `extraVolumes` and `extraVolumeMounts`, and
+  set `TMPDIR` to its mount path with `extraEnv`. The chart runs the pod as user `1000`, so a
+  `PersistentVolumeClaim` usually also needs `podSecurityContext.fsGroup: 1000` for the pod to write
+  to it.
+
+The chart has no value for `--external-db-image` or for the other flags of the transient Job,
+because its pods never create one.
+
+The pods must run an `infrahub-backup` image that supports external databases. If the chart's
+default image does not, set `image.tag` to a release that does. If you deploy the chart through the
+Infrahub Helm chart, put the values below under the `infrahub-backup:` key, and use an Infrahub
+chart version that pins an `infrahub-backup` chart with the `externalDatabase` values.
+
+To back up an external Neo4j cluster every night:
+
+```yaml
+# backup-values.yaml
+backup:
+  enabled: true
+  mode: "cronjob"
+  schedule: "0 2 * * *"
+  storage:
+    type: "s3"
+    s3:
+      bucket: "my-infrahub-backups"
+      region: "us-east-1"
+      secretName: "backup-s3-credentials"
+
+externalDatabase:
+  neo4jAddress: "neo4j-a.example.internal,neo4j-b.example.internal,neo4j-c.example.internal"
+
+extraEnv:
+  - name: INFRAHUB_EXTERNAL_DB_SCRATCH_SIZE
+    value: "20Gi"
+```
+
+A restore of an external Neo4j database has these further requirements:
+
+- `restore.storage.type` must be `s3`. The restore copies the archive to `seed/<artifact name>/`
+  beneath `restore.storage.s3.prefix` in `restore.storage.s3.bucket`, and the Neo4j servers
+  download it from there.
+- The credentials in `restore.storage.s3.secretName` must be able to write to that bucket. This is
+  also true when `restore.storage.s3.key` names the archive.
+- The Neo4j servers must be able to read from that bucket, as described in Step 2.
+
+To restore one archive into the external database:
+
+```yaml
+# restore-values.yaml
+backup:
+  enabled: false
+
+restore:
+  enabled: true
+  mode: "job"
+  storage:
+    type: "s3"
+    s3:
+      bucket: "my-infrahub-backups"
+      key: "infrahub_backup_20250120_020000.tar.gz"
+      region: "us-east-1"
+      secretName: "backup-s3-credentials"
+
+externalDatabase:
+  allowRestore: true
+```
 
 ## Validation
 
