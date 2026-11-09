@@ -2,6 +2,7 @@ package app
 
 import (
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,8 @@ const (
 
 	cypher25RefusedLegacyOption = "22N04: data exception - invalid input value. Invalid input 'existingdataseedinstance' for 'OPTIONS'. " +
 		"Expected 'existingData', 'existingDataSeedServer', 'replicaConfig', 'seedConfig', 'seedRestoreUntil', 'seedSourceDatabase', 'seedURI', 'storeFormat' or 'txLogEnrichment'."
+	restoreRefusedClusterState = "java.lang.IllegalArgumentException: Database with name [neo4j] has replicated cluster state locally. " +
+		"Please run `DROP DATABASE neo4j` against the system database. If the database already is dropped, then you need to unbind the local instance using `neo4j-admin server unbind`."
 )
 
 // neo4jClusterBackend answers the queries of the Neo4j cluster restore the way a three-server
@@ -35,6 +38,15 @@ type neo4jClusterBackend struct {
 	createErr    error
 	createOutput string
 	creates      []string
+
+	drops []string
+	// clusterStateRefusals is how many restores neo4j-admin refuses because the dropped
+	// database still has cluster state on the server.
+	clusterStateRefusals int
+	// restoreErr fails every other restore with restoreOutput.
+	restoreErr    error
+	restoreOutput string
+	restores      int
 }
 
 func (b *neo4jClusterBackend) Exec(service string, command []string, opts *ExecOptions) (string, error) {
@@ -47,6 +59,18 @@ func (b *neo4jClusterBackend) Exec(service string, command []string, opts *ExecO
 			requester = restoredServerID
 		}
 		return "requester, serverId\nTRUE, \"" + requester + "\"\nFALSE, \"third-server-id\"\n", nil
+	case strings.Contains(joined, "DROP DATABASE"):
+		b.drops = append(b.drops, joined)
+		return "", nil
+	case strings.Contains(joined, "neo4j-admin database restore"):
+		b.restores++
+		if b.restores <= b.clusterStateRefusals {
+			return restoreRefusedClusterState, errors.New("exit status 1")
+		}
+		if b.restoreErr != nil {
+			return b.restoreOutput, b.restoreErr
+		}
+		return "", nil
 	case strings.Contains(joined, "CREATE DATABASE"):
 		b.creates = append(b.creates, joined)
 		if b.createErr != nil {
@@ -218,6 +242,84 @@ func TestRestoreNeo4jClusterSeedsFromTheServerThatHoldsTheRestoredStore(t *testi
 	}
 	if !strings.Contains(backend.creates[0], "'"+restoredServerID+"'") {
 		t.Errorf("CREATE DATABASE = %q, want it to seed from %s", backend.creates[0], restoredServerID)
+	}
+}
+
+// TestRestoreNeo4jClusterWaitsForTheDropOnEveryServer covers the restore starting while the
+// server was still dropping the database, which neo4j-admin refuses.
+func TestRestoreNeo4jClusterWaitsForTheDropOnEveryServer(t *testing.T) {
+	backend := &neo4jClusterBackend{statusOutputs: []string{allOnlineStatus()}}
+	iops := newNeo4jClusterTestOps(backend)
+
+	if err := iops.restoreNeo4jCluster(nil); err != nil {
+		t.Fatalf("restoreNeo4jCluster() = %v, want nil", err)
+	}
+	if len(backend.drops) != 1 || !strings.HasSuffix(backend.drops[0], "DROP DATABASE neo4j IF EXISTS WAIT") {
+		t.Errorf("DROP DATABASE calls = %v, want one that waits for every server", backend.drops)
+	}
+}
+
+func TestRestoreNeo4jClusterStoreRetriesWhileTheServerHoldsTheClusterState(t *testing.T) {
+	backend := &neo4jClusterBackend{clusterStateRefusals: 2}
+	iops := newNeo4jClusterTestOps(backend)
+
+	var err error
+	logs := captureLogrus(t, func() {
+		err = iops.restoreNeo4jClusterStore(nil, time.Second, testPollInterval)
+	})
+
+	if err != nil {
+		t.Fatalf("restoreNeo4jClusterStore() = %v, want nil", err)
+	}
+	if backend.restores != 3 {
+		t.Errorf("restore ran %d times, want 3", backend.restores)
+	}
+	if count := strings.Count(logs, "Neo4j has not finished dropping database neo4j on this server"); count != 1 {
+		t.Errorf("the retry was logged %d times, want once:\n%s", count, logs)
+	}
+}
+
+func TestRestoreNeo4jClusterStoreFailsWhenTheClusterStateOutlastsTheTimeout(t *testing.T) {
+	backend := &neo4jClusterBackend{clusterStateRefusals: math.MaxInt}
+	iops := newNeo4jClusterTestOps(backend)
+
+	err := iops.restoreNeo4jClusterStore(nil, testOnlineTimeout, testPollInterval)
+
+	if err == nil {
+		t.Fatalf("restoreNeo4jClusterStore() = nil, want an error")
+	}
+	for _, want := range []string{
+		"still held the cluster state of database neo4j " + testOnlineTimeout.String() + " after the drop returned",
+		"run the restore again",
+		neo4jClusterStateRemains,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to contain %q", err, want)
+		}
+	}
+	if backend.restores < 2 {
+		t.Errorf("restore ran %d times, want it retried before the timeout", backend.restores)
+	}
+}
+
+func TestRestoreNeo4jClusterStoreReportsOtherFailuresWithoutRetrying(t *testing.T) {
+	restoreFailure := errors.New("exit status 1")
+	backend := &neo4jClusterBackend{
+		restoreErr:    restoreFailure,
+		restoreOutput: "No backup artifacts found in /tmp/infrahubops",
+	}
+	iops := newNeo4jClusterTestOps(backend)
+
+	err := iops.restoreNeo4jClusterStore(nil, time.Second, testPollInterval)
+
+	if !errors.Is(err, restoreFailure) {
+		t.Fatalf("error = %v, want it to wrap %v", err, restoreFailure)
+	}
+	if !strings.Contains(err.Error(), "No backup artifacts found") {
+		t.Errorf("error = %q, want it to include the neo4j-admin output", err)
+	}
+	if backend.restores != 1 {
+		t.Errorf("restore ran %d times, want once", backend.restores)
 	}
 }
 

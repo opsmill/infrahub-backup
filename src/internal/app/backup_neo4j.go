@@ -21,8 +21,15 @@ const (
 	// DefaultNeo4jClusterOnlineTimeout leaves time for the other cluster servers to copy a
 	// store of several gigabytes from the seed server.
 	DefaultNeo4jClusterOnlineTimeout = 10 * time.Minute
-	neo4jClusterOnlinePollInterval   = 5 * time.Second
+	neo4jClusterPollInterval         = 5 * time.Second
 	neo4jDatabaseStatusOnline        = "online"
+
+	// neo4jClusterDropTimeout leaves time for a server to checkpoint and stop a large database,
+	// which it must do before it removes the database's cluster state.
+	neo4jClusterDropTimeout = 5 * time.Minute
+	// neo4jClusterStateRemains is how neo4j-admin refuses a restore while this server still
+	// holds the cluster state of the database.
+	neo4jClusterStateRemains = "has replicated cluster state locally"
 
 	neo4jLocalBoltAddress       = "bolt://localhost:7687"
 	neo4jSeedServerOption       = "existingDataSeedServer"
@@ -481,20 +488,17 @@ func (iops *InfrahubOps) restoreNeo4jCluster(opts *ExecOptions) error {
 	if _, err := iops.Exec("database", []string{
 		"cypher-shell", "-u", iops.config.Neo4jUsername, "-p" + iops.config.Neo4jPassword,
 		"-d", "system",
-		"DROP DATABASE " + iops.config.Neo4jDatabase + " IF EXISTS",
+		// Without WAIT the drop returns once the system database records it, before the
+		// servers have stopped the database and removed its cluster state.
+		"DROP DATABASE " + iops.config.Neo4jDatabase + " IF EXISTS WAIT",
 	}, nil); err != nil {
 		return fmt.Errorf("failed to drop database: %w", err)
 	}
 
 	// 2. Restore backup using neo4j-admin (on current node only)
 	logrus.Info("Restoring backup with neo4j-admin...")
-	if output, err := iops.Exec("database", []string{
-		"neo4j-admin", "database", "restore",
-		"--expand-commands", "--overwrite-destination=true",
-		"--from-path=" + neo4jTempBackupDir,
-		iops.config.Neo4jDatabase,
-	}, opts); err != nil {
-		return fmt.Errorf("failed to restore neo4j: %w\nOutput: %v", err, output)
+	if err := iops.restoreNeo4jClusterStore(opts, neo4jClusterDropTimeout, neo4jClusterPollInterval); err != nil {
+		return err
 	}
 
 	// 3. Get current node's serverId using dbms.cluster.statusCheck()
@@ -546,12 +550,48 @@ func (iops *InfrahubOps) restoreNeo4jCluster(opts *ExecOptions) error {
 	// 5. Wait for database to come online
 	timeout := iops.config.Neo4jClusterOnlineTimeout
 	logrus.Infof("Waiting up to %s for database %s to come online on every server...", timeout, iops.config.Neo4jDatabase)
-	if err := iops.waitForNeo4jClusterDatabaseOnline(timeout, neo4jClusterOnlinePollInterval); err != nil {
+	if err := iops.waitForNeo4jClusterDatabaseOnline(timeout, neo4jClusterPollInterval); err != nil {
 		return err
 	}
 
 	logrus.Info("Neo4j cluster restore completed successfully")
 	return nil
+}
+
+// restoreNeo4jClusterStore restores the backup into the store of this server, and retries
+// while the server still holds the cluster state of the dropped database, because a WAIT
+// that runs out returns without an error and leaves the drop running in the background.
+func (iops *InfrahubOps) restoreNeo4jClusterStore(opts *ExecOptions, timeout, interval time.Duration) error {
+	database := iops.config.Neo4jDatabase
+	command := []string{
+		"neo4j-admin", "database", "restore",
+		"--expand-commands", "--overwrite-destination=true",
+		"--from-path=" + neo4jTempBackupDir,
+		database,
+	}
+	deadline := time.Now().Add(timeout)
+
+	for retrying := false; ; retrying = true {
+		output, err := iops.Exec("database", command, opts)
+		if err == nil {
+			return nil
+		}
+		if !strings.Contains(output, neo4jClusterStateRemains) {
+			return fmt.Errorf("failed to restore neo4j: %w\nOutput: %v", err, output)
+		}
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return fmt.Errorf("failed to restore neo4j: this server still held the cluster state of database %s %s after the drop returned; "+
+				"Neo4j removes it once it has stopped and dropped the database on this server, so run the restore again once that has finished: %w\nOutput: %v",
+				database, timeout, err, output)
+		}
+		if !retrying {
+			logrus.Infof("Neo4j has not finished dropping database %s on this server; retrying the restore every %s for up to %s",
+				database, interval, timeout)
+		}
+		time.Sleep(min(interval, remaining))
+	}
 }
 
 // createSeededNeo4jDatabase creates the database on every server from the store on the seed
