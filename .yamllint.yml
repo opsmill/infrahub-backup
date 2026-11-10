@@ -6,6 +6,7 @@ ignore: |
   docs/pnpm-lock.yaml
   .git/
   .specify/extensions/
+  .specify/presets/
 
 rules:
   braces:
