@@ -13,6 +13,12 @@ Releases up to and including v2.3.0 predate this file; their notes are on the [G
 
 <!-- towncrier release notes start -->
 
+## [2.4.2](https://github.com/opsmill/infrahub-backup/tree/v2.4.2) - 2026-11-10
+
+### Fixed
+
+- `infrahub-backup restore` into a Neo4j cluster now waits for the servers to finish dropping the database before it restores the backup. Before, the restore sometimes failed with `Database with name [neo4j] has replicated cluster state locally`, most often with a large database. `DROP DATABASE` returned as soon as the cluster had recorded the drop, while the server where the restore runs could still be stopping the database, and `neo4j-admin database restore` refuses to run until that server has removed its cluster state for the database. The restore now sends `DROP DATABASE` with `WAIT`. If the server still holds that state when `WAIT` runs out, the restore tries `neo4j-admin database restore` again every 5 seconds for up to 5 minutes. After that, it fails with an error that says to run the restore again once the server has finished dropping the database.
+
 ## [2.4.1](https://github.com/opsmill/infrahub-backup/tree/v2.4.1) - 2026-11-05
 
 ### Fixed
