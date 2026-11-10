@@ -40,7 +40,7 @@ markers = [
 
 [tool.ruff]
 line-length = 120
-exclude = [".venv", "bin", "docs"]
+exclude = [".venv", "bin", "docs", ".specify"]
 
 [tool.ruff.format]
 quote-style = "double"
