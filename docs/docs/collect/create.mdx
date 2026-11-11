@@ -255,7 +255,9 @@ Everything else is removed before the file is written, including the text of dat
 **Where the collector finds Tempo.** The collector sends its requests from the machine where it runs, so it works while the Infrahub containers or pods are down:
 
 - On Docker Compose, it reads the published port 3200 of the `infrahub-tempo` service of the project. With a remote Docker context, this port is on the remote host; use `--traces-tempo-url` instead.
-- On Kubernetes, it finds the service labelled `app.kubernetes.io/name=tempo` in the Infrahub namespace and forwards a local port to its port 3100 for the duration of the collection.
+- On Kubernetes, it finds the service labelled `app.kubernetes.io/name=tempo` in the Infrahub namespace and forwards a local port to its port 3100 for the duration of the collection. The `infrahub-observability` Helm chart creates this service.
+
+The collector works with Tempo 2.5 and later.
 
 When no Tempo is found, when Tempo does not answer the search within 60 seconds, or when your Kubernetes role lacks a permission, the `traces` entry is `skipped` and the reason names what is missing.
 

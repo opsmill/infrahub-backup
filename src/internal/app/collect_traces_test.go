@@ -943,3 +943,47 @@ func TestCollectTracesRequestTimeout(t *testing.T) {
 		}
 	})
 }
+
+// A Tempo without /api/v2/traces (2.5.0 in the infrahub-observability chart)
+// answers 404; the client then reads /api/traces/<id> and keeps using it.
+func TestTempoClientFetchFallsBackToLegacyEndpoint(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if strings.HasPrefix(r.URL.Path, "/api/v2/") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Write([]byte(`{"batches":[]}`))
+	}))
+	defer server.Close()
+
+	client := newTempoClient(server.URL, "")
+	for _, id := range []string{"a1", "b2"} {
+		body, err := client.fetch(context.Background(), id)
+		if err != nil || string(body) != `{"batches":[]}` {
+			t.Fatalf("fetch(%s) = %q, %v", id, body, err)
+		}
+	}
+	want := []string{"/api/v2/traces/a1", "/api/traces/a1", "/api/traces/b2"}
+	if strings.Join(paths, " ") != strings.Join(want, " ") {
+		t.Errorf("paths = %v, want %v", paths, want)
+	}
+}
+
+// When neither endpoint has the trace, fetch returns the error of the
+// /api/v2/traces request and does not switch endpoints.
+func TestTempoClientFetchMissingTrace(t *testing.T) {
+	server := httptest.NewServer(http.NotFoundHandler())
+	defer server.Close()
+
+	client := newTempoClient(server.URL, "")
+	_, err := client.fetch(context.Background(), "a1")
+	var status *tempoStatusError
+	if !errors.As(err, &status) || status.status != http.StatusNotFound {
+		t.Fatalf("error = %v, want HTTP 404", err)
+	}
+	if client.legacyFetch {
+		t.Error("the client switched to /api/traces although it has no trace either")
+	}
+}

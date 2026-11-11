@@ -371,6 +371,10 @@ type tempoClient struct {
 	baseURL string
 	token   string
 	client  *http.Client
+	// legacyFetch is set once the backend has answered a trace by ID only
+	// on the older /api/traces/<id> endpoint, so later fetches go there
+	// directly.
+	legacyFetch bool
 }
 
 func newTempoClient(baseURL, token string) *tempoClient {
@@ -445,9 +449,26 @@ func (c *tempoClient) search(ctx context.Context, window traceWindow, minDuratio
 	return answer.Traces, nil
 }
 
-// fetch returns the answer of GET /api/v2/traces/<id>.
+// fetch returns the answer of GET /api/v2/traces/<id>. Tempo before 2.6,
+// such as the 2.5.0 of the infrahub-observability Helm chart, has no
+// /api/v2/traces route and answers 404; fetch then reads the older
+// /api/traces/<id>, whose answer filterTrace also reads.
 func (c *tempoClient) fetch(ctx context.Context, traceID string) ([]byte, error) {
-	return c.get(ctx, "/api/v2/traces/"+url.PathEscape(traceID), nil)
+	id := url.PathEscape(traceID)
+	if c.legacyFetch {
+		return c.get(ctx, "/api/traces/"+id, nil)
+	}
+	body, err := c.get(ctx, "/api/v2/traces/"+id, nil)
+	var status *tempoStatusError
+	if err == nil || !errors.As(err, &status) || status.status != http.StatusNotFound {
+		return body, err
+	}
+	legacy, legacyErr := c.get(ctx, "/api/traces/"+id, nil)
+	if legacyErr != nil {
+		return nil, err
+	}
+	c.legacyFetch = true
+	return legacy, nil
 }
 
 // searchResult is the outcome of searchSlowTraces.

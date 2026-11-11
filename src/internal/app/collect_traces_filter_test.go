@@ -256,3 +256,26 @@ func TestBase64IDToHexLength(t *testing.T) {
 		t.Errorf("empty ID = %q, %v", got, err)
 	}
 }
+
+// Tempo before 2.6 answers GET /api/traces/<id> with the resource spans in
+// "batches" instead of a "trace" object.
+func TestFilterTraceLegacyAnswer(t *testing.T) {
+	allow, _ := loadTraceAttributes()
+	answer := `{"batches":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"infrahub-server"}},{"key":"host.name","value":{"stringValue":"secret"}}]},
+		"scopeSpans":[{"scope":{"name":"secret"},"spans":[{
+		"traceId":"AAAAAAAAAAAAAAAAAAAAAQ==","spanId":"AAAAAAAAAAE=","name":"POST /graphql","kind":"SPAN_KIND_SERVER",
+		"startTimeUnixNano":"1","endTimeUnixNano":"2",
+		"attributes":[{"key":"http.route","value":{"stringValue":"/graphql"}},{"key":"net.peer.ip","value":{"stringValue":"secret"}}]}]}]}]}`
+	filtered, err := filterTrace([]byte(answer), allow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(filtered), "secret") {
+		t.Errorf("filtered trace kept a removed field: %s", filtered)
+	}
+	for _, want := range []string{`"service.name"`, `"http.route"`, `"traceId":"00000000000000000000000000000001"`} {
+		if !strings.Contains(string(filtered), want) {
+			t.Errorf("filtered trace lacks %s: %s", want, filtered)
+		}
+	}
+}

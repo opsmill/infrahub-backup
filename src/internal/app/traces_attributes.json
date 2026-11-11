@@ -29,6 +29,14 @@
         "http.url",
         "http.target",
         "http.user_agent",
-        "net.peer.ip"
+        "net.peer.ip",
+        "http.host",
+        "http.scheme",
+        "http.flavor",
+        "http.server_name",
+        "net.host.port",
+        "net.peer.port",
+        "asgi.event.type",
+        "worker"
     ]
 }

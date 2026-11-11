@@ -102,16 +102,23 @@ type otlpTrace struct {
 	ResourceSpans []otlpResourceSpans `json:"resourceSpans"`
 }
 
-// filterTrace reads one answer of Tempo's GET /api/v2/traces/<id> and returns
+// filterTrace reads one answer of Tempo's GET /api/v2/traces/<id> (or of the
+// older GET /api/traces/<id>) and returns
 // the OTLP JSON document written to the bundle: only the fields of the
 // allow-list, with the trace, span and parent span IDs converted from base64
 // to lowercase hex so that an OTLP HTTP receiver accepts the file.
 func filterTrace(answer []byte, allow *traceAttributes) ([]byte, error) {
+	// GET /api/v2/traces/<id> wraps the trace in "trace"; the older
+	// GET /api/traces/<id> lists its resource spans in "batches".
 	var wrapper struct {
-		Trace *otlpTrace `json:"trace"`
+		Trace   *otlpTrace          `json:"trace"`
+		Batches []otlpResourceSpans `json:"batches"`
 	}
 	if err := json.Unmarshal(answer, &wrapper); err != nil {
 		return nil, fmt.Errorf("failed to parse the trace: %w", err)
+	}
+	if wrapper.Trace == nil && wrapper.Batches != nil {
+		wrapper.Trace = &otlpTrace{ResourceSpans: wrapper.Batches}
 	}
 	if wrapper.Trace == nil {
 		return nil, errors.New("the answer has no trace")
