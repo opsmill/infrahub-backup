@@ -33,6 +33,9 @@ type CollectOptions struct {
 	IncludeBackup  bool
 	IncludeQueries bool
 	Benchmark      bool
+	// IncludeTaskManagerStorage turns on the storage breakdown of the task
+	// manager database (--include-task-manager-storage).
+	IncludeTaskManagerStorage bool
 	// TelemetryDays is the look-back window (in days) for the Infrahub
 	// product-telemetry export; a non-positive value falls back to
 	// defaultTelemetryDays (30).
@@ -86,6 +89,12 @@ type collectContext struct {
 	// (e.g. the --include-backup archive path); the orchestrator moves it
 	// into that collector's manifest entry after a successful run.
 	artifact string
+	// dbCredentials caches the task manager database login, resolved on first
+	// use by resolveTaskManagerDBCredentials, so a run looks it up once.
+	dbCredentials *taskManagerDBCredentials
+	// dbQueryLimitOverride caches the value of dbQueryTimeoutEnvVar, 0 when it
+	// is not set, read on first use by dbQueryLimit.
+	dbQueryLimitOverride *time.Duration
 }
 
 // setArtifact hands the orchestrator a filesystem artifact reference to
@@ -147,10 +156,10 @@ func (iops *InfrahubOps) CollectBundle(opts CollectOptions) error {
 
 // collectPlan builds the ordered collector run plan for this run: logs per
 // canonical service, then the parity diagnostics (database → message-queue →
-// cache → task-worker → task-manager → server), then the product-telemetry
-// export, then metrics (research R9). The manifest's environment and log_lines
-// are set at construction; the server-info collector fills infrahub_version
-// best-effort.
+// cache → task-worker → task-manager → task manager database storage →
+// server), then the product-telemetry export, then metrics (research R9). The
+// manifest's environment and log_lines are set at construction; the
+// server-info collector fills infrahub_version best-effort.
 func (iops *InfrahubOps) collectPlan(opts CollectOptions) []collector {
 	plan := serviceLogCollectors()
 	plan = append(plan,
@@ -159,17 +168,22 @@ func (iops *InfrahubOps) collectPlan(opts CollectOptions) []collector {
 		cacheCollector(),
 		taskWorkerCollector(),
 		taskManagerCollector(),
+		taskManagerDBStorageCollector(),
 		serverInfoCollector(),
 		telemetryCollector(),
 		metricsCollector(),
 	)
 
 	// Opt-in extras run last so the always-on diagnostics are already staged
-	// when they start. The benchmark generates load, so it runs only after
-	// every read-only collector has captured the undisturbed state; the
-	// include-backup collector inherits the standard backup behavior — it may
-	// stop/restart application containers — so it must stay last of all.
+	// when they start. The storage breakdown of the task manager database
+	// comes first among them, so it reads the database before anything else
+	// in the run loads or stops it (research R12). The benchmark generates
+	// load, so it runs only after every read-only collector has captured the
+	// undisturbed state; the include-backup collector inherits the standard
+	// backup behavior — it may stop/restart application containers — so it
+	// must stay last of all.
 	plan = append(plan,
+		taskManagerDBStorageBreakdownCollector(),
 		benchmarkCollector(runEnvironmentBenchmark),
 		includeBackupCollector(runStandardBackup),
 	)

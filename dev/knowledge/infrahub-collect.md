@@ -1,4 +1,4 @@
-<!-- Extracted from specs/003-collect-tool on 2026-07-09 -->
+<!-- Extracted from specs/003-collect-tool on 2026-07-09; updated from specs/006-taskmgr-db-storage on 2026-10-26; extracted from specs/archive/006-taskmgr-db-storage on 2026-11-12 -->
 
 # Infrahub Collect
 
@@ -30,6 +30,7 @@ Flags and their `INFRAHUB_*` environment equivalents:
 | `--include-backup` | `false` | `INFRAHUB_INCLUDE_BACKUP` | `create` |
 | `--include-queries` | `false` | `INFRAHUB_INCLUDE_QUERIES` | `create` |
 | `--benchmark` | `false` | `INFRAHUB_BENCHMARK` | `create` |
+| `--include-task-manager-storage` | `false` | `INFRAHUB_INCLUDE_TASK_MANAGER_STORAGE` | `create` |
 | `--telemetry-days` | `30` | `INFRAHUB_TELEMETRY_DAYS` | `create` |
 
 `create` exits 0 whenever the archive is produced — including a partial bundle with failed collectors. It exits 1 only for no usable environment, an unwritable output directory, or an archiving failure.
@@ -47,6 +48,7 @@ bundle/
 ├── cache/                    # Redis info/clients/config(masked)/slowlog/dbsize
 ├── task-worker/<replica>/    # Prefect worker state per replica
 ├── task-manager/             # work pools, queues, flow runs (+ pending/running flow & task runs), events, automations
+├── task-manager-db/          # storage.json (every run); storage-breakdown.json (with --include-task-manager-storage)
 ├── server/                   # version, pip list, API info/config/schema, env (masked)
 ├── telemetry/                # infrahubctl telemetry export (last --telemetry-days, default 30)
 ├── metrics/                  # docker stats / kubectl top
@@ -68,6 +70,81 @@ The telemetry collector runs `infrahubctl telemetry export --start-date <now-N d
 
 The export, the copy-out and the `rm -f` cleanup all run in one `task-worker` replica, picked from `ServiceReplicas` by `pickTelemetryReplica` (a running container first, then a container named after the service, so a sidecar in a Kubernetes pod is passed over). Service-level exec and copy are not enough on a scaled Docker Compose service: `docker compose exec` runs in the lowest-numbered running container, while `docker compose cp` without `--index` reads from the first container the daemon lists, which after a scale-up is the newest one. The export would then be written in one container and looked for in another. Failing to enumerate the replicas also marks the collector `failed`.
 
+## Task manager database storage
+
+Two collectors report the storage use of the task manager database. Both run `psql` inside `task-manager-db` through `runTaskManagerDBQuery` (`collect_taskmanager_db.go`), in read-only sessions with time limits that PostgreSQL enforces ([ADR 0008](../adr/0008-database-enforced-query-limits.md)). The password reaches `psql` on stdin, so it is in no argument of a process on the operator's host. Both are `skipped` with the reason `service not deployed; the task manager may use an external PostgreSQL server` when `task-manager-db` has no replica.
+
+- `task-manager-db-storage` runs on every `create`, right after `task-manager-state`. One catalog query (`storageQuery`, 60-second limit) writes `task-manager-db/storage.json`: the database size, when PostgreSQL last reset its statistics, and for every table in `pg_stat_user_tables` the data, index and TOAST sizes, the live and dead row estimates and the last vacuum times. Each table's total is the sum of the data, index and TOAST sizes from one set of size calls (`pg_table_size`, `pg_indexes_size`, and `pg_total_relation_size` of the TOAST table), so the parts always add up. The data size has a floor of 0, in case the TOAST table grows between two calls.
+- `task-manager-db-storage-breakdown` runs only with `--include-task-manager-storage`, first among the opt-in collectors, so before `benchmark` and `backup`; without the flag it is `skipped` with the reason `not requested`. A catalog query (`to_regclass`) finds which of the seven tables of `breakdownTables` exist, and a table that does not is recorded as `absent`. Then one query per table, `SELECT COALESCE(json_agg(b.g), '[]'::json) FROM (… GROUP BY …) b`, returns the row count and the oldest and newest timestamps of each group, with a 5-minute limit and with hash joins, merge joins and parallel workers turned off. `storage-breakdown.json` records each table's status. When a table fails, the collector returns `partial storage breakdown: <table>: <reason>; …` as a plain error that does not wrap the table's timeout, so the manifest keeps the table names ([collectors.md](../guidelines/collectors.md)).
+
+A failed storage query, or a failed catalog query of the breakdown, writes its diagnostics with the password masked to `storage.err.txt` or `storage-breakdown.err.txt`.
+
+`resolveTaskManagerDBCredentials` resolves the login once per run and caches it on the collect context for both collectors, in this order:
+
+1. `PREFECT_SERVER_DATABASE_CONNECTION_URL` or `PREFECT_API_DATABASE_CONNECTION_URL` in the operator's environment.
+2. The same variables in the `env` output of `task-manager`.
+3. `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_DB` or `POSTGRES_DATABASE` in the `env` output of `task-manager-db`, used when the user or the password is set. Without `POSTGRES_USER`, the user is `postgres`, which both the official and the Bitnami image create. Without `POSTGRES_PASSWORD`, for example when the image reads it from `POSTGRES_PASSWORD_FILE`, the password is the default. Without a database variable, the database is the one named after the user, as the official `postgres` image creates it. This step keeps the figures available when the Prefect server is down, which is common when the database has filled its disk.
+4. The defaults of the backup tool: user `postgres`, password `prefect`, database `prefect`.
+
+The `env` output of both containers holds secrets and is never written to the bundle or the log. Only the source of the credentials is logged, at debug level. A Prefect connection URL is parsed with `url.Parse` alone, so a user, password or database that it leaves out takes the default, never a value from `PGUSER`, `PGPASSWORD`, `PGDATABASE`, `~/.pgpass` or the operating-system user of the machine that runs the tool. A URL that does not parse is ignored with a warning that names its variable, its source and the part that does not parse, such as a port that is not a number, without quoting the URL: the URL holds the password, and Go's parse error can quote part of it.
+
+The size functions (`pg_total_relation_size`, `pg_table_size`, `pg_indexes_size`) take an `ACCESS SHARE` lock on each table, so they wait only for an `ACCESS EXCLUSIVE` lock, the one lock mode that conflicts with it. Many forms of `ALTER TABLE`, `VACUUM FULL` and `TRUNCATE` take that lock, for example during a task manager upgrade or migration. `to_regclass` and `pg_stat_user_tables` take no lock on the table. Each breakdown query takes an `ACCESS SHARE` lock on the table it reads and on the tables it joins (`breakdownTables`): `flow` for `flow_run`, and `flow_run` and `flow` for `task_run` and `log`. While an `ACCESS EXCLUSIVE` lock is held for longer than the limits, `task-manager-db-storage` therefore fails with `timed out after 60s`, the breakdown's catalog query still returns, and each breakdown table that reads or joins the locked table fails with `timed out after 300s`. A lock on `flow_run` or on `flow` fails three tables: `flow_run`, `task_run` and `log`. In the other direction, a schema change that asks for its lock while a breakdown query runs waits until the query ends, and while it waits, PostgreSQL makes every later query on that table wait behind it, including the queries of the task manager. The end-to-end test showed that a lock on `artifact` also makes `task-manager-state` (`prefect flow-run ls`) wait until its own 60-second limit.
+
+`INFRAHUB_TASK_MANAGER_DB_QUERY_TIMEOUT` is for tests only and is not in the user documentation. It takes a Go duration, for example `5s`, and can only lower the two limits, so the end-to-end test reaches them in seconds. A value that does not parse or is not positive is ignored with a warning.
+
+### File contracts
+
+The two files follow the JSON Schemas of the spec, `specs/archive/006-taskmgr-db-storage/contracts/storage.schema.json` and `storage-breakdown.schema.json`; `tests/helpers/bundle.py` asserts their constraints by hand. Every size has `bytes`, for scripts, and `readable`, the same size as `formatBytes` writes it. Timestamps are RFC 3339 in UTC.
+
+`storage.json` holds `collected_at`, `database`, `database_size`, `statistics_reset_at` (null when PostgreSQL never reset the statistics; the row counts and vacuum times cover the period since then) and `tables`, ordered by total size, largest first, then by schema and name. Each table has `schema`, `name`, `total_size`, `data_size`, `index_size`, `toast_size`, `live_rows`, `dead_rows`, `last_vacuum` and `last_autovacuum`, and `data_size + index_size + toast_size = total_size` for every table. The row counts are the estimates that PostgreSQL keeps, not exact counts.
+
+`storage-breakdown.json` holds `collected_at`, `database`, `time_limit_per_table` (for example `300s`) and `tables`, one entry per table of `breakdownTables` in list order. Each entry has `name`, `status`, `grouped_by`, `timestamp_column`, and either `rows` and `groups` (status `collected`) or `reason` (status `absent` or `failed`). A group has `group` (one value per key of `grouped_by`, null when the value is missing), the exact `rows`, `oldest` and `newest`, and for `flow_run` and `task_run` also `rows_without_start_time`. Groups are ordered by `rows`, largest first, then by their key values.
+
+| Table | `grouped_by` | `timestamp_column` |
+|---|---|---|
+| `events` | `event_name` (the `event` column) | `occurred` |
+| `flow_run` | `flow_name`, `state_type` | `start_time` |
+| `task_run` | `flow_name` (of the parent flow run, or null), `state_type` | `start_time` |
+| `flow_run_state` | `state_type` | `timestamp` |
+| `task_run_state` | `state_type` | `timestamp` |
+| `log` | `flow_name` (of the parent flow run, or null), `log_level` | `timestamp` |
+| `artifact` | `artifact_type` | `created` |
+
+`log_level` is the level name for the standard Python levels (10 `DEBUG`, 20 `INFO`, 30 `WARNING`, 40 `ERROR`, 50 `CRITICAL`) and the number as text otherwise. The table and column names are those of Prefect 3, checked against Prefect 3.8.6. The breakdown does not target Prefect 2.x: every Infrahub release that ships a task manager pins Prefect 3 (Infrahub 1.0.0 pins 3.0.3). A table that a Prefect version does not have is `absent`; a renamed column fails that table only, with the PostgreSQL message as the reason.
+
+The run tables are grouped by `start_time` because that is what a flush filters on. `infrahub-taskmanager flush flow-runs`, and the `infrahub tasks flush flow-runs` command it runs first, delete the flow runs whose `start_time` is before the cutoff and whose state type is `COMPLETED`, `FAILED` or `CANCELLED`. The oldest and newest `start_time` of each flow name and state type group therefore predict what a flush with a given retention period removes, and `rows_without_start_time` counts the rows that a flush never removes.
+
+### Outcomes, reasons and progress lines
+
+The manifest reason for each case. `<cause>` is the line of the error output that names the problem, with the password masked.
+
+| Case | `task-manager-db-storage` | `task-manager-db-storage-breakdown` |
+|---|---|---|
+| Neither the flag nor `INFRAHUB_INCLUDE_TASK_MANAGER_STORAGE` is set | runs anyway | `skipped`, `not requested` |
+| `task-manager-db` has no running replica | `skipped`, `service not deployed; the task manager may use an external PostgreSQL server` | the same |
+| The query, or the breakdown's catalog query, reaches its limit | `failed`, `timed out after 60s` | `failed`, `timed out after 60s`; no table is attempted |
+| `psql` is missing, the login is rejected, the server cannot be reached, or another error | `failed`, `psql missing: <cause>`, `login rejected: <cause>`, `not reachable: <cause>` or `query failed: <cause>` | the same, for the catalog query; no table is attempted |
+| Every table is collected or absent | n/a | `success` |
+| One or more tables fail | n/a | `failed`, `partial storage breakdown: <table>: <reason>; …`; `storage-breakdown.json` is still written |
+
+`runTaskManagerDBQuery` classifies a failed `psql` call into one of five kinds, from the exit code and the error output:
+
+- `timed out`: `canceling statement due to statement timeout`, or the tool-side bound. The reason is `timed out after <limit>`.
+- `psql missing`: exit code 127 with `psql: not found`, which is how `sh` reports it in dash, bash and busybox.
+- `login rejected`: `password authentication failed`, `no pg_hba.conf entry`, `role "…" does not exist` or `database "…" does not exist`.
+- `not reachable`: `could not connect to server`, `connection refused`, `connection timed out`, `timeout expired` (how `psql` reports `PGCONNECT_TIMEOUT` running out), a container that `is not running`, or a pod that is not found.
+- `query failed`: anything else.
+
+The lines that kubectl writes around the command's own output (`Defaulted container …`, `command terminated with exit code …`) are never picked as the cause. Stopping PostgreSQL inside the official image stops the container, because PostgreSQL is its main process, so on Docker a stopped server appears as `not reachable` with `is not running`.
+
+The breakdown logs `Collecting storage breakdown of table <table> (time limit 300s)` before each table, then `Table <table>: <n> rows in <m> groups (<duration>)`, `Table <table>: absent`, or a warning `Table <table>: <reason>`.
+
+### Privileges and authentication
+
+The queries need only the privileges of the database owner: it reads its own tables and the statistics views, and every parameter in `PGOPTIONS` is one that any role can set. No superuser right is needed, so the non-superuser `prefect` role that the Infrahub production deployment documentation describes, owner of the `prefect` database and of the `public` schema, works for both collectors and for `infrahub-backup create` ([ADR 0009](../adr/0009-postgresql-access-through-psql-in-task-manager-db.md)). This was checked on 2026-11-12 against `postgres:18-alpine` with password authentication required on `localhost`.
+
+On Kubernetes with a CloudNativePG cluster, the queries run in the primary pod, the one labeled `cnpg.io/instanceRole=primary` (or `role=primary` for older operators), because a standby does not run VACUUM or autovacuum, so its vacuum times would be empty. Right after a switchover, the new primary has not run autovacuum yet, so a bundle can show no `last_autovacuum` at all. The backend caches the pod it resolved for a service for the whole run (`podCache`), so when the primary moves during a breakdown, the remaining queries go to the old pod.
+
 ## Manifest (`bundle_information.json`)
 
 The collect-side sibling of `BackupMetadata`. Contract: `specs/archive/003-collect-tool/contracts/manifest.schema.json`. Fields: `manifest_version` (date-serial), `collect_id`, `created_at` (RFC3339 UTC), `tool_version`, `infrahub_version`, `environment` (`docker`|`kubernetes`), `log_lines`, and `collectors[]` of `{name, status, reason?, artifact?}` where `status` ∈ `success|failed|skipped`. The manifest accounts for every planned collector and is written last so it reflects final outcomes. See [ADR 0005](../adr/0005-uniform-bundle-and-manifest.md).
@@ -86,3 +163,4 @@ Every subprocess on the collect path is timeout-bounded (see [ADR 0002](../adr/0
 
 - **Docker services log to stderr.** `docker logs` demuxes a container's output onto the matching process streams, and Infrahub services write to stderr. Capturing stdout alone yields near-empty logs, so the Docker log path uses a **combined** stdout+stderr pipe (`runCommandCombinedPipeContext`). The Kubernetes `kubectl logs` path needs no such merge.
 - **A stopped-but-deployed Docker service** still has its logs collected and is recorded `failed` (not `skipped`); `skipped` is reserved for a service that is not deployed at all.
+- **The official `postgres` image never checks the password on `localhost`.** Its `pg_hba.conf` trusts TCP connections from `127.0.0.1` and `::1`, so on Docker Compose a wrong password for `task-manager-db` still logs in, and only a wrong role or database name fails (`FATAL:  role "nobody" does not exist`). The Bitnami image of the Helm chart and CloudNativePG require the password. A change to the credential lookup or to the password path is therefore only proven on a stack whose `task-manager-db` starts with `POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256`, or on Kubernetes.

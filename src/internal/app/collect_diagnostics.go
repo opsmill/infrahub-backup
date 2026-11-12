@@ -71,6 +71,15 @@ type separateExecer interface {
 	ExecSeparateContext(ctx context.Context, timeout time.Duration, service string, command []string, opts *ExecOptions) (string, string, error)
 }
 
+// inputExecer is separateExecer with input written to the command's stdin.
+// The task manager database queries pass the password this way, so it is in
+// no argument of the docker or kubectl process, which other users of the
+// operator's host can read in the process list. Both concrete backends
+// implement it.
+type inputExecer interface {
+	ExecSeparateInputContext(ctx context.Context, timeout time.Duration, service string, command []string, opts *ExecOptions, input string) (string, string, error)
+}
+
 // separateReplicaExecer is separateExecer for a specific replica: the
 // per-replica variant used by the task-worker collector.
 type separateReplicaExecer interface {
