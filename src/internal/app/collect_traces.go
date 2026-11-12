@@ -465,7 +465,14 @@ func (c *tempoClient) fetch(ctx context.Context, traceID string) ([]byte, error)
 	}
 	legacy, legacyErr := c.get(ctx, "/api/traces/"+id, nil)
 	if legacyErr != nil {
-		return nil, err
+		// Both endpoints answer 404: the trace is missing, so report the
+		// answer of /api/v2/traces. Any other error of the second request
+		// (timeout, network error, HTTP 500) is the real cause.
+		var legacyStatus *tempoStatusError
+		if errors.As(legacyErr, &legacyStatus) && legacyStatus.status == http.StatusNotFound {
+			return nil, err
+		}
+		return nil, legacyErr
 	}
 	c.legacyFetch = true
 	return legacy, nil

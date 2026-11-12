@@ -987,3 +987,26 @@ func TestTempoClientFetchMissingTrace(t *testing.T) {
 		t.Error("the client switched to /api/traces although it has no trace either")
 	}
 }
+
+// When /api/v2/traces answers 404 and /api/traces fails for another reason,
+// fetch returns the error of /api/traces, not the 404.
+func TestTempoClientFetchLegacyError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/v2/") {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, "storage unavailable", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client := newTempoClient(server.URL, "")
+	_, err := client.fetch(context.Background(), "a1")
+	var status *tempoStatusError
+	if !errors.As(err, &status) || status.status != http.StatusInternalServerError {
+		t.Fatalf("error = %v, want the HTTP 500 of /api/traces", err)
+	}
+	if client.legacyFetch {
+		t.Error("the client switched to /api/traces although the request failed")
+	}
+}
