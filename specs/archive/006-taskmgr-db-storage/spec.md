@@ -4,7 +4,7 @@
 
 **Created**: 2026-10-26
 
-**Status**: Draft
+**Status**: Extracted
 
 **Input**: The PRD for [opsmill/infrahub-backup#181](https://github.com/opsmill/infrahub-backup/issues/181), published at <https://github.com/opsmill/infrahub-backup/issues/181#issuecomment-6422690269>, and the scoping comment at <https://github.com/opsmill/infrahub-backup/issues/181#issuecomment-6420264056>.
 

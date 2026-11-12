@@ -44,7 +44,7 @@ EXPECTED_COLLECTORS = {f"logs/{service}" for service in LOG_SERVICES} | {
 OPT_IN_COLLECTORS = {"task-manager-db-storage-breakdown", "backup", "benchmark"}
 
 # Bundle directory owned by each non-log collector (contracts/bundle-layout.md;
-# task-manager-db/ is specs/006-taskmgr-db-storage/contracts/manifest-outcomes.md).
+# task-manager-db/ is specs/archive/006-taskmgr-db-storage/contracts/manifest-outcomes.md).
 # Each directory is also an allowed top-level bundle entry (ALLOWED_TOP_LEVEL).
 COLLECTOR_DIRS = {
     "database-logs": "database",
@@ -68,7 +68,7 @@ STORAGE_ERROR_MEMBER = "bundle/task-manager-db/storage.err.txt"
 STORAGE_BREAKDOWN_MEMBER = "bundle/task-manager-db/storage-breakdown.json"
 STORAGE_BREAKDOWN_ERROR_MEMBER = "bundle/task-manager-db/storage-breakdown.err.txt"
 
-# Field sets and patterns of specs/006-taskmgr-db-storage/contracts/storage.schema.json.
+# Field sets and patterns of specs/archive/006-taskmgr-db-storage/contracts/storage.schema.json.
 STORAGE_REPORT_FIELDS = {"collected_at", "database", "database_size", "statistics_reset_at", "tables"}
 STORAGE_TABLE_FIELDS = {
     "schema",
@@ -90,7 +90,7 @@ RFC3339_RE = re.compile(
 )
 
 # Field sets, enums and patterns of
-# specs/006-taskmgr-db-storage/contracts/storage-breakdown.schema.json.
+# specs/archive/006-taskmgr-db-storage/contracts/storage-breakdown.schema.json.
 BREAKDOWN_FIELDS = {"collected_at", "database", "time_limit_per_table", "tables"}
 BREAKDOWN_TABLE_REQUIRED_FIELDS = {"name", "status", "grouped_by", "timestamp_column"}
 BREAKDOWN_TABLE_OPTIONAL_FIELDS = {"reason", "rows", "groups"}
@@ -276,7 +276,7 @@ def _assert_size(size: object, where: str) -> int:
 
 
 def assert_storage_report(doc: dict) -> None:
-    """Assert storage.json conformance with specs/006-taskmgr-db-storage/contracts/storage.schema.json.
+    """Assert storage.json conformance with specs/archive/006-taskmgr-db-storage/contracts/storage.schema.json.
 
     jsonschema is not a test dependency; the schema's constraints are asserted
     manually, as validate_manifest_schema does for the manifest: required
@@ -386,7 +386,7 @@ def _breakdown_group_order_key(group: dict) -> tuple:
 
 def assert_storage_breakdown(doc: dict) -> None:
     """Assert storage-breakdown.json conformance with
-    specs/006-taskmgr-db-storage/contracts/storage-breakdown.schema.json.
+    specs/archive/006-taskmgr-db-storage/contracts/storage-breakdown.schema.json.
 
     jsonschema is not a test dependency; the schema's constraints are asserted
     manually, as validate_manifest_schema does for the manifest: the required

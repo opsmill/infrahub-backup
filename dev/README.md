@@ -19,6 +19,7 @@ under `specs/archive/`.
 - [0006-include-backup-reuses-createbackup.md](adr/0006-include-backup-reuses-createbackup.md) - `--include-backup` reuses `CreateBackup` non-interactively
 - [0007-offline-by-default-opt-in-benchmark.md](adr/0007-offline-by-default-opt-in-benchmark.md) - Offline by default; benchmark/image pulls opt-in
 - [0008-database-enforced-query-limits.md](adr/0008-database-enforced-query-limits.md) - Task manager database queries run read-only, with time limits that PostgreSQL enforces
+- [0009-postgresql-access-through-psql-in-task-manager-db.md](adr/0009-postgresql-access-through-psql-in-task-manager-db.md) - PostgreSQL is reached only through `psql`, `pg_dump` and `pg_restore` inside `task-manager-db`; no database client
 
 ## Current Knowledge
 

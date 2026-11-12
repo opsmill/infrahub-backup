@@ -281,7 +281,7 @@ func TestPodResolutionWithPostgresOperatorLabels(t *testing.T) {
 }
 
 // TestGetPodForServiceWith_SelectsPrimaryPod covers FR-014 of
-// specs/006-taskmgr-db-storage: with a CloudNativePG cluster behind
+// specs/archive/006-taskmgr-db-storage: with a CloudNativePG cluster behind
 // task-manager-db, the database queries run on the primary pod, because a
 // standby does not run VACUUM or autovacuum. The pod lookup tries the label
 // selectors in podSelectors order, and the Infrahub HA examples label the pods

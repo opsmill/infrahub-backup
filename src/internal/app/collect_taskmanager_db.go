@@ -13,7 +13,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// Task manager database queries (specs/006-taskmgr-db-storage):
+// Task manager database queries (specs/archive/006-taskmgr-db-storage):
 //   - the service and bundle directory, and the application name every session
 //     reports to PostgreSQL, so an operator can find and stop it;
 //   - the time limits: each breakdown table gets collectDBQueryTimeout and the

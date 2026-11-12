@@ -2,7 +2,7 @@
 
 **Status**: Accepted
 **Date**: 2026-10-26
-**Source**: specs/006-taskmgr-db-storage/research.md (R2 to R4, R10, R15), issue [#181](https://github.com/opsmill/infrahub-backup/issues/181)
+**Source**: specs/archive/006-taskmgr-db-storage/research.md (R2 to R4, R10, R15), issue [#181](https://github.com/opsmill/infrahub-backup/issues/181)
 
 ## Context
 
