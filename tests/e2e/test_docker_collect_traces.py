@@ -46,6 +46,7 @@ from tests.helpers.traces import (
     attribute_values,
     bundle_file_contents,
     bundle_trace_files,
+    collector_search,
     fetch_trace,
     is_known_key,
     known_attribute_keys,
@@ -211,8 +212,12 @@ class TestDockerCollectTraces(TestInfrahubDockerClient):
     def test_traces_collected(self, project, infrahub_traces, admin_token, tempo_url, collect_binary, tmp_path):
         """T022 (a, c) and T028: the traces of the window, filtered, slowest first."""
 
+        def summaries(traces: list[dict]) -> dict[str, dict]:
+            return {t["traceID"].lower().rjust(32, "0"): t for t in traces}
+
         def durations() -> dict[str, int]:
-            return {t["traceID"].lower().rjust(32, "0"): t.get("durationMs", 0) for t in search_traces(tempo_url)}
+            found = summaries(collector_search(tempo_url, "1ms"))
+            return {trace_id: t.get("durationMs", 0) for trace_id, t in found.items()}
 
         durations_before = durations()
         bundle_path, manifest, result = _create_bundle(
@@ -243,19 +248,36 @@ class TestDockerCollectTraces(TestInfrahubDockerClient):
         assert len(names) == details["traces_written"]
         assert sum(len(content) for content in files.values()) == details["bytes_written"]
 
-        # Slowest first: the file order follows the durations that Tempo
-        # reports. A trace can still get spans during the collection (a
-        # Prefect flow that runs), which changes its duration, so only the
-        # traces whose duration is the same before and after count.
+        # Slowest first: the file order follows the durations of the search
+        # that the collector sends, so the test reads the same search. In CI,
+        # the query `{}` reported another duration for the first trace. A
+        # trace can still get spans during the collection (a Prefect flow that
+        # runs), which changes its duration, so only the traces whose duration
+        # is the same before and after count.
         durations_after = durations()
         stable = {
             trace_id: duration
             for trace_id, duration in durations_after.items()
             if durations_before.get(trace_id) == duration
         }
-        ordered = [stable[trace_id_of(name)] for name in names if trace_id_of(name) in stable]
+        ordered = [(stable[trace_id_of(name)], name) for name in names if trace_id_of(name) in stable]
         assert len(ordered) >= 2, "too few traces with a stable duration to check the order"
-        assert ordered == sorted(ordered, reverse=True), f"traces are not slowest first: {ordered}"
+        out_of_order = [
+            (name, duration, next_duration)
+            for (duration, name), (next_duration, _) in zip(ordered, ordered[1:], strict=False)
+            if duration < next_duration
+        ]
+        if out_of_order:
+            # The message shows what the query `{}` reports for these traces,
+            # so a failure in CI shows its cause.
+            plain = summaries(search_traces(tempo_url))
+            described = [
+                f"{name}: {duration} ms before a trace of {next_duration} ms; "
+                f"query {{}} reports {plain.get(trace_id_of(name), {}).get('durationMs')} ms, "
+                f"root {plain.get(trace_id_of(name), {}).get('rootTraceName')!r}"
+                for name, duration, next_duration in out_of_order
+            ]
+            pytest.fail(f"traces are not slowest first: {described}; order: {[d for d, _ in ordered]}")
 
         # FR-014: the API token is in no file of the bundle and not in the output.
         for path, content in bundle_file_contents(bundle_path).items():

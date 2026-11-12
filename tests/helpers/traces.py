@@ -129,6 +129,29 @@ def search_traces(tempo_url: str, query: str = "{}", since_s: int = 7200, limit:
     return response.json().get("traces") or []
 
 
+def collector_search(tempo_url: str, min_duration: str, since_s: int = 7200) -> list[dict]:
+    """Return the trace summaries of the search that infrahub-collect sends.
+
+    It uses the query, the limit and the window end of searchSlowTraces in
+    src/internal/app/collect_traces.go (first round, tracesSearchLimit). The
+    query `{}` can report another duration for the same trace, so a check of
+    the order of the bundle files reads the durations of this search.
+    """
+    now = int(time.time())
+    response = requests.get(
+        f"{tempo_url}/api/search",
+        params={
+            "q": f"{{ traceDuration > {min_duration} }}",
+            "start": now - since_s,
+            "end": now,
+            "limit": 10000,
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json().get("traces") or []
+
+
 def wait_for_traces(tempo_url: str, predicate, query: str = "{}", timeout: float = 180.0) -> list[dict]:
     """Search Tempo until predicate(traces) is true, and return the traces."""
     deadline = time.time() + timeout
