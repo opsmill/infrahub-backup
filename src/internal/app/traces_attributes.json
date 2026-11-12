@@ -37,6 +37,12 @@
         "net.host.port",
         "net.peer.port",
         "asgi.event.type",
-        "worker"
+        "worker",
+        "prefect.flow.id",
+        "prefect.run.id",
+        "prefect.run.name",
+        "prefect.run.type",
+        "prefect.tags",
+        "prefect.run.parameter.*"
     ]
 }

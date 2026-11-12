@@ -25,12 +25,24 @@ def load_allow_list() -> dict:
 
 
 def known_attribute_keys(allow: dict) -> set[str]:
-    """Return every key the allow-list file names, kept or removed."""
+    """Return every key the allow-list file names, kept or removed.
+
+    A removed entry that ends with ".*" names a prefix, such as
+    prefect.run.parameter.* for the parameters of each Prefect flow; it is
+    returned as is and matched by is_known_key.
+    """
     keys = set(allow["resource"]) | set(allow["removed"])
     for section in ("by_span_name", "by_span_kind"):
         for values in allow[section].values():
             keys |= set(values)
     return keys
+
+
+def is_known_key(key: str, known: set[str]) -> bool:
+    """Return whether the allow-list file names key, directly or by a prefix entry."""
+    if key in known:
+        return True
+    return any(entry.endswith(".*") and key.startswith(entry[:-1]) for entry in known)
 
 
 def synthetic_trace(

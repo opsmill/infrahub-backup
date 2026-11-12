@@ -47,6 +47,7 @@ from tests.helpers.traces import (
     bundle_file_contents,
     bundle_trace_files,
     fetch_trace,
+    is_known_key,
     known_attribute_keys,
     load_allow_list,
     post_trace,
@@ -209,6 +210,11 @@ class TestDockerCollectTraces(TestInfrahubDockerClient):
 
     def test_traces_collected(self, project, infrahub_traces, admin_token, tempo_url, collect_binary, tmp_path):
         """T022 (a, c) and T028: the traces of the window, filtered, slowest first."""
+
+        def durations() -> dict[str, int]:
+            return {t["traceID"].lower().rjust(32, "0"): t.get("durationMs", 0) for t in search_traces(tempo_url)}
+
+        durations_before = durations()
         bundle_path, manifest, result = _create_bundle(
             collect_binary,
             project,
@@ -237,11 +243,18 @@ class TestDockerCollectTraces(TestInfrahubDockerClient):
         assert len(names) == details["traces_written"]
         assert sum(len(content) for content in files.values()) == details["bytes_written"]
 
-        # Slowest first: the file order follows the durations that Tempo reports.
-        durations = {
-            trace["traceID"].lower().rjust(32, "0"): trace.get("durationMs", 0) for trace in search_traces(tempo_url)
+        # Slowest first: the file order follows the durations that Tempo
+        # reports. A trace can still get spans during the collection (a
+        # Prefect flow that runs), which changes its duration, so only the
+        # traces whose duration is the same before and after count.
+        durations_after = durations()
+        stable = {
+            trace_id: duration
+            for trace_id, duration in durations_after.items()
+            if durations_before.get(trace_id) == duration
         }
-        ordered = [durations[trace_id_of(name)] for name in names if trace_id_of(name) in durations]
+        ordered = [stable[trace_id_of(name)] for name in names if trace_id_of(name) in stable]
+        assert len(ordered) >= 2, "too few traces with a stable duration to check the order"
         assert ordered == sorted(ordered, reverse=True), f"traces are not slowest first: {ordered}"
 
         # FR-014: the API token is in no file of the bundle and not in the output.
@@ -284,7 +297,9 @@ class TestDockerCollectTraces(TestInfrahubDockerClient):
             trace = fetch_trace(tempo_url, summary["traceID"])
             resource_keys, span_keys = attribute_keys(trace)
             service = summary.get("rootServiceName", "?")
-            for key in (resource_keys | span_keys) - known:
+            for key in resource_keys | span_keys:
+                if is_known_key(key, known):
+                    continue
                 unknown.setdefault(key, set()).add(service)
         assert not unknown, (
             "Attribute keys in neither list of src/internal/app/traces_attributes.json "
