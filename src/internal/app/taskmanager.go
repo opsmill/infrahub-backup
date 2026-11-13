@@ -36,9 +36,75 @@ var (
 	}
 )
 
+// FlowRunsRequest is what the user asked `flush flow-runs` for.
+type FlowRunsRequest struct {
+	DaysToKeep int
+	BatchSize  int
+	// ArgumentsGiven is true when the user passed days_to_keep or batch_size.
+	ArgumentsGiven bool
+	Rewrite        bool
+}
+
 // FlushFlowRuns removes completed Prefect runs beyond the retention window.
-func (iops *InfrahubOps) FlushFlowRuns(daysToKeep, batchSize int) error {
-	return iops.flushTaskRuns(flowRunsConfig, daysToKeep, batchSize)
+//
+// From Infrahub 1.13, `infrahub tasks flush flow-runs` takes no number of days: the task manager deletes up to its
+// own task history retention, and `--rewrite` returns the disk space. Earlier releases take the number of days.
+func (iops *InfrahubOps) FlushFlowRuns(request FlowRunsRequest) error {
+	if err := iops.checkPrerequisites(); err != nil {
+		return err
+	}
+	if err := iops.DetectEnvironment(); err != nil {
+		return err
+	}
+
+	// Wide enough that the Infrahub CLI prints its help and summary lines without wrapping them.
+	execOpts := iops.buildTaskWorkerExecOpts(&ExecOptions{Env: map[string]string{"COLUMNS": "200"}})
+	help, helpErr := iops.Exec("task-worker", []string{"infrahub", "tasks", "flush", "flow-runs", "--help"}, execOpts)
+	if helpErr != nil || !taskManagerOwnsRetention(help) {
+		if request.Rewrite {
+			logrus.Warn("This Infrahub release cannot rewrite the task history tables; --rewrite is ignored")
+		}
+		return iops.flushTaskRuns(flowRunsConfig, request.DaysToKeep, request.BatchSize)
+	}
+
+	if warning := ignoredArgumentsWarning(request); warning != "" {
+		logrus.Warn(warning)
+	}
+	command := flowRunsCommand(request)
+	logrus.Infof("Running %s in the task worker...", strings.Join(command, " "))
+	if _, err := iops.ExecStream("task-worker", command, execOpts); err != nil {
+		return fmt.Errorf("failed to execute %s: %w", strings.Join(command, " "), err)
+	}
+	logrus.Info("Flow runs cleanup completed")
+	return nil
+}
+
+// taskManagerOwnsRetention reports whether the help of `infrahub tasks flush flow-runs` is the one of Infrahub 1.13
+// and later, which takes no number of days and offers --rewrite.
+func taskManagerOwnsRetention(help string) bool {
+	help = ansiEscapeRe.ReplaceAllString(help, "")
+	return strings.Contains(help, "--rewrite") && !strings.Contains(help, "--days-to-keep")
+}
+
+// flowRunsCommand is the `infrahub tasks flush flow-runs` command of Infrahub 1.13 and later for the request.
+func flowRunsCommand(request FlowRunsRequest) []string {
+	command := []string{"infrahub", "tasks", "flush", "flow-runs"}
+	if request.Rewrite {
+		command = append(command, "--rewrite")
+	}
+	return command
+}
+
+// ignoredArgumentsWarning explains that Infrahub 1.13 and later ignore days_to_keep and batch_size, when they were given.
+func ignoredArgumentsWarning(request FlowRunsRequest) string {
+	if !request.ArgumentsGiven {
+		return ""
+	}
+	return fmt.Sprintf(
+		"This Infrahub release deletes the flow runs older than the task history retention set on the task manager, "+
+			"not the %d days given; to keep %d days, set INFRAHUB_TASK_MANAGER_RETENTION_TASK_HISTORY=%dd on the task manager",
+		request.DaysToKeep, request.DaysToKeep, request.DaysToKeep,
+	)
 }
 
 // FlushStaleRuns cancels running Prefect flow runs that exceeded retention.
