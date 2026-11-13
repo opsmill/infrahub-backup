@@ -1,0 +1,7 @@
+# One control-plane node and two worker nodes, all containers on the Docker host.
+# Used by the Neo4j cluster sessions, so that each member runs on a node of its own.
+experimental:
+  docker:
+    nodes:
+      - name: worker-1
+      - name: worker-2
