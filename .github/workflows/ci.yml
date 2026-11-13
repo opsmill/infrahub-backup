@@ -55,7 +55,7 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.7.2
+          version: v2.13.2
 
   test:
     if: needs.files-changed.outputs.go == 'true'
@@ -130,12 +130,20 @@ jobs:
           PYTEST_MARKERS: ${{ matrix.edition == 'enterprise' && 'docker' || 'docker and not enterprise' }}
         run: exec tini -s -g -- uv run pytest -v -m "$PYTEST_MARKERS" tests/e2e
 
+  # Python changes run it too: the suites themselves are Python, and a change to them alone
+  # must still be exercised. `test` is skipped when no Go changed, and a skipped need skips
+  # this job unless the condition says otherwise, so it runs unless a need failed.
   e2e-tests-k8s:
-    if: needs.files-changed.outputs.go == 'true'
-    needs: ["files-changed", "test"]
+    if: |
+      !cancelled() && !contains(needs.*.result, 'failure') &&
+      (needs.files-changed.outputs.go == 'true' || needs.files-changed.outputs.python == 'true')
+    # go-lint is listed so that its failure stops this job; `test` only inherits it as a skip.
+    needs: ["files-changed", "go-lint", "test"]
     runs-on:
       group: huge-runners
-    timeout-minutes: 30
+    # The enterprise leg also runs the two external-database sessions, each with its own
+    # vcluster and Infrahub deployment.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -173,6 +181,91 @@ jobs:
       - name: Build binaries (infrahub-backup, infrahub-taskmanager, infrahub-collect)
         run: make build
 
+      # The external-database cases run the database tools from this image (ADR 0017) and
+      # pass it with --external-db-image, because a development build has no published image
+      # to default to. The vcluster is created by pytest, so the `external_db_image` fixture
+      # loads the image into the cluster's nodes; it is tagged with the commit rather than
+      # `latest` so that the workload takes it from the node instead of pulling it.
+      - name: Build the infrahub-backup image under test
+        run: |
+          docker build -t "infrahub-backup:e2e-${GITHUB_SHA}" .
+          echo "INFRAHUB_TESTING_EXTERNAL_DB_IMAGE=infrahub-backup:e2e-${GITHUB_SHA}" >> "$GITHUB_ENV"
+
+      # The image's Java runtime and Neo4j jars are trimmed to what the tools load. This runner is
+      # amd64, so this is where the trimmed image is checked on that architecture.
+      - name: Check the image carries working database tools
+        run: SKIP_BUILD=1 ./scripts/check-image-tools.sh "infrahub-backup:e2e-${GITHUB_SHA}"
+
+      # The external-database suites (tasks.md T072) need Neo4j Enterprise, PostgreSQL and an
+      # object store outside the cluster under test. They run as containers on one Docker
+      # network, so Neo4j can fetch a restore's seed from MinIO by name. Pods in the vcluster
+      # and the tool on the runner both reach them through the Docker host's bridge address,
+      # where the ports are published. Only the enterprise leg declares the topology, so the
+      # suites run once.
+      - name: Start the external databases
+        if: matrix.edition == 'enterprise'
+        run: |
+          docker rm -f ext-minio ext-neo4j ext-postgres 2>/dev/null || true
+          docker network rm ext-db 2>/dev/null || true
+          docker network create ext-db
+          # The tool verifies certificates by default (FR-029) and always encrypts PostgreSQL,
+          # so both servers present one self-signed certificate and the suites opt out of
+          # verifying it. Neo4j keeps plain Bolt available for Infrahub's own connections.
+          certs="${RUNNER_TEMP}/ext-db-certs"
+          rm -rf "${certs}" && mkdir -p "${certs}/bolt/trusted" "${certs}/bolt/revoked"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=ext-db" \
+            -keyout "${certs}/bolt/private.key" -out "${certs}/bolt/public.crt"
+          cp "${certs}/bolt/public.crt" "${certs}/bolt/trusted/"
+          chmod -R a+rX "${certs}"
+          docker run -d --name ext-minio --network ext-db -p 19000:9000 \
+            -e MINIO_ROOT_USER=extaccess -e MINIO_ROOT_PASSWORD=extsecretkey \
+            --entrypoint sh pgsty/minio:RELEASE.2026-08-04T00-00-00Z \
+            -c 'mkdir -p /data/infrahub-seed && minio server /data'
+          docker run -d --name ext-neo4j --network ext-db -p 17687:7687 -p 6362:6362 \
+            -v "${certs}:/ssl:ro" \
+            -e NEO4J_dbms_ssl_policy_bolt_enabled=true \
+            -e NEO4J_dbms_ssl_policy_bolt_base__directory=/ssl/bolt \
+            -e NEO4J_dbms_ssl_policy_bolt_client__auth=NONE \
+            -e NEO4J_server_bolt_tls__level=OPTIONAL \
+            -e NEO4J_ACCEPT_LICENSE_AGREEMENT=yes -e NEO4J_AUTH=neo4j/admin12345 \
+            -e NEO4J_server_backup_enabled=true \
+            -e NEO4J_server_backup_listen__address=0.0.0.0:6362 \
+            -e AWS_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=extaccess -e AWS_SECRET_ACCESS_KEY=extsecretkey \
+            -e AWS_ENDPOINT_URL_S3=http://ext-minio:9000 \
+            neo4j:2025.10.1-enterprise
+          docker run -d --name ext-postgres --network ext-db -p 15432:5432 \
+            -v "${certs}:/certs:ro" \
+            -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=prefect -e POSTGRES_DB=prefect \
+            --entrypoint sh postgres:18-alpine -c '
+              mkdir -p /etc/pgssl && cp /certs/bolt/public.crt /certs/bolt/private.key /etc/pgssl/ &&
+              chown -R postgres /etc/pgssl && chmod 600 /etc/pgssl/private.key &&
+              exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/etc/pgssl/public.crt -c ssl_key_file=/etc/pgssl/private.key'
+          for i in $(seq 1 90); do
+            docker exec ext-neo4j cypher-shell -u neo4j -p admin12345 'RETURN 1' && break
+            sleep 2
+          done
+          for i in $(seq 1 30); do
+            docker exec ext-postgres pg_isready -U postgres && break
+            sleep 1
+          done
+          host=$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}')
+          {
+            echo "INFRAHUB_TESTING_EXTERNAL_NEO4J_ADDRESS=${host}:17687"
+            echo "INFRAHUB_TESTING_EXTERNAL_NEO4J_USERNAME=neo4j"
+            echo "INFRAHUB_TESTING_EXTERNAL_NEO4J_PASSWORD=admin12345"
+            echo "INFRAHUB_TESTING_EXTERNAL_NEO4J_EDITION=enterprise"
+            echo "INFRAHUB_TESTING_EXTERNAL_POSTGRES_ADDRESS=${host}:15432"
+            echo "INFRAHUB_TESTING_EXTERNAL_POSTGRES_USERNAME=postgres"
+            echo "INFRAHUB_TESTING_EXTERNAL_POSTGRES_PASSWORD=prefect"
+            echo "INFRAHUB_TESTING_EXTERNAL_SEED_BUCKET=infrahub-seed"
+            echo "INFRAHUB_TESTING_EXTERNAL_SEED_ENDPOINT=http://${host}:19000"
+            echo "INFRAHUB_TESTING_EXTERNAL_SEED_ACCESS_KEY=extaccess"
+            echo "INFRAHUB_TESTING_EXTERNAL_SEED_SECRET_KEY=extsecretkey"
+            echo "INFRAHUB_TESTING_EXTERNAL_INSECURE_TLS=true"
+            # Neo4j 2025.x reports no store size, so a capture needs one (tasks.md T158).
+            echo "INFRAHUB_TESTING_EXTERNAL_SCRATCH_SIZE=2Gi"
+          } >> "$GITHUB_ENV"
+
       - name: Install Python dependencies
         run: uv sync --all-packages
 
@@ -183,6 +276,26 @@ jobs:
 
       - name: Run e2e tests (Kubernetes)
         run: exec tini -s -g -- uv run pytest -v -m k8s tests/e2e
+
+      # Each external topology is its own pytest session, because the deployment under test
+      # is created once per session from INFRAHUB_TESTING_EXTERNAL_DB.
+      - name: Run e2e tests (Kubernetes, external Neo4j)
+        if: matrix.edition == 'enterprise'
+        env:
+          INFRAHUB_TESTING_EXTERNAL_DB: database
+        run: exec tini -s -g -- uv run pytest -v -m k8s tests/e2e/test_k8s_external_neo4j.py tests/e2e/test_k8s_external_in_namespace.py
+
+      - name: Run e2e tests (Kubernetes, external Neo4j and PostgreSQL)
+        if: matrix.edition == 'enterprise'
+        env:
+          INFRAHUB_TESTING_EXTERNAL_DB: database,task-manager-db
+        run: exec tini -s -g -- uv run pytest -v -m k8s tests/e2e/test_k8s_external_both.py
+
+      - name: Remove the external databases
+        if: always() && matrix.edition == 'enterprise'
+        run: |
+          docker rm -f ext-minio ext-neo4j ext-postgres 2>/dev/null || true
+          docker network rm ext-db 2>/dev/null || true
 
   nix-build:
     if: needs.files-changed.outputs.nix == 'true'
