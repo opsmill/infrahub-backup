@@ -31,6 +31,14 @@ Flags and their `INFRAHUB_*` environment equivalents:
 | `--include-queries` | `false` | `INFRAHUB_INCLUDE_QUERIES` | `create` |
 | `--benchmark` | `false` | `INFRAHUB_BENCHMARK` | `create` |
 | `--telemetry-days` | `30` | `INFRAHUB_TELEMETRY_DAYS` | `create` |
+| `--include-traces` | `false` | `INFRAHUB_INCLUDE_TRACES` | `create` |
+| `--traces-since` | `2h` | `INFRAHUB_TRACES_SINCE` | `create` |
+| `--traces-start`, `--traces-end` | unset | `INFRAHUB_TRACES_START`, `INFRAHUB_TRACES_END` | `create` |
+| `--traces-min-duration` | `1s` | `INFRAHUB_TRACES_MIN_DURATION` | `create` |
+| `--traces-max-size` | `100` (MB) | `INFRAHUB_TRACES_MAX_SIZE` | `create` |
+| `--traces-tempo-url` | unset | `INFRAHUB_TRACES_TEMPO_URL` | `create` |
+
+The `--traces-*` options are validated in the `create` handler (`ValidateTraceOptions`) before any collector runs; a `--traces-*` option without `--include-traces` is an error. The two tokens, `INFRAHUB_TRACES_TEMPO_TOKEN` and `INFRAHUB_TRACES_API_TOKEN`, have no flag and are read with `os.LookupEnv`, not viper, so they never reach a command line or viper's debug output. When a variable is not set and stdin is a terminal, `ReadTraceTokens` asks for it with `term.ReadPassword`, also before any collector runs, so no collector waits for input.
 
 `create` exits 0 whenever the archive is produced — including a partial bundle with failed collectors. It exits 1 only for no usable environment, an unwritable output directory, or an archiving failure.
 
@@ -49,6 +57,7 @@ bundle/
 ├── task-manager/             # work pools, queues, flow runs (+ pending/running flow & task runs), events, automations
 ├── server/                   # version, pip list, API info/config/schema, env (masked)
 ├── telemetry/                # infrahubctl telemetry export (last --telemetry-days, default 30)
+├── traces/                   # only with --include-traces: NNNN-<traceID>.json, OTLP JSON, slowest first
 ├── metrics/                  # docker stats / kubectl top
 └── benchmark/                # only when --benchmark ran successfully
 ```
@@ -68,9 +77,19 @@ The telemetry collector runs `infrahubctl telemetry export --start-date <now-N d
 
 The export, the copy-out and the `rm -f` cleanup all run in one `task-worker` replica, picked from `ServiceReplicas` by `pickTelemetryReplica` (a running container first, then a container named after the service, so a sidecar in a Kubernetes pod is passed over). Service-level exec and copy are not enough on a scaled Docker Compose service: `docker compose exec` runs in the lowest-numbered running container, while `docker compose cp` without `--index` reads from the first container the daemon lists, which after a scale-up is the newest one. The export would then be written in one container and looked for in another. Failing to enumerate the replicas also marks the collector `failed`.
 
+### Traces collector
+
+`tracesCollector` (`collect_traces.go`) runs after `telemetry` and before `metrics`, only with `--include-traces`. It sends its Tempo requests from the host with `net/http`, not through an exec, so it works while the Infrahub pods are down. The deployment's Tempo is found through the optional `tempoLocator` capability: `docker compose port infrahub-tempo 3200` on Docker, and on Kubernetes the service labelled `app.kubernetes.io/name=tempo` in the Infrahub namespace with a `kubectl port-forward` to port 3100 that stops when the collector ends (`collect_traces_backends.go`). `--traces-tempo-url` replaces the locator. Tempo absent, not answering, or a missing Kubernetes permission (`list`/`get` on `services`, `get`/`list` on `pods`, `create` on `pods/portforward`; `kubectl port-forward service/…` reads the service and a pod behind it before it opens the port) → `skipped` with a reason that names `--traces-tempo-url`.
+
+Flow: one TraceQL search `{ traceDuration > <min> }` with `limit=10000` (`tracesSearchLimit`). When a search returns the limit, more traces may exist and Tempo's subset is not the slowest one, so the collector searches again with the minimum duration doubled and records `search_limit_reached` and `min_duration_used`. It sorts the results by `durationMs` (Tempo does not), then fetches each trace with `GET /api/v2/traces/<id>` (or `GET /api/traces/<id>` when the first answers 404: Tempo before 2.6, such as the 2.5.0 of the `infrahub-observability` Helm chart, has no `/api/v2/traces` route, and its answer lists the resource spans under `batches`), filters it, and writes it, until `--traces-max-size` (the first trace that does not fit stops the loop) or the 5-minute limit (`tracesTimeLimit`, recorded as `success` with `time_limit_reached`). Tempo can drop the leading zeros of a trace ID in the search answer; `normalizeTraceID` pads it to 32 hex characters. A fetch error after some traces is `failed` with a reason that starts with `partial`; the written traces stay.
+
+The filter (`collect_traces_filter.go`) is an allow-list read from the embedded `traces_attributes.json`: resource keys, keys by span name, and keys by span kind. The same file lists the keys removed on purpose. Decoding into narrow OTLP structs drops everything else (events, links, `status.message`, scopes). Tempo returns IDs in base64, which an OTLP HTTP receiver rejects (`400 length mismatch`), so the filter converts the trace, span and parent span IDs to lowercase hex; the written files then load into another Tempo with `POST /v1/traces`.
+
+With `INFRAHUB_TRACES_API_TOKEN`, the collector also reads `GET /api/troubleshooting/trace-sample-ratio` inside `infrahub-server` (Infrahub 1.12+). The token goes on the stdin of the command (`stdinExecer` → `ExecStdinContext`, a time-limited collect-only variant of `ExecWritePipe`), not on its command line. The ratio never changes the collector's status; when it is not read, the output says why.
+
 ## Manifest (`bundle_information.json`)
 
-The collect-side sibling of `BackupMetadata`. Contract: `specs/archive/003-collect-tool/contracts/manifest.schema.json`. Fields: `manifest_version` (date-serial), `collect_id`, `created_at` (RFC3339 UTC), `tool_version`, `infrahub_version`, `environment` (`docker`|`kubernetes`), `log_lines`, and `collectors[]` of `{name, status, reason?, artifact?}` where `status` ∈ `success|failed|skipped`. The manifest accounts for every planned collector and is written last so it reflects final outcomes. See [ADR 0005](../adr/0005-uniform-bundle-and-manifest.md).
+The collect-side sibling of `BackupMetadata`. Contract: `specs/archive/003-collect-tool/contracts/manifest.schema.json`. Fields: `manifest_version` (date-serial), `collect_id`, `created_at` (RFC3339 UTC), `tool_version`, `infrahub_version`, `environment` (`docker`|`kubernetes`), `log_lines`, and `collectors[]` of `{name, status, reason?, artifact?, details?}` where `status` ∈ `success|failed|skipped`. `details` is a structured object a collector hands to the orchestrator with `setDetails`; the orchestrator records it for every status, because a skipped or failed run still reports what it tried. Only the `traces` collector sets it (window, counts, limits, sampling ratio). `manifest_version` is `2026110500` since `details` was added. The manifest accounts for every planned collector and is written last so it reflects final outcomes. See [ADR 0005](../adr/0005-uniform-bundle-and-manifest.md).
 
 ## The collect backend seam
 

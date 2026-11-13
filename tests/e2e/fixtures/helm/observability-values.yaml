@@ -1,0 +1,18 @@
+# Values for the infrahub-observability chart in the traces end-to-end test
+# (INFP-744): only Tempo, without a persistent volume.
+alloy:
+  enabled: false
+loki:
+  enabled: false
+prometheus:
+  enabled: false
+prometheus-node-exporter:
+  enabled: false
+grafana:
+  enabled: false
+prefectExporter:
+  enabled: false
+tempo:
+  enabled: true
+  persistence:
+    enabled: false

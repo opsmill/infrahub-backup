@@ -37,6 +37,8 @@ type CollectOptions struct {
 	// product-telemetry export; a non-positive value falls back to
 	// defaultTelemetryDays (30).
 	TelemetryDays int
+	// Traces holds the validated options of the opt-in traces collector.
+	Traces TraceOptions
 }
 
 // Replica is a read-only descriptor of one running container of a service.
@@ -86,6 +88,10 @@ type collectContext struct {
 	// (e.g. the --include-backup archive path); the orchestrator moves it
 	// into that collector's manifest entry after a successful run.
 	artifact string
+	// details is a structured value handed off by the running collector; the
+	// orchestrator moves it into that collector's manifest entry whatever the
+	// outcome (success, skipped or failed).
+	details any
 }
 
 // setArtifact hands the orchestrator a filesystem artifact reference to
@@ -100,6 +106,20 @@ func (cc *collectContext) takeArtifact() string {
 	artifact := cc.artifact
 	cc.artifact = ""
 	return artifact
+}
+
+// setDetails hands the orchestrator a structured value to record as the
+// details of the current collector's manifest entry.
+func (cc *collectContext) setDetails(details any) {
+	cc.details = details
+}
+
+// takeDetails returns and clears the pending details so they never leak into a
+// later collector's entry.
+func (cc *collectContext) takeDetails() any {
+	details := cc.details
+	cc.details = nil
+	return details
 }
 
 // collect resolves the active environment backend to the collect-side
@@ -161,6 +181,7 @@ func (iops *InfrahubOps) collectPlan(opts CollectOptions) []collector {
 		taskManagerCollector(),
 		serverInfoCollector(),
 		telemetryCollector(),
+		tracesCollector(),
 		metricsCollector(),
 	)
 
@@ -306,6 +327,7 @@ func (iops *InfrahubOps) runCollectPlan(backend EnvironmentBackend, opts Collect
 				logrus.Warnf("Collector %s skipped: %s", c.name, skip.reason)
 				cc.takeArtifact() // drop a skipped collector's artifact reference
 				manifest.recordSkipped(c.name, skip.reason)
+				manifest.attachDetails(cc.takeDetails())
 				continue
 			}
 
@@ -317,6 +339,7 @@ func (iops *InfrahubOps) runCollectPlan(backend EnvironmentBackend, opts Collect
 			logrus.Warnf("Collector %s failed: %v", c.name, err)
 			cc.takeArtifact() // drop a failed collector's artifact reference
 			manifest.recordFailed(c.name, reason)
+			manifest.attachDetails(cc.takeDetails())
 			continue
 		}
 		if artifact := cc.takeArtifact(); artifact != "" {
@@ -324,6 +347,7 @@ func (iops *InfrahubOps) runCollectPlan(backend EnvironmentBackend, opts Collect
 		} else {
 			manifest.recordSuccess(c.name)
 		}
+		manifest.attachDetails(cc.takeDetails())
 	}
 
 	// The manifest is finalized last so it reflects every collector outcome.

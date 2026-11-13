@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -349,4 +350,124 @@ func (ce *CommandExecutor) runCommandWithStream(name string, args ...string) (st
 
 	err = cmd.Wait()
 	return stdoutBuf.String(), err
+}
+
+// runCommandStdinSeparateContext is the timeout-bounded variant of
+// runCommandWritePipe for the collect path: it writes stdin to the command and
+// returns its stdout and stderr apart. The returned error is a *timeoutError
+// when the timeout expired. It passes a secret to a command without putting it
+// on the command line.
+func (ce *CommandExecutor) runCommandStdinSeparateContext(ctx context.Context, timeout time.Duration, stdin []byte, name string, args ...string) (string, string, error) {
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	var stdout, stderr bytes.Buffer
+	cmd := exec.CommandContext(cctx, name, args...)
+	// A child process that keeps the output pipes open must not hold Wait
+	// past the time limit.
+	cmd.WaitDelay = time.Second
+	cmd.Stdin = bytes.NewReader(stdin)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	out, errOut := strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String())
+	if err != nil && errors.Is(cctx.Err(), context.DeadlineExceeded) {
+		return out, errOut, &timeoutError{timeout: timeout}
+	}
+	return out, errOut, err
+}
+
+// lockedBuffer is a bytes.Buffer safe for one writer goroutine and one reader.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// startBackgroundCommand starts a long-running command, such as kubectl
+// port-forward, and waits until ready returns a value for a line of its
+// stdout. It returns that value and a stop function that ends the command.
+// When the command exits first, the error holds its stderr; when ready finds
+// nothing before startTimeout, the command is stopped and a *timeoutError is
+// returned.
+func (ce *CommandExecutor) startBackgroundCommand(ctx context.Context, startTimeout time.Duration, ready func(line string) (string, bool), name string, args ...string) (string, func(), error) {
+	cctx, cancel := context.WithCancel(ctx)
+	cmd := exec.CommandContext(cctx, name, args...)
+	logrus.Debugf("exec background: %s %s", name, strings.Join(args, " "))
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		return "", nil, err
+	}
+	stderr := &lockedBuffer{}
+	cmd.Stderr = stderr
+
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return "", nil, err
+	}
+
+	found := make(chan string, 1)
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		reader := bufio.NewReader(stdout)
+		sent := false
+		for {
+			line, readErr := reader.ReadString('\n')
+			if !sent {
+				if value, ok := ready(strings.TrimSpace(line)); ok {
+					found <- value
+					sent = true
+				}
+			}
+			if readErr != nil {
+				return
+			}
+		}
+	}()
+
+	waitDone := make(chan error, 1)
+	go func() {
+		<-readDone
+		waitDone <- cmd.Wait()
+	}()
+
+	stop := func() {
+		cancel()
+		<-waitDone
+	}
+
+	timer := time.NewTimer(startTimeout)
+	defer timer.Stop()
+	select {
+	case value := <-found:
+		return value, stop, nil
+	case waitErr := <-waitDone:
+		cancel()
+		message := strings.TrimSpace(stderr.String())
+		if waitErr == nil {
+			waitErr = errors.New("command exited")
+		}
+		if message != "" {
+			return "", nil, fmt.Errorf("%w: %s", waitErr, message)
+		}
+		return "", nil, waitErr
+	case <-timer.C:
+		stop()
+		return "", nil, &timeoutError{timeout: startTimeout}
+	}
 }
