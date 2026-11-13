@@ -1,6 +1,7 @@
 # Minimal Infrahub Helm values for e2e testing in vcluster
 global:
   imagePullPolicy: IfNotPresent
+  infrahubTag: develop
 
 infrahub-backup:
   enabled: false
@@ -40,6 +41,10 @@ infrahubDemoData:
   enabled: false
 
 prefect-server:
+  global:
+    prefect:
+      image:
+        prefectTag: develop
   postgresql:
     primary:
       startupProbe:
