@@ -167,7 +167,7 @@ Example metadata structure:
 }
 ```
 
-The `checksums` field holds one SHA-256 hash for each file, keyed by its path under `backup/`. The hashes are plain hexadecimal values with no prefix.
+The `checksums` field holds one SHA-256 hash for each Neo4j database file and for the task manager dump, keyed by its path under `backup/`. It has no hash for `backup_information.json`. The hashes are plain hexadecimal values with no prefix.
 
 ## Step 5: Backup artifact storage
 
