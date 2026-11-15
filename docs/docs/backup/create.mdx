@@ -177,12 +177,30 @@ If your storage tier already offers automatic versioning or replication, confirm
 
 ## Step 6: Test restore capability
 
-Periodically test restoration to ensure backups are valid:
+Periodically test restoration to confirm your backups are usable.
+
+To review what a backup contains without changing any deployment, read the archive:
 
 ```bash
-# Review what would be restored
-infrahub-backup restore infrahub_backups/infrahub_backup_20250929_143022.tar.gz
+# List the files in the archive
+tar -tzf infrahub_backups/infrahub_backup_20250929_143022.tar.gz
+
+# View the backup metadata
+tar -xzOf infrahub_backups/infrahub_backup_20250929_143022.tar.gz backup_information.json | jq '.'
 ```
+
+To confirm the backup restores, restore it into a test or staging instance:
+
+```bash
+# Restore into a separate Docker Compose project, not production
+infrahub-backup restore infrahub_backups/infrahub_backup_20250929_143022.tar.gz --project=infrahub-staging
+```
+
+:::warning
+`infrahub-backup restore` replaces the data of the target deployment with the contents of the archive. It has no dry-run mode. Run it only against a test or staging instance, never against the production instance you want to check.
+:::
+
+See [Restore from a backup](./restore.mdx) for the full restore procedure.
 
 ## Advanced usage
 
