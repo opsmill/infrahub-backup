@@ -136,34 +136,38 @@ ls -lh infrahub_backups/
 tar -tzf infrahub_backups/infrahub_backup_20250929_143022.tar.gz > /dev/null && echo "Archive is valid"
 
 # View backup metadata
-tar -xzOf infrahub_backups/infrahub_backup_20250929_143022.tar.gz backup_information.json | jq '.'
+tar -xzOf infrahub_backups/infrahub_backup_20250929_143022.tar.gz backup/backup_information.json | jq '.'
 ```
 
 ### Validate backup contents
 
-The backup should contain:
+The archive keeps its files under a `backup/` folder:
 
-- `backup_information.json` - Backup information and checksums
-- `database/` - Neo4j database files
-- `prefect.dump` - PostgreSQL dump
+- `backup/backup_information.json` - Backup information and checksums
+- `backup/database/` - Neo4j database files: `neo4j.dump` for Neo4j Community, or the `neo4j-admin database backup` files for Neo4j Enterprise
+- `backup/prefect.dump` - Task manager PostgreSQL dump, present only when the backup includes the task manager database
+
+To list the files in an archive, run `tar -tzf <archive>`.
 
 Example metadata structure:
 
 ```json
 {
-  "metadata_version": 2025092500,
+  "metadata_version": 2025111200,
   "backup_id": "20250929_143022",
   "created_at": "2025-09-29T14:30:22Z",
-  "tool_version": "1.0.0",
-  "infrahub_version": "0.15.0",
+  "tool_version": "v2.5.0",
+  "infrahub_version": "1.12.1",
   "components": ["database", "task-manager-db"],
   "checksums": {
-    "database": "sha256:abc123...",
-    "prefect.dump": "sha256:def456..."
+    "database/neo4j.dump": "3f5a9c...",
+    "prefect.dump": "b81e04..."
   },
-  "redacted": false
+  "neo4j_edition": "community"
 }
 ```
+
+The `checksums` field holds one SHA-256 hash for each file, keyed by its path under `backup/`. The hashes are plain hexadecimal values with no prefix.
 
 ## Step 5: Backup artifact storage
 
