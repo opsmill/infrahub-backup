@@ -114,7 +114,9 @@ jobs:
         run: make build
 
       - name: Install Python dependencies
-        run: uv sync --all-packages
+        run: |
+          uv sync --all-packages
+          uv pip install "infrahub-testcontainers==1.12.1"
 
       - name: "Set environment variables"
         run: |
@@ -127,8 +129,10 @@ jobs:
       - name: Run e2e tests (Docker Compose)
         env:
           INFRAHUB_TESTING_ENTERPRISE: ${{ matrix.edition == 'enterprise' && 'true' || '' }}
+          INFRAHUB_TESTING_IMAGE_VER: develop
+          NEO4J_DOCKER_IMAGE: neo4j:2026.10.1-${{ matrix.edition }}
           PYTEST_MARKERS: ${{ matrix.edition == 'enterprise' && 'docker' || 'docker and not enterprise' }}
-        run: exec tini -s -g -- uv run pytest -v -m "$PYTEST_MARKERS" tests/e2e
+        run: exec tini -s -g -- uv run --no-sync pytest -v -m "$PYTEST_MARKERS" tests/e2e
 
   e2e-tests-k8s:
     if: needs.files-changed.outputs.go == 'true'
@@ -141,7 +145,7 @@ jobs:
       matrix:
         edition: [community, enterprise]
     env:
-      INFRAHUB_HELM_CHART: ${{ matrix.edition == 'enterprise' && 'oci://registry.opsmill.io/opsmill/chart/infrahub-enterprise' || 'oci://registry.opsmill.io/opsmill/chart/infrahub' }}
+      INFRAHUB_HELM_CHART: ${{ matrix.edition == 'enterprise' && './infrahub-helm/charts/infrahub-enterprise' || './infrahub-helm/charts/infrahub' }}
     steps:
       - uses: actions/checkout@v6
 
@@ -155,6 +159,21 @@ jobs:
 
       - name: Set up Helm
         uses: azure/setup-helm@v4
+
+      - name: Check out the charts of opsmill/infrahub-helm#114
+        uses: actions/checkout@v6
+        with:
+          repository: opsmill/infrahub-helm
+          ref: 824a42e37b5b55b9759165481cc016251c724561
+          path: infrahub-helm
+
+      - name: Build the local charts
+        run: |
+          helm repo add --force-update neo4j https://helm.neo4j.com/neo4j/
+          helm repo add --force-update prefect https://prefecthq.github.io/prefect-helm
+          helm dependency update infrahub-helm/charts/infrahub
+          sed -i 's#repository: "oci://registry.opsmill.io/opsmill/chart"#repository: "file://../infrahub"#' infrahub-helm/charts/infrahub-enterprise/Chart.yaml
+          helm dependency update infrahub-helm/charts/infrahub-enterprise
 
       - name: Set up kubectl
         uses: azure/setup-kubectl@v4

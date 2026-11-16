@@ -4,6 +4,7 @@ go: &go
   - "go.mod"
   - "go.sum"
   - "Makefile"
+  - ".github/workflows/ci.yml"
 
 go_all:
   - *go
