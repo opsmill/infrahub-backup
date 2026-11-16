@@ -297,6 +297,81 @@ jobs:
           docker rm -f ext-minio ext-neo4j ext-postgres 2>/dev/null || true
           docker network rm ext-db 2>/dev/null || true
 
+  # A three-member Neo4j cluster, built like Infrahub's HA example, once inside the
+  # Infrahub namespace and once outside it. Every other Kubernetes case runs against one
+  # Neo4j server. Each topology runs on its own runner, because one cluster and one
+  # Infrahub deployment already fill one.
+  e2e-tests-k8s-neo4j-cluster:
+    if: |
+      !cancelled() && !contains(needs.*.result, 'failure') &&
+      (needs.files-changed.outputs.go == 'true' || needs.files-changed.outputs.python == 'true')
+    needs: ["files-changed", "go-lint", "test"]
+    runs-on:
+      group: huge-runners
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        topology: [internal, external]
+    env:
+      INFRAHUB_HELM_CHART: oci://registry.opsmill.io/opsmill/chart/infrahub-enterprise
+      INFRAHUB_TESTING_NEO4J_CLUSTER: ${{ matrix.topology }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+
+      - name: Set up vCluster
+        uses: loft-sh/setup-vcluster@68e17a8c3618e3c47d635842b803d4f560f694e8
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Set up Python and uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install tini
+        run: apt-get update && apt-get install -y tini
+
+      - name: Build binaries (infrahub-backup, infrahub-taskmanager, infrahub-collect)
+        run: make build
+
+      - name: Install Python dependencies
+        run: uv sync --all-packages
+
+      - name: "Set environment variables"
+        run: |
+          RUNNER_NAME=$(echo "${{ runner.name }}" | grep -o 'ghrunner[0-9]\+' | sed 's/ghrunner\([0-9]\+\)/ghrunner_\1/')
+          echo "VCLUSTER_DIR=/var/lib/github/${RUNNER_NAME}/_temp/.vcluster/config.json" >> $GITHUB_ENV
+
+      # The fixtures build the whole topology: the three-node vcluster, the Neo4j cluster,
+      # the object store and the infrahub-backup image (tests/e2e/conftest.py, "Neo4j
+      # cluster topologies"). The cases of the other topology skip.
+      - name: Run e2e tests (Kubernetes, Neo4j cluster)
+        run: >-
+          exec tini -s -g -- uv run pytest -v -rs -m k8s
+          tests/e2e/test_k8s_neo4j_cluster.py tests/e2e/test_k8s_external_neo4j_cluster.py
+          --junitxml=neo4j-cluster-${{ matrix.topology }}-results.xml
+
+      - name: Upload the test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: neo4j-cluster-${{ matrix.topology }}-results
+          path: neo4j-cluster-${{ matrix.topology }}-results.xml
+          if-no-files-found: ignore
+
   nix-build:
     if: needs.files-changed.outputs.nix == 'true'
     needs: ["files-changed"]

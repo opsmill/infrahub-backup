@@ -9,6 +9,14 @@ from kubernetes_asyncio import client as kubeclient
 from kubernetes_asyncio import config as kubeconfig
 from pytest_asyncio import is_async_test
 
+TESTS_DIR = Path(__file__).parent.resolve()
+
+# A session that declares a Neo4j cluster topology gets a vcluster with three nodes, so
+# that each cluster member runs on a node of its own, as in a production HA deployment.
+# Kept in step with NEO4J_CLUSTER_ENV_VAR in tests/e2e/conftest.py.
+NEO4J_CLUSTER_ENV_VAR = "INFRAHUB_TESTING_NEO4J_CLUSTER"
+VCLUSTER_THREE_NODES_VALUES = TESTS_DIR / "fixtures" / "vcluster-3-nodes.yaml"
+
 
 def pytest_collection_modifyitems(items):
     """Force all async tests to use session-scoped event loop."""
@@ -35,6 +43,8 @@ async def vcluster(
         "--connect=false",
         "--driver=docker",
     ]
+    if os.environ.get(NEO4J_CLUSTER_ENV_VAR, "").strip():
+        create_cmd.extend(["--values", str(VCLUSTER_THREE_NODES_VALUES)])
     if vcluster_dir:
         create_cmd.extend(["--config", vcluster_dir])
     subprocess.run(create_cmd, check=True)
@@ -45,6 +55,21 @@ async def vcluster(
         connect_cmd.extend(["--config", vcluster_dir])
     result = subprocess.run(connect_cmd, capture_output=True, text=True, check=True)
     Path(kubeconfig_path).write_text(result.stdout)
+    # The worker nodes join after `vcluster create` returns, and a pod scheduled before
+    # they are ready lands on the control-plane node.
+    subprocess.run(
+        [
+            "kubectl",
+            "--kubeconfig",
+            kubeconfig_path,
+            "wait",
+            "node",
+            "--all",
+            "--for=condition=Ready",
+            "--timeout=180s",
+        ],
+        check=True,
+    )
 
     await kubeconfig.load_kube_config(config_file=kubeconfig_path)
     async with kubeclient.ApiClient() as api:
