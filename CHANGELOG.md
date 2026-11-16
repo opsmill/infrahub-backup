@@ -13,6 +13,19 @@ Releases up to and including v2.3.0 predate this file; their notes are on the [G
 
 <!-- towncrier release notes start -->
 
+## [2.6.0](https://github.com/opsmill/infrahub-backup/tree/v2.6.0) - 2026-11-16
+
+### Added
+
+- Kubernetes deployments whose Neo4j Enterprise or PostgreSQL task-manager database runs outside the cluster can now be backed up and restored with the same `infrahub-backup create` and `restore` commands as any other deployment. Artifacts taken from an external database are byte-compatible with internal ones and restore by the same path, and deployments whose databases are all internal behave exactly as before. When the deployment's own pods take the database username and password from named Secret keys (`env[].valueFrom.secretKeyRef`), the backup reads the same keys and needs no permissions on secrets. Credentials from any other source, including `envFrom`, need permission to create a Secret for the run. When `infrahub-backup` itself runs as a pod in the Infrahub namespace, it runs the database tools from its own image and creates no Job or Secret, so it needs only the permissions of a backup of internal databases. ([#172](https://github.com/opsmill/infrahub-backup/issues/172))
+
+### Fixed
+
+- On Docker, a restore now waits for the database container to be healthy again before it starts `infrahub-server` and `task-worker`, and a failed `docker compose start` or `stop` reports what compose printed instead of only its exit status. ([#172](https://github.com/opsmill/infrahub-backup/issues/172))
+- The Kubernetes backup permissions now list `list` on `deployments` and `statefulsets` and `get` and `patch` on `deployments/scale` and `statefulsets/scale`. A Role that granted only `get` and `patch` on the workloads, as the documentation previously said, cannot stop and restart the Infrahub components, because `kubectl scale` writes to the `scale` resources.
+- When `--k8s-namespace` is set and the namespace cannot be checked, the error now includes what `kubectl` reported, such as a `forbidden` refusal or a missing namespace, instead of only `exit status 1`.
+- When `--k8s-namespace` or `--project` is set, the tools now act only on that deployment. Previously, if the Kubernetes namespace could not be checked, they went on to detect a Docker Compose project on the same host and could back up or restore that project instead.
+
 ## [2.5.0](https://github.com/opsmill/infrahub-backup/tree/v2.5.0) - 2026-11-13
 
 ### Added
