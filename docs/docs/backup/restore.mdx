@@ -15,6 +15,15 @@ Restores are supported for Infrahub Community Edition when the backup was create
 Restoring an Enterprise backup to a Community Edition deployment is not supported. Always use backups that were captured from the same edition you plan to restore.
 :::
 
+### When the target edition cannot be detected
+
+Before it stops any service, `restore` queries the Neo4j edition of the target deployment. It logs in to Neo4j with the credentials it reads from the `infrahub-server` container. If the query fails, the edition is unknown, and the restore does the following:
+
+- A Community Edition backup is restored. Its restore method works on both editions and does not log in to Neo4j.
+- An Enterprise backup is not restored. The command exits with `could not detect the Neo4j edition of the target deployment` and the reason the query failed. Nothing has been stopped at that point.
+
+One cause is a stopped `infrahub-server`, for example after an earlier restore failed partway. The tool then cannot read the credentials, logs `Using the default Neo4j credentials`, and Neo4j rejects the default credentials. Start `infrahub-server`, or set `INFRAHUB_DB_USERNAME` and `INFRAHUB_DB_PASSWORD` (see [Configuration](../reference/configuration.mdx)), and run the restore again.
+
 ## Prerequisites
 
 Before restoring from backup:
@@ -92,12 +101,12 @@ infrahub-backup restore s3://my-backups/infrahub/prod/infrahub_backup_20250929_1
 ```
 
 </TabItem>
-<TabItem value="minio" label="MinIO">
+<TabItem value="s3-compatible" label="S3-compatible">
 
 ```bash
-# Restore from MinIO or S3-compatible storage
+# Restore from S3-compatible storage
 infrahub-backup restore \
-  --s3-endpoint http://minio.local:9000 \
+  --s3-endpoint https://s3.example.com \
   s3://my-backups/infrahub_backup_20250929_143022.tar.gz
 ```
 

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -116,12 +118,26 @@ func TestRunCommandPipeContext_Success(t *testing.T) {
 	}
 }
 
+// TestRunCommandPipeContext_Timeout is the stdout-only sibling of
+// TestRunCommandCombinedPipeContext_Timeout, and carried the identical race:
+// the same 100ms shared by process spawn, `exec` and a pipe flush, with the
+// same assertion that the output had arrived. It fails under -count=50 for the
+// same reason and is made deterministic the same way.
 func TestRunCommandPipeContext_Timeout(t *testing.T) {
+	const bound = time.Hour
+
+	sentinel := filepath.Join(t.TempDir(), "written")
+	parent := &deadlineOnDemand{done: make(chan struct{})}
+
 	ce := NewCommandExecutor()
-	stdout, wait, err := ce.runCommandPipeContext(context.Background(), 100*time.Millisecond, "sh", "-c", "echo started; exec sleep 5")
+	stdout, wait, err := ce.runCommandPipeContext(parent, bound,
+		"sh", "-c", `echo started; : > "$0"; exec sleep 300`, sentinel)
 	if err != nil {
 		t.Fatalf("runCommandPipeContext failed to start: %v", err)
 	}
+
+	waitForFile(t, sentinel)
+	parent.expire()
 
 	content, err := io.ReadAll(stdout)
 	if err != nil {
@@ -139,8 +155,10 @@ func TestRunCommandPipeContext_Timeout(t *testing.T) {
 	if !errors.As(err, &timeout) {
 		t.Fatalf("error = %v (%T), want *timeoutError", err, err)
 	}
-	if err.Error() != "timed out after 100ms" {
-		t.Errorf("Error() = %q, want %q", err.Error(), "timed out after 100ms")
+	// The reported duration is the bound that was configured, not the time the
+	// command happened to run for.
+	if want := "timed out after " + formatCommandTimeout(bound); err.Error() != want {
+		t.Errorf("Error() = %q, want %q", err.Error(), want)
 	}
 }
 
@@ -182,12 +200,59 @@ func TestRunCommandCombinedPipeContext_ReaderSeesEOFWhenCommandExits(t *testing.
 	}
 }
 
+// deadlineOnDemand is a context whose deadline the test fires by hand.
+//
+// It takes the wall clock out of a test whose subject is an ordering rather
+// than a duration. Err reports context.DeadlineExceeded because that is what
+// the production path reads to tell a bound expiring apart from a command
+// failing, and context.WithTimeout over a parent like this one propagates that
+// error to the context the command is actually started with.
+type deadlineOnDemand struct {
+	done chan struct{}
+}
+
+func (d *deadlineOnDemand) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (d *deadlineOnDemand) Done() <-chan struct{}       { return d.done }
+func (*deadlineOnDemand) Value(any) any                 { return nil }
+
+func (d *deadlineOnDemand) Err() error {
+	select {
+	case <-d.done:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+
+func (d *deadlineOnDemand) expire() { close(d.done) }
+
+// TestRunCommandCombinedPipeContext_Timeout asserts that output the command
+// wrote before its bound expired is still readable afterwards: a killed
+// command's diagnostics are most of what makes a timeout reportable.
+//
+// The ordering is established rather than assumed. The original test gave
+// process spawn, `exec` and a pipe flush a shared 100ms budget and then
+// asserted the output had arrived, so a loaded machine failed it for losing a
+// race rather than for the pipe having lost anything — invisible to a clean run
+// and reproducible under -count=25. Here the child announces, through a file,
+// that it has finished writing; only then is the deadline fired. Nothing is
+// consumed from the pipe until after the kill, so what the assertion reads is
+// still what survived it.
 func TestRunCommandCombinedPipeContext_Timeout(t *testing.T) {
+	sentinel := filepath.Join(t.TempDir(), "written")
+	parent := &deadlineOnDemand{done: make(chan struct{})}
+
 	ce := NewCommandExecutor()
-	reader, wait, err := ce.runCommandCombinedPipeContext(context.Background(), 100*time.Millisecond, "sh", "-c", "echo started; exec sleep 5")
+	// The bound is long enough that it cannot be what fires. The deadline under
+	// test is the parent's, and expire() below is what fires it.
+	reader, wait, err := ce.runCommandCombinedPipeContext(parent, time.Hour,
+		"sh", "-c", `echo started; : > "$0"; exec sleep 300`, sentinel)
 	if err != nil {
 		t.Fatalf("runCommandCombinedPipeContext failed to start: %v", err)
 	}
+
+	waitForFile(t, sentinel)
+	parent.expire()
 
 	content, err := io.ReadAll(reader)
 	if err != nil {
@@ -204,6 +269,26 @@ func TestRunCommandCombinedPipeContext_Timeout(t *testing.T) {
 	var timeout *timeoutError
 	if !errors.As(err, &timeout) {
 		t.Fatalf("error = %v (%T), want *timeoutError", err, err)
+	}
+}
+
+// waitForFile blocks until a path exists. It converges rather than budgeting: a
+// path that never appears means the child never ran, which is a failure worth
+// the test binary's own timeout reporting, not one worth guessing a duration
+// for.
+func waitForFile(t *testing.T, path string) {
+	t.Helper()
+
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+
+		select {
+		case <-t.Context().Done():
+			t.Fatalf("the command never created %s, so it never wrote its output", path)
+		case <-time.After(time.Millisecond):
+		}
 	}
 }
 

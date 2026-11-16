@@ -56,3 +56,11 @@ Thumbs.db
 
 # Spec-kit local state (records the active feature per checkout; not shared)
 .specify/feature.json
+
+# Spec-kit extension caches
+.specify/**/.cache/
+
+# Plakar/kloset writes a version-named repository directory into the working
+# directory when the e2e suite drives it (e.g. `2.0.0/`). It is test residue, not
+# source: a `git add -A` after an e2e run otherwise captures ~30 of its files.
+/[0-9]*.[0-9]*.[0-9]*/

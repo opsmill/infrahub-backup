@@ -8,13 +8,26 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// neo4jInstanceSelector matches the server pods the Neo4j Helm chart deploys.
+const neo4jInstanceSelector = "helm.neo4j.com/pod_category=neo4j-instance"
+
+// podSelectors returns the label selectors tried, in order, to find a
+// service's pods. infrahub/service comes first because the Infrahub Helm chart
+// and the HA deployment examples set it on every component. The generic labels
+// come last because other software in the namespace sets them too: a
+// PostgreSQL operator such as CloudNativePG labels its pods
+// app.kubernetes.io/component=database, the same value as the Neo4j service.
 func (k *KubernetesBackend) podSelectors(service string) []string {
-	return []string{
-		fmt.Sprintf("app.kubernetes.io/component=%s", service),
-		fmt.Sprintf("app=%s", service),
-		fmt.Sprintf("component=%s", service),
-		fmt.Sprintf("infrahub/service=%s", service),
+	selectors := make([]string, 0, len(serviceLabelKeys)+1)
+	for _, key := range serviceLabelKeys {
+		selectors = append(selectors, fmt.Sprintf("%s=%s", key, service))
+		if key == "infrahub/service" && service == "database" {
+			// A Neo4j installed from its own chart without the infrahub/service label.
+			selectors = append(selectors, neo4jInstanceSelector)
+		}
 	}
+
+	return selectors
 }
 
 // findPrimaryPod searches for a pod with primary role label (for HA PostgreSQL
@@ -91,12 +104,7 @@ func selectorMatchesLabels(selector string, labels map[string]string) bool {
 		return false
 	}
 
-	conditions := strings.Split(selector, ",")
-	for _, condition := range conditions {
-		condition = strings.TrimSpace(condition)
-		if condition == "" {
-			continue
-		}
+	for _, condition := range commaFields(selector) {
 		kv := strings.SplitN(condition, "=", 2)
 		if len(kv) != 2 {
 			if _, ok := labels[condition]; !ok {

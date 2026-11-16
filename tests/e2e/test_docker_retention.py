@@ -232,13 +232,13 @@ S3_DECOYS = [
 ]
 
 
-def _s3_client(minio: dict):
-    """Return a boto3 client bound to the test MinIO endpoint."""
+def _s3_client(s3_server: dict):
+    """Return a boto3 client bound to the test S3 endpoint."""
     return boto3.client(
         "s3",
-        endpoint_url=minio["endpoint"],
-        aws_access_key_id=minio["access_key"],
-        aws_secret_access_key=minio["secret_key"],
+        endpoint_url=s3_server["endpoint"],
+        aws_access_key_id=s3_server["access_key"],
+        aws_secret_access_key=s3_server["secret_key"],
         region_name="us-east-1",
     )
 
@@ -256,13 +256,13 @@ def _put_s3(client, bucket: str, key: str):
     client.put_object(Bucket=bucket, Key=key, Body=b"retention fixture")
 
 
-def _s3_flags(minio: dict, bucket: str, prefix: str = S3_PREFIX) -> list[str]:
+def _s3_flags(s3_server: dict, bucket: str, prefix: str = S3_PREFIX) -> list[str]:
     """The persistent S3 flags that point the binary at the test endpoint."""
     return [
         "--s3-bucket",
         bucket,
         "--s3-endpoint",
-        minio["endpoint"],
+        s3_server["endpoint"],
         "--s3-region",
         "us-east-1",
         "--s3-prefix",
@@ -270,11 +270,11 @@ def _s3_flags(minio: dict, bucket: str, prefix: str = S3_PREFIX) -> list[str]:
     ]
 
 
-def _s3_env(minio: dict) -> dict[str, str]:
+def _s3_env(s3_server: dict) -> dict[str, str]:
     """Credentials for the binary, which resolves them from the standard AWS variables."""
     return {
-        "AWS_ACCESS_KEY_ID": minio["access_key"],
-        "AWS_SECRET_ACCESS_KEY": minio["secret_key"],
+        "AWS_ACCESS_KEY_ID": s3_server["access_key"],
+        "AWS_SECRET_ACCESS_KEY": s3_server["secret_key"],
     }
 
 
@@ -298,14 +298,14 @@ def _empty_local_dir(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def s3_bucket(minio_docker: dict) -> Iterator[str]:
+def s3_bucket(s3_server: dict) -> Iterator[str]:
     """Create an empty bucket for one test and remove it, with its contents, afterwards.
 
-    A bucket per test keeps the session-scoped MinIO container shared while letting each
+    A bucket per test keeps the session-scoped S3 container shared while letting each
     case own the whole key space — including the bucket root, which the prefix-scoping
     case has to seed.
     """
-    client = _s3_client(minio_docker)
+    client = _s3_client(s3_server)
     bucket = f"retention-{uuid.uuid4().hex[:12]}"
     client.create_bucket(Bucket=bucket)
     try:
@@ -319,7 +319,7 @@ def s3_bucket(minio_docker: dict) -> Iterator[str]:
 @pytest.mark.e2e
 @pytest.mark.docker
 class TestS3Retention:
-    """`prune --s3` against a real S3 endpoint (MinIO).
+    """`prune --s3` against a real S3 endpoint (Garage).
 
     These cases close the one retention path that no test could reach through a fake:
     S3 answers a delete for a key that does not exist with success, so a wrongly built
@@ -328,13 +328,13 @@ class TestS3Retention:
     than against counts or log lines alone.
 
     `prune` only reads the backup directory and the configured prefix, so no Infrahub
-    deployment is involved. The `docker` marker is what CI collects, and MinIO itself
+    deployment is involved. The `docker` marker is what CI collects, and Garage itself
     runs as a container.
     """
 
     @pytest.mark.parametrize("prefix", [S3_PREFIX, f"{S3_PREFIX}/", ""], ids=["prefix", "trailing-slash", "no-prefix"])
     def test_force_deletes_exactly_the_out_of_policy_objects(
-        self, backup_binary, minio_docker, s3_bucket, tmp_path, prefix
+        self, backup_binary, s3_server, s3_bucket, tmp_path, prefix
     ):
         """FR-002/FR-005/SC-001: the objects retention prunes are really gone from the bucket.
 
@@ -347,7 +347,7 @@ class TestS3Retention:
         The three variants are the three ways an operator writes the prefix; all but the
         last must resolve to the same keys and the same location label.
         """
-        client = _s3_client(minio_docker)
+        client = _s3_client(s3_server)
         local_dir = _empty_local_dir(tmp_path)
         key_prefix = _key_prefix(prefix)
 
@@ -363,14 +363,14 @@ class TestS3Retention:
             [
                 "--backup-dir",
                 str(local_dir),
-                *_s3_flags(minio_docker, s3_bucket, prefix),
+                *_s3_flags(s3_server, s3_bucket, prefix),
                 "prune",
                 "--retention-days",
                 "7",
                 "--force",
                 "--s3",
             ],
-            env=_s3_env(minio_docker),
+            env=_s3_env(s3_server),
         )
 
         assert result.returncode == 0, f"forced prune failed:\n{result.stdout}\n{result.stderr}"
@@ -387,14 +387,14 @@ class TestS3Retention:
             in output
         ), f"missing or wrong per-location summary:\n{output}"
 
-    def test_prune_is_scoped_to_the_configured_prefix(self, backup_binary, minio_docker, s3_bucket, tmp_path):
+    def test_prune_is_scoped_to_the_configured_prefix(self, backup_binary, s3_server, s3_bucket, tmp_path):
         """FR-005: only objects where uploads write them are candidates.
 
         Every outsider below is old enough that retention would delete it if it were
         visible, so their survival is the assertion — sibling prefixes, the bucket root,
         and anything nested below the configured prefix are all out of reach.
         """
-        client = _s3_client(minio_docker)
+        client = _s3_client(s3_server)
         local_dir = _empty_local_dir(tmp_path)
 
         out_of_policy = [_archive_name(age) for age in OUT_OF_POLICY_AGES]
@@ -423,14 +423,14 @@ class TestS3Retention:
             [
                 "--backup-dir",
                 str(local_dir),
-                *_s3_flags(minio_docker, s3_bucket),
+                *_s3_flags(s3_server, s3_bucket),
                 "prune",
                 "--retention-days",
                 "7",
                 "--force",
                 "--s3",
             ],
-            env=_s3_env(minio_docker),
+            env=_s3_env(s3_server),
         )
 
         assert result.returncode == 0, f"forced prune failed:\n{result.stdout}\n{result.stderr}"
@@ -442,13 +442,13 @@ class TestS3Retention:
             f"unexpected surviving keys: {sorted(_s3_keys(client, s3_bucket))}"
         )
 
-    def test_non_backup_objects_in_the_prefix_survive(self, backup_binary, minio_docker, s3_bucket, tmp_path):
+    def test_non_backup_objects_in_the_prefix_survive(self, backup_binary, s3_server, s3_bucket, tmp_path):
         """FR-006 at the S3 location: anything that is not a backup archive is invisible.
 
         Includes a name of exactly the right shape whose timestamp is not a real
         instant, which must be as invisible as a name of the wrong shape.
         """
-        client = _s3_client(minio_docker)
+        client = _s3_client(s3_server)
         local_dir = _empty_local_dir(tmp_path)
 
         out_of_policy = [_archive_name(age) for age in OUT_OF_POLICY_AGES]
@@ -461,14 +461,14 @@ class TestS3Retention:
             [
                 "--backup-dir",
                 str(local_dir),
-                *_s3_flags(minio_docker, s3_bucket),
+                *_s3_flags(s3_server, s3_bucket),
                 "prune",
                 "--retention-days",
                 "7",
                 "--force",
                 "--s3",
             ],
-            env=_s3_env(minio_docker),
+            env=_s3_env(s3_server),
         )
 
         assert result.returncode == 0, f"forced prune failed:\n{result.stdout}\n{result.stderr}"
@@ -479,10 +479,10 @@ class TestS3Retention:
         )
 
     def test_keeps_the_newest_object_when_everything_is_out_of_policy(
-        self, backup_binary, minio_docker, s3_bucket, tmp_path
+        self, backup_binary, s3_server, s3_bucket, tmp_path
     ):
         """FR-003/SC-003: the keep-newest floor holds at the S3 location too, with no override."""
-        client = _s3_client(minio_docker)
+        client = _s3_client(s3_server)
         local_dir = _empty_local_dir(tmp_path)
 
         # ALL_EXPIRED_AGES is ascending, so the first name is the newest. Deriving it by
@@ -498,7 +498,7 @@ class TestS3Retention:
             [
                 "--backup-dir",
                 str(local_dir),
-                *_s3_flags(minio_docker, s3_bucket),
+                *_s3_flags(s3_server, s3_bucket),
                 "prune",
                 "--retention-days",
                 "7",
@@ -507,7 +507,7 @@ class TestS3Retention:
                 "--force",
                 "--s3",
             ],
-            env=_s3_env(minio_docker),
+            env=_s3_env(s3_server),
         )
 
         assert result.returncode == 0, f"forced prune failed:\n{result.stdout}\n{result.stderr}"
@@ -517,9 +517,9 @@ class TestS3Retention:
             f"the newest object did not survive: {sorted(_s3_keys(client, s3_bucket))}"
         )
 
-    def test_s3_is_untouched_without_the_s3_flag(self, backup_binary, minio_docker, s3_bucket, tmp_path):
+    def test_s3_is_untouched_without_the_s3_flag(self, backup_binary, s3_server, s3_bucket, tmp_path):
         """FR-007: a fully configured bucket is still never touched without `--s3`."""
-        client = _s3_client(minio_docker)
+        client = _s3_client(s3_server)
         backup_dir = tmp_path / "backups"
         local_out_of_policy, local_survivors = _seed_fixtures(backup_dir)
 
@@ -533,13 +533,13 @@ class TestS3Retention:
             [
                 "--backup-dir",
                 str(backup_dir),
-                *_s3_flags(minio_docker, s3_bucket),
+                *_s3_flags(s3_server, s3_bucket),
                 "prune",
                 "--retention-days",
                 "7",
                 "--force",
             ],
-            env=_s3_env(minio_docker),
+            env=_s3_env(s3_server),
         )
 
         assert result.returncode == 0, f"forced prune failed:\n{result.stdout}\n{result.stderr}"
@@ -553,14 +553,14 @@ class TestS3Retention:
         )
         assert _s3_location(s3_bucket) not in output, f"the S3 location was evaluated without --s3:\n{output}"
 
-    def test_both_legs_are_pruned_each_with_its_own_floor(self, backup_binary, minio_docker, s3_bucket, tmp_path):
+    def test_both_legs_are_pruned_each_with_its_own_floor(self, backup_binary, s3_server, s3_bucket, tmp_path):
         """FR-005/SC-003: the policy is evaluated per location, floor included.
 
         Every archive at both locations is out of policy, and the S3 objects are all
         older than every local archive. A floor applied across the run rather than per
         location would keep one survivor in total; the contract is one per location.
         """
-        client = _s3_client(minio_docker)
+        client = _s3_client(s3_server)
         backup_dir = tmp_path / "backups"
         backup_dir.mkdir(parents=True)
 
@@ -577,7 +577,7 @@ class TestS3Retention:
             [
                 "--backup-dir",
                 str(backup_dir),
-                *_s3_flags(minio_docker, s3_bucket),
+                *_s3_flags(s3_server, s3_bucket),
                 "prune",
                 "--retention-days",
                 "7",
@@ -586,7 +586,7 @@ class TestS3Retention:
                 "--force",
                 "--s3",
             ],
-            env=_s3_env(minio_docker),
+            env=_s3_env(s3_server),
         )
 
         assert result.returncode == 0, f"forced prune failed:\n{result.stdout}\n{result.stderr}"
@@ -600,9 +600,9 @@ class TestS3Retention:
             f"unexpected S3 survivors: {sorted(_s3_keys(client, s3_bucket))}"
         )
 
-    def test_dry_run_lists_s3_candidates_and_deletes_nothing(self, backup_binary, minio_docker, s3_bucket, tmp_path):
+    def test_dry_run_lists_s3_candidates_and_deletes_nothing(self, backup_binary, s3_server, s3_bucket, tmp_path):
         """SC-004 at the S3 location: the preview names the objects and removes none."""
-        client = _s3_client(minio_docker)
+        client = _s3_client(s3_server)
         backup_dir = tmp_path / "backups"
         local_out_of_policy, _ = _seed_fixtures(backup_dir)
         local_before = _names(backup_dir)
@@ -618,14 +618,14 @@ class TestS3Retention:
             [
                 "--backup-dir",
                 str(backup_dir),
-                *_s3_flags(minio_docker, s3_bucket),
+                *_s3_flags(s3_server, s3_bucket),
                 "prune",
                 "--retention-days",
                 "7",
                 "--dry-run",
                 "--s3",
             ],
-            env=_s3_env(minio_docker),
+            env=_s3_env(s3_server),
         )
 
         assert result.returncode == 0, f"dry run failed:\n{result.stdout}\n{result.stderr}"
@@ -731,7 +731,7 @@ class TestDockerRetention(TestInfrahubDockerClient):
         await wait_for_http(f"{url}/api/config", timeout=180.0, interval=1.0)
 
     async def test_create_prunes_s3_only_when_the_run_uploaded(
-        self, infrahub_compose, infrahub_port, backup_binary, minio_docker, s3_bucket, tmp_path
+        self, infrahub_compose, infrahub_port, backup_binary, s3_server, s3_bucket, tmp_path
     ):
         """US1 scenario 2 / FR-007: the S3 leg is pruned exactly when the run uploaded there.
 
@@ -739,7 +739,7 @@ class TestDockerRetention(TestInfrahubDockerClient):
         """
         url = f"http://localhost:{infrahub_port}"
         project = infrahub_compose.project_name
-        client = _s3_client(minio_docker)
+        client = _s3_client(s3_server)
 
         # The local leg is deliberately quiet — a single in-policy archive, nothing to
         # prune — so every assertion below is about the S3 leg. `create` without
@@ -760,14 +760,14 @@ class TestDockerRetention(TestInfrahubDockerClient):
             project,
             "--backup-dir",
             str(backup_dir),
-            *_s3_flags(minio_docker, s3_bucket),
+            *_s3_flags(s3_server, s3_bucket),
         ]
 
         # 1. A run that uploads prunes the bucket it uploaded to.
         result = run_backup(
             backup_binary,
             [*common, "create", "--force", "--s3-upload", "--retention-days", "7"],
-            env=_s3_env(minio_docker),
+            env=_s3_env(s3_server),
         )
 
         surviving = _s3_keys(client, s3_bucket)
@@ -792,7 +792,7 @@ class TestDockerRetention(TestInfrahubDockerClient):
         result = run_backup(
             backup_binary,
             [*common, "create", "--force", "--retention-days", "7"],
-            env=_s3_env(minio_docker),
+            env=_s3_env(s3_server),
         )
 
         assert _s3_keys(client, s3_bucket) == before, (

@@ -37,17 +37,23 @@ type CollectOptions struct {
 	// product-telemetry export; a non-positive value falls back to
 	// defaultTelemetryDays (30).
 	TelemetryDays int
+	// Traces holds the validated options of the opt-in traces collector.
+	Traces TraceOptions
 }
 
 // Replica is a read-only descriptor of one running container of a service.
 // On Docker, Container carries the container name and Pod is empty; on
 // Kubernetes there is one Replica per pod container, and Restarted reports
 // whether that container has restartCount > 0 (previous logs available).
+// Stopped is Docker-only: the enumeration includes containers that are not
+// running (`docker compose ps -a`), and Stopped marks them so a collector that
+// needs one replica to exec into can pick a running one.
 type Replica struct {
 	Service   string
 	Pod       string
 	Container string
 	Restarted bool
+	Stopped   bool
 }
 
 // collectBackend is the narrow read-only surface collectors consume on top of
@@ -82,6 +88,10 @@ type collectContext struct {
 	// (e.g. the --include-backup archive path); the orchestrator moves it
 	// into that collector's manifest entry after a successful run.
 	artifact string
+	// details is a structured value handed off by the running collector; the
+	// orchestrator moves it into that collector's manifest entry whatever the
+	// outcome (success, skipped or failed).
+	details any
 }
 
 // setArtifact hands the orchestrator a filesystem artifact reference to
@@ -96,6 +106,20 @@ func (cc *collectContext) takeArtifact() string {
 	artifact := cc.artifact
 	cc.artifact = ""
 	return artifact
+}
+
+// setDetails hands the orchestrator a structured value to record as the
+// details of the current collector's manifest entry.
+func (cc *collectContext) setDetails(details any) {
+	cc.details = details
+}
+
+// takeDetails returns and clears the pending details so they never leak into a
+// later collector's entry.
+func (cc *collectContext) takeDetails() any {
+	details := cc.details
+	cc.details = nil
+	return details
 }
 
 // collect resolves the active environment backend to the collect-side
@@ -133,6 +157,13 @@ func (e *collectSkipError) Error() string { return e.reason }
 // run (FR-009); only a missing environment, an unwritable output directory,
 // or an archiving failure returns an error.
 func (iops *InfrahubOps) CollectBundle(opts CollectOptions) error {
+	// Marked for the whole run rather than inside the --include-backup
+	// collector, because the property belongs to the binary and not to one of
+	// its steps: nothing collection does may create, delete or scale a
+	// workload of the deployment's (ADR-0003). It is what stops --include-backup
+	// reaching the external-database capture path, which would.
+	iops.forbidExternalCapture()
+
 	backend, err := iops.ensureBackend()
 	if err != nil {
 		return fmt.Errorf("bundle collection requires a usable Infrahub environment: %w", err)
@@ -157,6 +188,7 @@ func (iops *InfrahubOps) collectPlan(opts CollectOptions) []collector {
 		taskManagerCollector(),
 		serverInfoCollector(),
 		telemetryCollector(),
+		tracesCollector(),
 		metricsCollector(),
 	)
 
@@ -302,6 +334,7 @@ func (iops *InfrahubOps) runCollectPlan(backend EnvironmentBackend, opts Collect
 				logrus.Warnf("Collector %s skipped: %s", c.name, skip.reason)
 				cc.takeArtifact() // drop a skipped collector's artifact reference
 				manifest.recordSkipped(c.name, skip.reason)
+				manifest.attachDetails(cc.takeDetails())
 				continue
 			}
 
@@ -313,6 +346,7 @@ func (iops *InfrahubOps) runCollectPlan(backend EnvironmentBackend, opts Collect
 			logrus.Warnf("Collector %s failed: %v", c.name, err)
 			cc.takeArtifact() // drop a failed collector's artifact reference
 			manifest.recordFailed(c.name, reason)
+			manifest.attachDetails(cc.takeDetails())
 			continue
 		}
 		if artifact := cc.takeArtifact(); artifact != "" {
@@ -320,6 +354,7 @@ func (iops *InfrahubOps) runCollectPlan(backend EnvironmentBackend, opts Collect
 		} else {
 			manifest.recordSuccess(c.name)
 		}
+		manifest.attachDetails(cc.takeDetails())
 	}
 
 	// The manifest is finalized last so it reflects every collector outcome.

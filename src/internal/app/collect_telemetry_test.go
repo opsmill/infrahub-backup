@@ -239,3 +239,174 @@ func TestCollectTelemetry_TimeoutSkips(t *testing.T) {
 		t.Errorf("skip reason = %q, want it to surface the timeout", got.Reason)
 	}
 }
+
+// replicaFSBackend models a scaled task-worker whose containers each have their
+// own filesystem: the export writes its file only into the container it runs
+// in, and a copy finds the file only there. Service-level calls resolve the way
+// Docker Compose does on a scaled service — `docker compose exec` to the
+// lowest-numbered running container, `docker compose cp` to the first
+// container the daemon lists (the newest) — so a collector that mixes
+// service-level exec and copy loses the export.
+type replicaFSBackend struct {
+	fakeCollectBackend
+	files map[string]map[string]string // container name → in-container path → content
+	calls []string                     // "<step> <container>" in call order
+}
+
+func newReplicaFSBackend(replicas ...Replica) *replicaFSBackend {
+	b := &replicaFSBackend{fakeCollectBackend: *newFakeCollectBackend(), files: map[string]map[string]string{}}
+	b.replicas["task-worker"] = replicas
+	for _, replica := range replicas {
+		b.files[replica.Container] = map[string]string{}
+	}
+	return b
+}
+
+func (b *replicaFSBackend) run(container string, command []string) (string, error) {
+	switch {
+	case len(command) > 0 && command[0] == "rm":
+		b.calls = append(b.calls, "rm "+container)
+		delete(b.files[container], command[len(command)-1])
+	case len(command) > 0 && command[0] == "infrahubctl":
+		b.calls = append(b.calls, "export "+container)
+		b.files[container][telemetryExportContainerPath] = `{"snapshots":[]}`
+	default:
+		return "", fmt.Errorf("unexpected command %v", command)
+	}
+	return "", nil
+}
+
+func (b *replicaFSBackend) copy(container, src, dest string) error {
+	b.calls = append(b.calls, "copy "+container)
+	content, ok := b.files[container][src]
+	if !ok {
+		return fmt.Errorf("could not find the file %s in container %s", src, container)
+	}
+	return os.WriteFile(dest, []byte(content), 0644)
+}
+
+func (b *replicaFSBackend) ExecContext(ctx context.Context, timeout time.Duration, service string, command []string, opts *ExecOptions) (string, error) {
+	replicas := b.replicas[service]
+	return b.run(replicas[0].Container, command)
+}
+
+func (b *replicaFSBackend) CopyFromContext(ctx context.Context, timeout time.Duration, service, src, dest string) error {
+	replicas := b.replicas[service]
+	return b.copy(replicas[len(replicas)-1].Container, src, dest)
+}
+
+func (b *replicaFSBackend) ExecReplica(ctx context.Context, timeout time.Duration, replica Replica, command []string) (string, error) {
+	return b.run(replica.Container, command)
+}
+
+func (b *replicaFSBackend) CopyFromReplica(ctx context.Context, timeout time.Duration, replica Replica, src, dest string) error {
+	return b.copy(replica.Container, src, dest)
+}
+
+var (
+	_ contextExecer  = (*replicaFSBackend)(nil)
+	_ contextCopier  = (*replicaFSBackend)(nil)
+	_ replicaExecer  = (*replicaFSBackend)(nil)
+	_ replicaCopier  = (*replicaFSBackend)(nil)
+	_ collectBackend = (*replicaFSBackend)(nil)
+)
+
+func TestCollectTelemetry_ScaledServiceRunsOnOneReplica(t *testing.T) {
+	backend := newReplicaFSBackend(
+		Replica{Service: "task-worker", Container: "proj-task-worker-1"},
+		Replica{Service: "task-worker", Container: "proj-task-worker-2"},
+	)
+	cc := newTelemetryCC(t, backend, CollectOptions{TelemetryDays: 30})
+
+	if err := collectTelemetry(cc); err != nil {
+		t.Fatalf("collectTelemetry failed on a 2-replica task-worker: %v", err)
+	}
+
+	// The export, the copy-out and the cleanup all target the same container.
+	want := []string{"export proj-task-worker-1", "copy proj-task-worker-1", "rm proj-task-worker-1"}
+	if !reflect.DeepEqual(backend.calls, want) {
+		t.Errorf("calls = %v, want %v", backend.calls, want)
+	}
+	if _, err := os.Stat(filepath.Join(cc.bundleDir, telemetryBundleDir, telemetryExportFilename)); err != nil {
+		t.Errorf("telemetry export missing from bundle: %v", err)
+	}
+	for container, files := range backend.files {
+		if len(files) != 0 {
+			t.Errorf("container %s still holds %v after cleanup", container, files)
+		}
+	}
+}
+
+func TestCollectTelemetry_NoReplicaFails(t *testing.T) {
+	backend := newTelemetryBackend()
+	backend.replicas["task-worker"] = nil
+	cc := newTelemetryCC(t, backend, CollectOptions{TelemetryDays: 30})
+
+	err := collectTelemetry(cc)
+
+	// With no replica to run in there is nothing to export from: the collector
+	// fails rather than skipping, and runs no command.
+	var skip *collectSkipError
+	if err == nil || errors.As(err, &skip) {
+		t.Fatalf("collectTelemetry returned %v, want a failure", err)
+	}
+	if len(backend.ranCommands) != 0 || len(backend.rmPaths) != 0 {
+		t.Errorf("ran commands %v and cleanup %v, want none", backend.ranCommands, backend.rmPaths)
+	}
+}
+
+func TestPickTelemetryReplica(t *testing.T) {
+	tests := []struct {
+		name     string
+		replicas []Replica
+		want     string
+	}{
+		{
+			name: "first replica when every replica is running",
+			replicas: []Replica{
+				{Service: "task-worker", Container: "proj-task-worker-1"},
+				{Service: "task-worker", Container: "proj-task-worker-2"},
+			},
+			want: "proj-task-worker-1",
+		},
+		{
+			name: "a stopped docker container is passed over",
+			replicas: []Replica{
+				{Service: "task-worker", Container: "proj-task-worker-1", Stopped: true},
+				{Service: "task-worker", Container: "proj-task-worker-2"},
+			},
+			want: "proj-task-worker-2",
+		},
+		{
+			name: "the task-worker container wins over a sidecar sorted before it",
+			replicas: []Replica{
+				{Service: "task-worker", Pod: "task-worker-abc", Container: "envoy"},
+				{Service: "task-worker", Pod: "task-worker-abc", Container: "infrahub-task-worker"},
+			},
+			want: "infrahub-task-worker",
+		},
+		{
+			name: "first replica when no container is named after the service",
+			replicas: []Replica{
+				{Service: "task-worker", Pod: "worker-abc", Container: "worker-a"},
+				{Service: "task-worker", Pod: "worker-def", Container: "worker-b"},
+			},
+			want: "worker-a",
+		},
+		{
+			name: "first replica when every replica is stopped",
+			replicas: []Replica{
+				{Service: "task-worker", Container: "proj-task-worker-1", Stopped: true},
+				{Service: "task-worker", Container: "proj-task-worker-2", Stopped: true},
+			},
+			want: "proj-task-worker-1",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := pickTelemetryReplica(tt.replicas); got.Container != tt.want {
+				t.Errorf("pickTelemetryReplica() = %+v, want container %q", got, tt.want)
+			}
+		})
+	}
+}

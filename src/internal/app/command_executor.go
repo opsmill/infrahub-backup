@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -64,6 +65,22 @@ func (ce *CommandExecutor) runCommand(name string, args ...string) (string, erro
 	return strings.TrimSpace(string(output)), err
 }
 
+// runCommandSeparate is runCommand with the output streams kept apart: stdout
+// first, stderr second. It is the unbounded sibling of
+// runCommandSeparateContext, for the same callers — those that parse stdout as
+// data — when no bound applies; see that function for what a merged stream does
+// to such a caller.
+func (ce *CommandExecutor) runCommandSeparate(name string, args ...string) (string, string, error) {
+	var stdout, stderr bytes.Buffer
+	cmd := exec.Command(name, args...)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+
+	return strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String()), err
+}
+
 // timeoutError marks a command that exceeded its allotted execution time. Its
 // message is exactly "timed out after <duration>" so orchestrators can surface
 // it verbatim (e.g. as a bundle manifest failure reason).
@@ -89,16 +106,42 @@ func formatCommandTimeout(d time.Duration) string {
 // is killed once timeout elapses (or ctx is cancelled) and the returned error
 // is a *timeoutError when the timeout expired.
 func (ce *CommandExecutor) runCommandContext(ctx context.Context, timeout time.Duration, name string, args ...string) (string, error) {
+	return ce.runBounded(ctx, timeout, false, name, args...)
+}
+
+// runCommandContextKillGroup is runCommandContext for a command whose
+// children must not outlive its timeout: the command runs in a process group
+// of its own and the whole group is killed when the timeout expires, so a
+// `docker compose start` reported as timed out has stopped. On Windows only
+// the command itself is killed. The command no longer receives the
+// terminal's Ctrl-C, so it is kept to the bounded docker calls of the
+// database readiness wait rather than applied to every bounded command.
+func (ce *CommandExecutor) runCommandContextKillGroup(ctx context.Context, timeout time.Duration, name string, args ...string) (string, error) {
+	return ce.runBounded(ctx, timeout, true, name, args...)
+}
+
+func (ce *CommandExecutor) runBounded(ctx context.Context, timeout time.Duration, killGroup bool, name string, args ...string) (string, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(cctx, name, args...)
+	if killGroup {
+		killProcessGroupOnCancel(cmd)
+	}
+	// Killing the command does not close the output pipe that a child it
+	// spawned still holds (the docker CLI runs `compose` as a plugin child), so
+	// without a bound on that wait the call outlives its timeout.
+	cmd.WaitDelay = commandWaitDelay
 	output, err := cmd.CombinedOutput()
 	if err != nil && errors.Is(cctx.Err(), context.DeadlineExceeded) {
 		return strings.TrimSpace(string(output)), &timeoutError{timeout: timeout}
 	}
 	return strings.TrimSpace(string(output)), err
 }
+
+// commandWaitDelay is how long runBounded waits for a killed command's
+// output pipe to close before it abandons it.
+const commandWaitDelay = 2 * time.Second
 
 // runCommandSeparateContext is the timeout-bounded variant of runCommand that
 // keeps the command's output streams apart: stdout is returned first, stderr
@@ -287,6 +330,49 @@ func (ce *CommandExecutor) runCommandWritePipe(stdin io.Reader, name string, arg
 	return wait, nil
 }
 
+// runCommandWritePipeContext is the timeout-bounded variant of
+// runCommandWritePipe: the command is killed once timeout elapses (or ctx is
+// cancelled) and wait() returns a *timeoutError when the timeout expired. The
+// internal context is released when wait() is called.
+//
+// It exists because a manifest piped to `kubectl create` is how a transient
+// external-database workload is created, and that call had no bound at all
+// (FR-025).
+func (ce *CommandExecutor) runCommandWritePipeContext(ctx context.Context, timeout time.Duration, stdin io.Reader, name string, args ...string) (func() error, error) {
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+
+	cmd := exec.CommandContext(cctx, name, args...)
+	logrus.Debugf("exec write-pipe (timeout %s): %s %s", timeout, name, strings.Join(args, " "))
+
+	cmd.Stdin = stdin
+
+	// Capture stderr for error reporting
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return nil, err
+	}
+
+	wait := func() error {
+		defer cancel()
+		if err := cmd.Wait(); err != nil {
+			if errors.Is(cctx.Err(), context.DeadlineExceeded) {
+				return &timeoutError{timeout: timeout}
+			}
+			stderrStr := strings.TrimSpace(stderrBuf.String())
+			if stderrStr != "" {
+				return fmt.Errorf("%w: %s", err, stderrStr)
+			}
+			return err
+		}
+		return nil
+	}
+
+	return wait, nil
+}
+
 func (ce *CommandExecutor) runCommandWithStream(name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
 
@@ -335,4 +421,124 @@ func (ce *CommandExecutor) runCommandWithStream(name string, args ...string) (st
 
 	err = cmd.Wait()
 	return stdoutBuf.String(), err
+}
+
+// runCommandStdinSeparateContext is the timeout-bounded variant of
+// runCommandWritePipe for the collect path: it writes stdin to the command and
+// returns its stdout and stderr apart. The returned error is a *timeoutError
+// when the timeout expired. It passes a secret to a command without putting it
+// on the command line.
+func (ce *CommandExecutor) runCommandStdinSeparateContext(ctx context.Context, timeout time.Duration, stdin []byte, name string, args ...string) (string, string, error) {
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	var stdout, stderr bytes.Buffer
+	cmd := exec.CommandContext(cctx, name, args...)
+	// A child process that keeps the output pipes open must not hold Wait
+	// past the time limit.
+	cmd.WaitDelay = time.Second
+	cmd.Stdin = bytes.NewReader(stdin)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	out, errOut := strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String())
+	if err != nil && errors.Is(cctx.Err(), context.DeadlineExceeded) {
+		return out, errOut, &timeoutError{timeout: timeout}
+	}
+	return out, errOut, err
+}
+
+// lockedBuffer is a bytes.Buffer safe for one writer goroutine and one reader.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// startBackgroundCommand starts a long-running command, such as kubectl
+// port-forward, and waits until ready returns a value for a line of its
+// stdout. It returns that value and a stop function that ends the command.
+// When the command exits first, the error holds its stderr; when ready finds
+// nothing before startTimeout, the command is stopped and a *timeoutError is
+// returned.
+func (ce *CommandExecutor) startBackgroundCommand(ctx context.Context, startTimeout time.Duration, ready func(line string) (string, bool), name string, args ...string) (string, func(), error) {
+	cctx, cancel := context.WithCancel(ctx)
+	cmd := exec.CommandContext(cctx, name, args...)
+	logrus.Debugf("exec background: %s %s", name, strings.Join(args, " "))
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		return "", nil, err
+	}
+	stderr := &lockedBuffer{}
+	cmd.Stderr = stderr
+
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return "", nil, err
+	}
+
+	found := make(chan string, 1)
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		reader := bufio.NewReader(stdout)
+		sent := false
+		for {
+			line, readErr := reader.ReadString('\n')
+			if !sent {
+				if value, ok := ready(strings.TrimSpace(line)); ok {
+					found <- value
+					sent = true
+				}
+			}
+			if readErr != nil {
+				return
+			}
+		}
+	}()
+
+	waitDone := make(chan error, 1)
+	go func() {
+		<-readDone
+		waitDone <- cmd.Wait()
+	}()
+
+	stop := func() {
+		cancel()
+		<-waitDone
+	}
+
+	timer := time.NewTimer(startTimeout)
+	defer timer.Stop()
+	select {
+	case value := <-found:
+		return value, stop, nil
+	case waitErr := <-waitDone:
+		cancel()
+		message := strings.TrimSpace(stderr.String())
+		if waitErr == nil {
+			waitErr = errors.New("command exited")
+		}
+		if message != "" {
+			return "", nil, fmt.Errorf("%w: %s", waitErr, message)
+		}
+		return "", nil, waitErr
+	case <-timer.C:
+		stop()
+		return "", nil, &timeoutError{timeout: startTimeout}
+	}
 }

@@ -31,6 +31,10 @@ func (d *DockerBackend) Info() string {
 	return d.project
 }
 
+// RuntimeCommand names the tool this backend shells out to, so a run that found
+// neither runtime can say which ones it looked for (FR-018).
+func (*DockerBackend) RuntimeCommand() string { return "docker" }
+
 func (d *DockerBackend) Detect() error {
 	if err := d.executor.runCommandQuiet("docker", "--version"); err != nil {
 		// If user explicitly specified Docker project, this is a hard error
@@ -119,6 +123,7 @@ var (
 	_ separateExecer        = (*DockerBackend)(nil)
 	_ separateReplicaExecer = (*DockerBackend)(nil)
 	_ contextCopier         = (*DockerBackend)(nil)
+	_ replicaCopier         = (*DockerBackend)(nil)
 	_ editionDetector       = (*DockerBackend)(nil)
 )
 
@@ -200,7 +205,8 @@ func parseComposePSContainers(output string) ([]composePSContainer, error) {
 
 // replicasFromComposePS converts compose ps entries for one service into
 // Replicas sorted by container name: every replica of a scaled service
-// appears, each carrying its human-meaningful container name.
+// appears, each carrying its human-meaningful container name, and a container
+// in any state other than running is marked Stopped.
 // Pod stays empty and Restarted false — previous logs do not exist on Docker.
 func replicasFromComposePS(service string, containers []composePSContainer) []Replica {
 	replicas := []Replica{}
@@ -208,7 +214,11 @@ func replicasFromComposePS(service string, containers []composePSContainer) []Re
 		if container.Service != service || container.Name == "" {
 			continue
 		}
-		replicas = append(replicas, Replica{Service: service, Container: container.Name})
+		replicas = append(replicas, Replica{
+			Service:   service,
+			Container: container.Name,
+			Stopped:   container.State != "running",
+		})
 	}
 	sort.Slice(replicas, func(i, j int) bool {
 		return replicas[i].Container < replicas[j].Container
@@ -440,14 +450,32 @@ func (d *DockerBackend) CopyFromContext(ctx context.Context, timeout time.Durati
 	return nil
 }
 
+// dockerReplicaCopyArgs builds the docker cp arguments that copy src out of
+// one container by name.
+func dockerReplicaCopyArgs(replica Replica, src, dest string) []string {
+	return []string{"cp", fmt.Sprintf("%s:%s", replica.Container, src), dest}
+}
+
+// CopyFromReplica copies a file out of one specific container by name, unlike
+// CopyFromContext which targets a compose service. On a scaled service the two
+// can resolve to different containers: `docker compose exec` runs in the
+// lowest-numbered running container, while `docker compose cp` without
+// --index reads from the first container the daemon lists, so a file written
+// by an exec must be copied out of the same named container.
+func (d *DockerBackend) CopyFromReplica(ctx context.Context, timeout time.Duration, replica Replica, src, dest string) error {
+	if _, err := d.executor.runCommandContext(ctx, timeout, "docker", dockerReplicaCopyArgs(replica, src, dest)...); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (d *DockerBackend) Start(services ...string) error {
 	if len(services) == 0 {
 		return nil
 	}
 	args := append([]string{"start"}, services...)
 	cmd := d.composeArgs(args...)
-	_, err := d.executor.runCommand("docker", cmd...)
-	return err
+	return composeLifecycleError(d.executor.runCommand("docker", cmd...))
 }
 
 func (d *DockerBackend) Stop(services ...string) error {
@@ -456,7 +484,20 @@ func (d *DockerBackend) Stop(services ...string) error {
 	}
 	args := append([]string{"stop"}, services...)
 	cmd := d.composeArgs(args...)
-	_, err := d.executor.runCommand("docker", cmd...)
+	return composeLifecycleError(d.executor.runCommand("docker", cmd...))
+}
+
+// composeLifecycleError carries what `docker compose start|stop` printed into
+// the error it returns. Compose explains a refusal only in its output — "dependency
+// failed to start: container ... exited (0)" — and an exit status alone left a
+// failed restore reporting nothing but "exit status 1".
+func composeLifecycleError(output string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if output = strings.TrimSpace(output); output != "" {
+		return fmt.Errorf("%w: %s", err, output)
+	}
 	return err
 }
 
@@ -464,6 +505,14 @@ func (d *DockerBackend) IsRunning(service string) (bool, error) {
 	cmd := d.composeArgs("ps", service)
 	output, err := d.executor.runCommand("docker", cmd...)
 	if err != nil {
+		// A service the compose project does not define is not running, which
+		// is what an optional service (task-manager-background-svc on an older
+		// stack) looks like. stopAppContainers fails the run on an error, so
+		// reporting this one as an error would refuse every backup and restore
+		// of such a stack.
+		if strings.Contains(output, "no such service") {
+			return false, nil
+		}
 		return false, err
 	}
 	return strings.Contains(output, "Up"), nil

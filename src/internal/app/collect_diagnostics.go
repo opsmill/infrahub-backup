@@ -97,6 +97,24 @@ func (cc *collectContext) copyFrom(service, src, dest string) error {
 	return copier.CopyFromContext(cc.ctx, collectTransferTimeout, service, src, dest)
 }
 
+// replicaCopier is contextCopier for one specific replica: the copy
+// counterpart of replicaExecer. A file a command wrote inside one replica of a
+// scaled service must be copied out of that same replica, which the
+// service-level copy does not guarantee. Both concrete backends implement it.
+type replicaCopier interface {
+	CopyFromReplica(ctx context.Context, timeout time.Duration, replica Replica, src, dest string) error
+}
+
+// copyFromReplica copies a file out of one specific replica bounded by the
+// collect transfer timeout, falling back to the service-level bounded copy
+// when the backend cannot target replicas.
+func (cc *collectContext) copyFromReplica(replica Replica, src, dest string) error {
+	if copier, ok := cc.backend.(replicaCopier); ok {
+		return copier.CopyFromReplica(cc.ctx, collectTransferTimeout, replica, src, dest)
+	}
+	return cc.copyFrom(replica.Service, src, dest)
+}
+
 // captureTimeout returns the first *timeoutError seen: the already-captured one
 // if present, otherwise the one unwrapped from err (or nil). Aggregating
 // collectors use it to preserve a command timeout through string aggregation so
@@ -147,13 +165,20 @@ func (cc *collectContext) execDump(service string, command []string) (string, er
 	return cc.execDumpTimeout(collectExecTimeout, service, command)
 }
 
-// execReplicaDump runs a command inside one specific replica, falling back to
-// service-level exec when the backend cannot target replicas.
-func (cc *collectContext) execReplicaDump(replica Replica, command []string) (string, error) {
+// execReplicaDumpTimeout runs a command inside one specific replica bounded by
+// the given timeout, falling back to service-level exec when the backend
+// cannot target replicas.
+func (cc *collectContext) execReplicaDumpTimeout(timeout time.Duration, replica Replica, command []string) (string, error) {
 	if execer, ok := cc.backend.(replicaExecer); ok {
-		return execer.ExecReplica(cc.ctx, collectExecTimeout, replica, command)
+		return execer.ExecReplica(cc.ctx, timeout, replica, command)
 	}
-	return cc.execDump(replica.Service, command)
+	return cc.execDumpTimeout(timeout, replica.Service, command)
+}
+
+// execReplicaDump runs a command inside one specific replica, bounded by the
+// collect exec timeout.
+func (cc *collectContext) execReplicaDump(replica Replica, command []string) (string, error) {
+	return cc.execReplicaDumpTimeout(collectExecTimeout, replica, command)
 }
 
 // execDumpSeparate runs a command inside a service container and returns its

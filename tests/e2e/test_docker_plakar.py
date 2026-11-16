@@ -114,19 +114,18 @@ class TestDockerPlakar(TestInfrahubDockerClient):
         # 7. Verify the tag is back
         await verify_infrahub_data(url, ADMIN_TOKEN, seed)
 
-    async def test_backup_restore_plakar_s3(self, infrahub_compose, infrahub_port, backup_binary, minio_docker):
+    async def test_backup_restore_plakar_s3(self, infrahub_compose, infrahub_port, backup_binary, s3_server):
         """Create a plakar backup to S3, restore, and verify."""
         url = f"http://localhost:{infrahub_port}"
         project = infrahub_compose.project_name
-        minio = minio_docker
 
-        # Build the S3 repo URI using the MinIO endpoint
-        endpoint_no_scheme = minio["endpoint"].replace("http://", "")
-        repo_uri = f"s3://{minio['access_key']}:{minio['secret_key']}@{endpoint_no_scheme}/{minio['bucket']}/plakar-e2e"
+        # Build the S3 repo URI using the test S3 endpoint
+        endpoint_no_scheme = s3_server["endpoint"].replace("http://", "")
+        repo_uri = f"s3://{s3_server['access_key']}:{s3_server['secret_key']}@{endpoint_no_scheme}/{s3_server['bucket']}/plakar-e2e"
 
         s3_env = {
-            "AWS_ACCESS_KEY_ID": minio["access_key"],
-            "AWS_SECRET_ACCESS_KEY": minio["secret_key"],
+            "AWS_ACCESS_KEY_ID": s3_server["access_key"],
+            "AWS_SECRET_ACCESS_KEY": s3_server["secret_key"],
         }
 
         common_args = [

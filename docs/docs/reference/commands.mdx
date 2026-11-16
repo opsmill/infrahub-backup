@@ -23,7 +23,7 @@ These flags apply to all infrahub-backup commands:
 | `--log-format <text\|json>` | Output format for logs | `text` | `INFRAHUB_LOG_FORMAT` |
 | `--s3-bucket <name>` | S3 bucket name for backup storage | - | `INFRAHUB_S3_BUCKET` |
 | `--s3-prefix <path>` | S3 key prefix (path within bucket) | - | `INFRAHUB_S3_PREFIX` |
-| `--s3-endpoint <url>` | Custom S3 endpoint URL (for MinIO) | - | `INFRAHUB_S3_ENDPOINT` |
+| `--s3-endpoint <url>` | Custom S3 endpoint URL (for S3-compatible storage) | - | `INFRAHUB_S3_ENDPOINT` |
 | `--s3-region <region>` | AWS region for S3 bucket | `us-east-1` | `INFRAHUB_S3_REGION` |
 | `--help, -h` | Show help for any command | - | - |
 
@@ -113,6 +113,7 @@ infrahub-backup restore --latest [--s3]
 | `--exclude-taskmanager` | Skip restoring the task manager database even if the dump is present | `false` | - |
 | `--migrate-format` | Run Neo4j database format migration after restore | `false` | - |
 | `--sleep <duration>` | Wait this long before the restore begins, for manual file transfer | `0` | - |
+| `--neo4j-cluster-online-timeout <duration>` | With a Neo4j cluster, how long to wait for the restored database to come online on every server before the restore fails | `10m` | - |
 | `--decrypt-key <path>` | Private key PEM file for decrypting an encrypted backup | - | `INFRAHUB_DECRYPT_KEY` |
 | `--reset-deployment-id` | Generate a new Root node UUID after restore to detach this instance from the source deployment ID | `false` | `INFRAHUB_RESET_DEPLOYMENT_ID` |
 
@@ -139,8 +140,8 @@ infrahub-backup restore --latest --s3 --s3-bucket my-backups --s3-prefix infrahu
 # Restore from S3
 infrahub-backup restore s3://my-backups/infrahub/prod/infrahub_backup_20250929_143022.tar.gz
 
-# Restore from MinIO
-infrahub-backup restore --s3-endpoint http://minio.local:9000 s3://my-backups/infrahub_backup_20250929_143022.tar.gz
+# Restore from S3-compatible storage
+infrahub-backup restore --s3-endpoint https://s3.example.com s3://my-backups/infrahub_backup_20250929_143022.tar.gz
 
 # Restore when the task manager database was excluded from the backup
 infrahub-backup restore infrahub_backup_20251022_120000.tar.gz --exclude-taskmanager
@@ -330,6 +331,18 @@ infrahub-collect create [flags]
 | `--include-backup` | Also create a backup using the standard backup behavior | `false` | `INFRAHUB_INCLUDE_BACKUP` |
 | `--include-queries` | Include database query logs (may contain customer data) | `false` | `INFRAHUB_INCLUDE_QUERIES` |
 | `--benchmark` | Run the OpsMill benchmark and include its results (requires image download; skipped with a warning if unavailable) | `false` | `INFRAHUB_BENCHMARK` |
+| `--include-traces` | Include the traces of slow requests from Tempo; personal data is removed | `false` | `INFRAHUB_INCLUDE_TRACES` |
+| `--traces-since <duration>` | Read the traces of this period before now, such as `30m` or `2h`; not combined with `--traces-start` and `--traces-end` | `2h` | `INFRAHUB_TRACES_SINCE` |
+| `--traces-start <time>` | Start of an absolute window, in RFC 3339; given with `--traces-end` | unset | `INFRAHUB_TRACES_START` |
+| `--traces-end <time>` | End of an absolute window, in RFC 3339; given with `--traces-start` | unset | `INFRAHUB_TRACES_END` |
+| `--traces-min-duration <duration>` | Read only the traces that lasted longer than this duration | `1s` | `INFRAHUB_TRACES_MIN_DURATION` |
+| `--traces-max-size <n>` | Size limit of the traces, in megabytes of uncompressed JSON | `100` | `INFRAHUB_TRACES_MAX_SIZE` |
+| `--traces-tempo-url <url>` | Read the traces from this Tempo-compatible backend instead of the deployment's Tempo | unset | `INFRAHUB_TRACES_TEMPO_URL` |
+
+The `--traces-*` options require `--include-traces`. The two tokens of the traces collector have no flag, so they never appear on a command line. Set them as environment variables, or answer the prompt that asks for them in a terminal:
+
+- `INFRAHUB_TRACES_TEMPO_TOKEN`: token of the backend given with `--traces-tempo-url`, sent as a bearer token.
+- `INFRAHUB_TRACES_API_TOKEN`: Infrahub API token of a user with the `super_admin` permission, used only to read the trace sampling ratio.
 
 **Examples:**
 
@@ -348,6 +361,9 @@ infrahub-collect create --include-backup
 
 # Performance investigation with benchmark
 infrahub-collect create --benchmark
+
+# Slowness investigation with the traces of the last 30 minutes
+infrahub-collect create --include-traces --traces-since=30m
 ```
 
 **Output:**
@@ -368,6 +384,7 @@ A single archive named `support_bundle_<timestamp>.tar.gz` in the output directo
 | Container metrics | Resource usage via `docker compose stats` or `kubectl top` |
 | Backup (opt-in) | Backup produced by the standard backup behavior (`--include-backup`) |
 | Benchmark (opt-in) | OpsMill benchmark results (`--benchmark`) |
+| Traces (opt-in) | Traces of slow requests from Tempo, with personal data removed, and the trace sampling ratio (`--include-traces`) |
 
 ### Environment and utility commands
 

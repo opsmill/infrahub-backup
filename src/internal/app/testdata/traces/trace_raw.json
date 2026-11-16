@@ -1,0 +1,233 @@
+{
+  "trace": {
+    "resourceSpans": [
+      {
+        "resource": {
+          "attributes": [
+            {
+              "key": "host.name",
+              "value": {
+                "stringValue": "customer-host-secret"
+              }
+            },
+            {
+              "key": "service.instance.id",
+              "value": {
+                "stringValue": "f756440b-e3e8-49f1-9e3b-49ad1219fb43"
+              }
+            },
+            {
+              "key": "service.version",
+              "value": {
+                "stringValue": "1.12.0"
+              }
+            },
+            {
+              "key": "telemetry.sdk.language",
+              "value": {
+                "stringValue": "python"
+              }
+            },
+            {
+              "key": "telemetry.sdk.name",
+              "value": {
+                "stringValue": "opentelemetry"
+              }
+            },
+            {
+              "key": "telemetry.sdk.version",
+              "value": {
+                "stringValue": "1.45.2"
+              }
+            },
+            {
+              "key": "worker.id",
+              "value": {
+                "stringValue": "worker-7"
+              }
+            },
+            {
+              "key": "service.name",
+              "value": {
+                "stringValue": "infrahub-server"
+              }
+            }
+          ]
+        },
+        "scopeSpans": [
+          {
+            "scope": {
+              "name": "infrahub.test",
+              "version": "1.0"
+            },
+            "spans": [
+              {
+                "traceId": "D0Wb2YYWNrDd9MyyMVThIA==",
+                "spanId": "StQ+d9rXOVc=",
+                "name": "POST /graphql",
+                "kind": "SPAN_KIND_SERVER",
+                "startTimeUnixNano": "1793889065218777000",
+                "endTimeUnixNano": "1793889068218777000",
+                "attributes": [
+                  {
+                    "key": "http.target",
+                    "value": {
+                      "stringValue": "/graphql?token=abc"
+                    }
+                  },
+                  {
+                    "key": "http.user_agent",
+                    "value": {
+                      "stringValue": "curl/8.4.0"
+                    }
+                  },
+                  {
+                    "key": "net.peer.ip",
+                    "value": {
+                      "stringValue": "203.0.113.42"
+                    }
+                  },
+                  {
+                    "key": "http.route",
+                    "value": {
+                      "stringValue": "/graphql"
+                    }
+                  },
+                  {
+                    "key": "http.method",
+                    "value": {
+                      "stringValue": "POST"
+                    }
+                  },
+                  {
+                    "key": "http.url",
+                    "value": {
+                      "stringValue": "https://infrahub.customer.example/graphql?token=abc"
+                    }
+                  },
+                  {
+                    "key": "http.status_code",
+                    "value": {
+                      "intValue": "500"
+                    }
+                  }
+                ],
+                "status": {}
+              },
+              {
+                "traceId": "D0Wb2YYWNrDd9MyyMVThIA==",
+                "spanId": "AbE7ifrgkRE=",
+                "parentSpanId": "f2JAd8mCCgs=",
+                "name": "execute_db_query_with_metadata",
+                "kind": "SPAN_KIND_INTERNAL",
+                "startTimeUnixNano": "1793889065418777000",
+                "endTimeUnixNano": "1793889068018777000",
+                "attributes": [
+                  {
+                    "key": "query",
+                    "value": {
+                      "stringValue": "MATCH (n:Node {name: 'secret-device'}) RETURN n"
+                    }
+                  },
+                  {
+                    "key": "query_name",
+                    "value": {
+                      "stringValue": "NodeGet"
+                    }
+                  },
+                  {
+                    "key": "rows",
+                    "value": {
+                      "intValue": "42"
+                    }
+                  }
+                ],
+                "status": {}
+              },
+              {
+                "traceId": "D0Wb2YYWNrDd9MyyMVThIA==",
+                "spanId": "f2JAd8mCCgs=",
+                "parentSpanId": "StQ+d9rXOVc=",
+                "name": "execute_graphql",
+                "kind": "SPAN_KIND_INTERNAL",
+                "startTimeUnixNano": "1793889065318777000",
+                "endTimeUnixNano": "1793889068118777000",
+                "attributes": [
+                  {
+                    "key": "type",
+                    "value": {
+                      "stringValue": "query"
+                    }
+                  },
+                  {
+                    "key": "operation",
+                    "value": {
+                      "stringValue": "query"
+                    }
+                  },
+                  {
+                    "key": "name",
+                    "value": {
+                      "stringValue": "DeviceList"
+                    }
+                  },
+                  {
+                    "key": "branch",
+                    "value": {
+                      "stringValue": "main"
+                    }
+                  },
+                  {
+                    "key": "query_id",
+                    "value": {
+                      "stringValue": "q-123"
+                    }
+                  }
+                ],
+                "events": [
+                  {
+                    "timeUnixNano": "1793889185232208000",
+                    "name": "exception",
+                    "attributes": [
+                      {
+                        "key": "exception.type",
+                        "value": {
+                          "stringValue": "ValueError"
+                        }
+                      },
+                      {
+                        "key": "exception.message",
+                        "value": {
+                          "stringValue": "device secret-device not found for user alice@example.com"
+                        }
+                      },
+                      {
+                        "key": "exception.stacktrace",
+                        "value": {
+                          "stringValue": "ValueError: device secret-device not found for user alice@example.com\n"
+                        }
+                      },
+                      {
+                        "key": "exception.escaped",
+                        "value": {
+                          "stringValue": "False"
+                        }
+                      }
+                    ]
+                  }
+                ],
+                "status": {
+                  "message": "exception: device secret-device not found",
+                  "code": "STATUS_CODE_ERROR"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "metrics": {
+    "inspectedBytes": "32278"
+  }
+}

@@ -22,8 +22,8 @@ func TestNewBundleManifest_Fields(t *testing.T) {
 	before := time.Now().UTC()
 	manifest := newBundleManifest("20260703_101530", "kubernetes", 100000)
 
-	if manifest.ManifestVersion != 2026070200 {
-		t.Errorf("ManifestVersion = %d, want 2026070200", manifest.ManifestVersion)
+	if manifest.ManifestVersion != 2026110500 {
+		t.Errorf("ManifestVersion = %d, want 2026110500", manifest.ManifestVersion)
 	}
 	if manifest.CollectID != "20260703_101530" {
 		t.Errorf("CollectID = %q, want %q", manifest.CollectID, "20260703_101530")
@@ -84,8 +84,8 @@ func TestBundleManifest_JSONShape(t *testing.T) {
 		}
 	}
 
-	if version, ok := decoded["manifest_version"].(float64); !ok || int(version) != 2026070200 {
-		t.Errorf("manifest_version = %v, want 2026070200", decoded["manifest_version"])
+	if version, ok := decoded["manifest_version"].(float64); !ok || int(version) != 2026110500 {
+		t.Errorf("manifest_version = %v, want 2026110500", decoded["manifest_version"])
 	}
 	if id, ok := decoded["collect_id"].(string); !ok || !collectIDPattern.MatchString(id) {
 		t.Errorf("collect_id = %v, want match for %s", decoded["collect_id"], collectIDPattern)

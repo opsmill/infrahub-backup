@@ -172,6 +172,9 @@ jobs:
       - name: Reconcile Latest
         env:
           GH_TOKEN: ${{ secrets.GH_INFRAHUB_BOT_TOKEN }}
+          # This job has no checkout, so `gh release edit` cannot infer the
+          # repository from a git remote.
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
 
