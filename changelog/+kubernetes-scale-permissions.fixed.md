@@ -1,0 +1,1 @@
+The Kubernetes backup permissions now list `list` on `deployments` and `statefulsets` and `get` and `patch` on `deployments/scale` and `statefulsets/scale`. A Role that granted only `get` and `patch` on the workloads, as the documentation previously said, cannot stop and restart the Infrahub components, because `kubectl scale` writes to the `scale` resources.

@@ -76,12 +76,6 @@ func (f *fakeKubectl) scaleCalls() []string {
 	return calls
 }
 
-func newTestKubernetesBackend() *KubernetesBackend {
-	k := NewKubernetesBackend(&Configuration{}, NewCommandExecutor())
-	k.namespace = "infrahub"
-	return k
-}
-
 func assertScaleCalls(t *testing.T, got []string, want ...string) {
 	t.Helper()
 	if strings.Join(got, " ") != strings.Join(want, " ") {
@@ -187,7 +181,7 @@ func TestRecordReplicaCounts_FailsBeforeAnyChange(t *testing.T) {
 	k := newTestKubernetesBackend()
 	iops := &InfrahubOps{config: &Configuration{}, backend: k, executor: k.executor}
 
-	err := iops.recordReplicaCounts(appServices...)
+	err := iops.recordReplicaCounts(appServicesStoppedForBackup...)
 	if err == nil {
 		t.Fatal("recordReplicaCounts succeeded, want an error because a replica count cannot be read")
 	}

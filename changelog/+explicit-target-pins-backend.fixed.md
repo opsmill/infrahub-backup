@@ -1,0 +1,1 @@
+When `--k8s-namespace` or `--project` is set, the tools now act only on that deployment. Previously, if the Kubernetes namespace could not be checked, they went on to detect a Docker Compose project on the same host and could back up or restore that project instead.
