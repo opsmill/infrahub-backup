@@ -35,9 +35,14 @@ func main() {
 		Long:  "Cleanup operations for Prefect resources.",
 	}
 
+	var rewrite bool
 	flowRunsCmd := &cobra.Command{
-		Use:          "flow-runs [days_to_keep] [batch_size]",
-		Short:        "Delete completed/failed/cancelled flow runs older than the retention period",
+		Use:   "flow-runs [days_to_keep] [batch_size]",
+		Short: "Delete completed/failed/cancelled flow runs older than the retention period",
+		Long: "Delete completed/failed/cancelled flow runs older than the retention period.\n\n" +
+			"From Infrahub 1.13, the task manager deletes the runs older than its task history retention " +
+			"(INFRAHUB_TASK_MANAGER_RETENTION_TASK_HISTORY), so days_to_keep and batch_size are ignored: " +
+			"set the retention instead. --rewrite then returns the disk space of the deleted runs.",
 		Args:         cobra.RangeArgs(0, 2),
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -56,9 +61,16 @@ func main() {
 					return err
 				}
 			}
-			return iops.FlushFlowRuns(days, batch)
+			return iops.FlushFlowRuns(app.FlowRunsRequest{
+				DaysToKeep:     days,
+				BatchSize:      batch,
+				ArgumentsGiven: len(args) > 0,
+				Rewrite:        rewrite,
+			})
 		},
 	}
+	flowRunsCmd.Flags().BoolVar(&rewrite, "rewrite", false,
+		"After the deletes, rewrite the tables that are mostly free space to return it to the disk (Infrahub 1.13 or later)")
 
 	staleRunsCmd := &cobra.Command{
 		Use:          "stale-runs [days_to_keep] [batch_size]",

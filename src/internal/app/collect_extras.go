@@ -235,8 +235,7 @@ func commandErrorLine(output string) string {
 // ported from the Python collect_benchmark parser.
 var benchmarkResultRe = regexp.MustCompile(`(\w+(?: \w+)*): (\d+)(?: MB)? - Required: (\d+)(?: MB)? : (\w+)`)
 
-// ansiEscapeRe matches the ANSI SGR color sequences the benchmark entrypoint
-// wraps its result lines in.
+// ansiEscapeRe matches ANSI SGR color sequences in command output.
 var ansiEscapeRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
 // benchmarkMeasure is one parsed benchmark result; the field names mirror the
