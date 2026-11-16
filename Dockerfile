@@ -91,7 +91,7 @@ FROM alpine:3.23
 # the pin to the version `apk search -x <package>` reports for this Alpine release.
 #   - Java 21: the runtime neo4j:2025.10.1-enterprise ships (Temurin 21), here as a jlink runtime built from Alpine's OpenJDK (java-runtime stage)
 #   - PostgreSQL 18 client: pg_dump, pg_restore and psql for task-manager-db (postgres 18)
-ARG POSTGRESQL_CLIENT_VERSION=18.6-r0
+ARG POSTGRESQL_CLIENT_VERSION=18.7-r0
 
 RUN apk add --no-cache ca-certificates curl kubectl \
     "postgresql18-client=${POSTGRESQL_CLIENT_VERSION}"
