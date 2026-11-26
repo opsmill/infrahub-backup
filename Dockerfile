@@ -1,3 +1,9 @@
+# The Neo4j release the image takes neo4j-admin and cypher-shell from, as the `neo4j` image tags it
+# (a two-digit month: 2026.05.0, where the Neo4j Helm chart writes 2026.5.0). The external path
+# refuses tools older than the server (FR-006), so this must be at least the Neo4j version the
+# current Infrahub release deploys. CI compares the two (scripts/infrahub-neo4j-version.sh --check-dockerfile).
+ARG NEO4J_VERSION=2026.05.0
+
 # Build stage
 FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
 
@@ -32,7 +38,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
 # jar directory and the default configuration are taken. The Java runtime comes from Alpine in the
 # runtime stage. The `products` directory (server plugins) and `data`, `logs`, `run` are not needed
 # to run the tools and are left out.
-FROM neo4j:2025.10.1-enterprise AS neo4j-tools
+FROM neo4j:${NEO4J_VERSION}-enterprise AS neo4j-tools
 
 # Jars neo4j-admin and cypher-shell never load: the server's browser, the S3, Azure and GCS client SDKs
 # (the tool only writes backups to a local directory), Cypher planner and runtimes,
@@ -72,9 +78,9 @@ RUN cd /opt/neo4j/lib && rm -f \
 # modules loaded by reflection or service lookup. binutils provides the objcopy that --strip-debug runs.
 # No --compress: the image layer compresses an uncompressed lib/modules better than jlink does.
 FROM alpine:3.23 AS java-runtime
-ARG OPENJDK_VERSION=21.0.13.0.3_p1-r0
-RUN apk add --no-cache "openjdk21-jdk=${OPENJDK_VERSION}" "openjdk21-jmods=${OPENJDK_VERSION}" binutils && \
-    /usr/lib/jvm/java-21-openjdk/bin/jlink \
+ARG OPENJDK_VERSION=25.0.5.1_p2-r0
+RUN apk add --no-cache "openjdk25-jdk=${OPENJDK_VERSION}" "openjdk25-jmods=${OPENJDK_VERSION}" binutils && \
+    /usr/lib/jvm/java-25-openjdk/bin/jlink \
       --add-modules java.base,java.compiler,java.datatransfer,java.desktop,java.instrument,java.logging,java.management,java.naming,java.net.http,java.prefs,java.rmi,java.scripting,java.security.jgss,java.security.sasl,java.sql,java.transaction.xa,java.xml,jdk.attach,jdk.charsets,jdk.crypto.cryptoki,jdk.crypto.ec,jdk.httpserver,jdk.incubator.vector,jdk.jdi,jdk.jfr,jdk.management,jdk.management.jfr,jdk.naming.dns,jdk.net,jdk.security.auth,jdk.unsupported,jdk.zipfs \
       --strip-debug --no-man-pages --no-header-files \
       --output /opt/java
@@ -82,14 +88,14 @@ RUN apk add --no-cache "openjdk21-jdk=${OPENJDK_VERSION}" "openjdk21-jmods=${OPE
 # Runtime stage
 #
 # alpine:3.23 rather than 3.21: Alpine 3.21 and 3.22 do not package the PostgreSQL 18 client tools
-# (they stop at postgresql17-client). The Neo4j tools run on Alpine (musl) with Alpine's OpenJDK 21,
+# (they stop at postgresql17-client). The Neo4j tools run on Alpine (musl) with Alpine's OpenJDK 25,
 # so the base image stays Alpine (checked by scripts/check-image-tools.sh).
 FROM alpine:3.23
 
 # Every database tool version is pinned. Alpine removes a package revision from its mirrors when it
 # publishes the next one, so a stale pin fails the build loudly instead of drifting silently; bump
 # the pin to the version `apk search -x <package>` reports for this Alpine release.
-#   - Java 21: the runtime neo4j:2025.10.1-enterprise ships (Temurin 21), here as a jlink runtime built from Alpine's OpenJDK (java-runtime stage)
+#   - Java 25: the runtime the neo4j image ships (Temurin 25), here as a jlink runtime built from Alpine's OpenJDK (java-runtime stage)
 #   - PostgreSQL 18 client: pg_dump, pg_restore and psql for task-manager-db (postgres 18)
 ARG POSTGRESQL_CLIENT_VERSION=18.7-r0
 
@@ -109,7 +115,7 @@ COPY --from=neo4j-tools /var/lib/neo4j/bin/cypher-shell /var/lib/neo4j/bin/neo4j
 COPY --from=java-runtime /opt/java /opt/java
 COPY --from=neo4j-lib /opt/neo4j/lib /opt/neo4j/lib
 COPY --from=neo4j-tools /var/lib/neo4j/conf /opt/neo4j/conf
-COPY --from=neo4j-tools /var/lib/neo4j/LICENSE.txt /var/lib/neo4j/LICENSES.txt /var/lib/neo4j/NOTICE.txt /opt/neo4j/
+COPY --from=neo4j-tools /var/lib/neo4j/LICENSE.txt /var/lib/neo4j/ThirdPartyLicenses.txt /opt/neo4j/
 
 COPY --from=builder /infrahub-backup /usr/local/bin/
 

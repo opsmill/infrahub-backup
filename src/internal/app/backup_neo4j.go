@@ -1250,7 +1250,7 @@ type neo4jCaptureRequest struct {
 // `neo4j-admin.conf`, so tightening one is not enough. The vendor image ships
 // them world-writable — `neo4j:5-enterprise` has `/var/lib/neo4j/conf/neo4j.conf`
 // at 0777 — and the infrahub-backup image the transient workload runs copies
-// that conf directory from `neo4j:2025.10.1-enterprise` unchanged, so
+// that conf directory from the `neo4j` enterprise image unchanged, so
 // `/opt/neo4j/conf/neo4j.conf` is 0777 there too. Passing the flag aborts the
 // capture *before the database is contacted*, reporting a file permission the
 // operator never set, in an image the operator did not build.

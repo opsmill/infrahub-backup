@@ -1,0 +1,1 @@
+The `infrahub-backup` image now carries the Neo4j tools at version 2026.05.0, so you can back up and restore an external Neo4j 2026.05 database, the version that the current Infrahub Helm chart deploys. Release 2.6.0 carried the tools at 2025.10.1 and refused that server with the error "the database utility (2025.10.1) is older than the server (2026.05.0)".

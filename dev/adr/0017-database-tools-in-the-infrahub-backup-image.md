@@ -40,7 +40,7 @@ and deployments whose databases are all internal still pull nothing.
 - Running the tool as a pod in the namespace needs no permission to create workloads for the
   external path, because nothing is created.
 - The image grows by a Java runtime and the Neo4j tool libraries, from 34 MiB to 156 MiB
-  compressed (arm64, measured 2026-10-13). The growth applies to every user of the image,
+  compressed (arm64, measured 2026-10-13; 174 MiB with the 2026.05.0 tools, measured 2026-11-26). The growth applies to every user of the image,
   including users whose databases are all internal. To keep it at that size, the Java runtime is
   built with `jlink` from the modules the tools use, and the Neo4j jars that the tools never load
   are removed, including the S3, Azure and Google Cloud client libraries, because the tool only
@@ -53,6 +53,13 @@ and deployments whose databases are all internal still pull nothing.
 - A Neo4j server upgrade that needs a newer `neo4j-admin` now needs an `infrahub-backup` release,
   where before it needed only a new pinned vendor tag. The version gate (FR-006) still refuses a
   tool older than the server.
+  This happened with release 2.6.0: its tools were at 2025.10.1 while the Infrahub chart deployed
+  Neo4j 2026.5.0, and the end-to-end tests ran an older server, so they did not report it
+  (INBOX-487). Since then the `Dockerfile` names the Neo4j release once (`ARG NEO4J_VERSION`,
+  2026.05.0 at the time of writing), the end-to-end tests start their own Neo4j servers at the
+  version the Infrahub chart deploys (`scripts/infrahub-neo4j-version.sh`), and CI fails when the
+  tools are older than that version. The Java runtime follows the major version the `neo4j` image
+  ships (Java 25 for 2026.05.0, Java 21 for 2025.10.1).
 - A development build has no published image of its own version, so it has to be given the image
   explicitly. The end-to-end tests have to build the image and load it into the test cluster.
 - Two code paths now run the tools: in a temporary workload, and in the tool's own process. Both

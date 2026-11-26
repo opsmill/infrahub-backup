@@ -105,6 +105,23 @@ Two further hazards when running the pipeline here:
 
 Whenever Go modules change (any modification to `go.mod` or `go.sum` — adding, removing, or updating dependencies), ALWAYS run `scripts/update-vendor-hash.sh` to update the `vendorHash` in `flake.nix`. Do not compute or edit the vendor hash manually.
 
+### Neo4j Tool Version
+
+The image takes `neo4j-admin` and `cypher-shell` from the `neo4j` image named once in the
+`Dockerfile` (`ARG NEO4J_VERSION`). The external path refuses tools older than the server, so
+this version must be at least the Neo4j version the current Infrahub chart deploys.
+
+- The end-to-end tests never name a Neo4j server version. The servers they start themselves (the
+  external server in `ci.yml`, the Neo4j cluster in `tests/e2e/conftest.py`) take it from
+  `scripts/infrahub-neo4j-version.sh`, which reads the `neo4j` dependency of the Infrahub chart.
+  Do not replace it with an older fixed version to make a test pass: raise `NEO4J_VERSION`.
+- `scripts/infrahub-neo4j-version.sh --check-dockerfile` fails when the tools are older than that
+  version. CI runs it.
+- When you raise `NEO4J_VERSION`, check the Java major version the `neo4j` image ships
+  (`java -version` in it) against the `java-runtime` stage, the files the runtime stage copies,
+  and the jar list of the `neo4j-lib` stage with a real backup, restore and `cypher-shell` run
+  (ADR 0017).
+
 ## Architecture
 
 The codebase follows a command-pattern architecture using Cobra for CLI structure, with three separate binary entry points sharing common internal logic:
