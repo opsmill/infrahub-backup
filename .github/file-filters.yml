@@ -4,6 +4,11 @@ go: &go
   - "go.mod"
   - "go.sum"
   - "Makefile"
+  # The image carries the database tools that the e2e tests run, and the workflow and the
+  # scripts choose the server versions they run against.
+  - "Dockerfile"
+  - "scripts/*.sh"
+  - ".github/workflows/ci.yml"
 
 go_all:
   - *go

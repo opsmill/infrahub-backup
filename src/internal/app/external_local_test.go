@@ -231,7 +231,7 @@ func TestLocalWorkloadEnvironmentDropsWhatClientsReadOnTheirOwn(t *testing.T) {
 	t.Setenv("NEO4J_HOME", "/opt/neo4j")
 	t.Setenv("NEO4J_CONF", "/opt/neo4j/conf")
 	t.Setenv("NEO4J_LOGS", "/opt/neo4j/logs")
-	t.Setenv("JAVA_HOME", "/usr/lib/jvm/java-21-openjdk")
+	t.Setenv("JAVA_HOME", "/opt/java")
 
 	w := &localWorkload{
 		scratch:     "/tmp/xdb-1",
@@ -256,7 +256,7 @@ func TestLocalWorkloadEnvironmentDropsWhatClientsReadOnTheirOwn(t *testing.T) {
 		"NEO4J_HOME": "/opt/neo4j",
 		"NEO4J_CONF": "/opt/neo4j/conf",
 		"NEO4J_LOGS": "/opt/neo4j/logs",
-		"JAVA_HOME":  "/usr/lib/jvm/java-21-openjdk",
+		"JAVA_HOME":  "/opt/java",
 		"PGUSER":     "prefect-user",
 		"PGPASSWORD": "pg-s3cr3t-value",
 		"PGSSLMODE":  "require",

@@ -196,6 +196,11 @@ jobs:
       - name: Check the image carries working database tools
         run: SKIP_BUILD=1 ./scripts/check-image-tools.sh "infrahub-backup:e2e-${GITHUB_SHA}"
 
+      # infrahub-backup refuses to back up a server that is newer than its tools. This fails
+      # with a clear message when Infrahub moves to a Neo4j newer than the tools in the image.
+      - name: Check the Neo4j tools are not older than the Neo4j that Infrahub deploys
+        run: ./scripts/infrahub-neo4j-version.sh --check-dockerfile
+
       # The external-database suites (tasks.md T072) need Neo4j Enterprise, PostgreSQL and an
       # object store outside the cluster under test. They run as containers on one Docker
       # network, so Neo4j can fetch a restore's seed from MinIO by name. Pods in the vcluster
@@ -211,6 +216,10 @@ jobs:
           # The tool verifies certificates by default (FR-029) and always encrypts PostgreSQL,
           # so both servers present one self-signed certificate and the suites opt out of
           # verifying it. Neo4j keeps plain Bolt available for Infrahub's own connections.
+          # The external Neo4j server runs the version that the Infrahub chart deploys, never
+          # an older one: this is the server version a customer has.
+          neo4j_version="$(./scripts/infrahub-neo4j-version.sh --image-tag)"
+          echo "External Neo4j server: neo4j:${neo4j_version}-enterprise"
           certs="${RUNNER_TEMP}/ext-db-certs"
           rm -rf "${certs}" && mkdir -p "${certs}/bolt/trusted" "${certs}/bolt/revoked"
           openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=ext-db" \
@@ -232,7 +241,7 @@ jobs:
             -e NEO4J_server_backup_listen__address=0.0.0.0:6362 \
             -e AWS_REGION=us-east-1 -e AWS_ACCESS_KEY_ID=extaccess -e AWS_SECRET_ACCESS_KEY=extsecretkey \
             -e AWS_ENDPOINT_URL_S3=http://ext-minio:9000 \
-            neo4j:2025.10.1-enterprise
+            "neo4j:${neo4j_version}-enterprise"
           docker run -d --name ext-postgres --network ext-db -p 15432:5432 \
             -v "${certs}:/certs:ro" \
             -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=prefect -e POSTGRES_DB=prefect \

@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import os
 import subprocess
 import time
@@ -1108,10 +1109,24 @@ async def transient_objects(kubeconfig_path: str, namespace: str) -> list[str]:
 
 NEO4J_CLUSTER_ENV_VAR = "INFRAHUB_TESTING_NEO4J_CLUSTER"
 
-# The Neo4j version of the cluster. It is the version the infrahub-backup image carries
-# its Neo4j tools from (`FROM neo4j:...` in the Dockerfile): the external path refuses
-# tools older than the server (FR-006), so a newer cluster would test that refusal instead.
-NEO4J_CLUSTER_CHART_VERSION = "2025.10.1"
+
+@functools.cache
+def neo4j_cluster_chart_version() -> str:
+    """The Neo4j Helm chart version of the cluster: the one the Infrahub chart deploys.
+
+    The cluster runs the Neo4j version that Infrahub ships, never an older one, so that the
+    tools in the infrahub-backup image are tested against the server a customer has. The
+    external path refuses tools older than the server (FR-006): when Infrahub moves to a
+    newer Neo4j than the image carries, these cases fail until the Dockerfile follows.
+    `scripts/infrahub-neo4j-version.sh` is the one place that reads the version.
+    """
+    script = PROJECT_ROOT / "scripts" / "infrahub-neo4j-version.sh"
+    result = subprocess.run([str(script)], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"could not read the Neo4j version Infrahub deploys: {result.stderr.strip()}")
+    return result.stdout.strip()
+
+
 NEO4J_CLUSTER_SIZE = 3
 # `neo4j.name` in every release: the members discover each other by it, and the headless
 # service is named after it.
@@ -1357,7 +1372,7 @@ def install_neo4j_cluster(
                         "--repo",
                         "https://helm.neo4j.com/neo4j",
                         "--version",
-                        NEO4J_CLUSTER_CHART_VERSION,
+                        neo4j_cluster_chart_version(),
                         "-n",
                         namespace,
                         "-f",
@@ -1382,7 +1397,7 @@ def install_neo4j_cluster(
             "--repo",
             "https://helm.neo4j.com/neo4j",
             "--version",
-            NEO4J_CLUSTER_CHART_VERSION,
+            neo4j_cluster_chart_version(),
             "-n",
             namespace,
             "--set",
