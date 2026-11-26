@@ -13,6 +13,12 @@ Releases up to and including v2.3.0 predate this file; their notes are on the [G
 
 <!-- towncrier release notes start -->
 
+## [2.6.1](https://github.com/opsmill/infrahub-backup/tree/v2.6.1) - 2026-11-26
+
+### Fixed
+
+- The `infrahub-backup` image now carries the Neo4j tools at version 2026.05.0, so you can back up and restore an external Neo4j 2026.05 database, the version that the current Infrahub Helm chart deploys. Release 2.6.0 carried the tools at 2025.10.1 and refused that server with the error "the database utility (2025.10.1) is older than the server (2026.05.0)".
+
 ## [2.6.0](https://github.com/opsmill/infrahub-backup/tree/v2.6.0) - 2026-11-16
 
 ### Added
